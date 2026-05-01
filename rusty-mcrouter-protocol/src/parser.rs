@@ -1,6 +1,22 @@
-use crate::error::ProtocolError;
+use bytes::Bytes;
+
+use crate::{error::ProtocolError, request::Request};
 
 const MAX_KEY_LEN: usize = 250;
+
+fn parse_get(rest: Bytes) -> Result<Request, ProtocolError> {
+    let keys = rest
+        .split(|&b| b == b' ')
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| validate_key(seg).map(|()| rest.slice_ref(seg)))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if keys.is_empty() {
+        return Err(ProtocolError::Malformed("get requires at least one key"));
+    }
+
+    Ok(Request::Get { keys })
+}
 
 fn validate_key(key: &[u8]) -> Result<(), ProtocolError> {
     if key.is_empty() {
