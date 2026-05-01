@@ -1,6 +1,22 @@
-use crate::error::ProtocolError;
+use bytes::Bytes;
+
+use crate::{error::ProtocolError, request::Request};
 
 const MAX_KEY_LEN: usize = 250;
+
+fn parse_get(rest: Bytes) -> Result<Request, ProtocolError> {
+    let keys = rest
+        .split(|&b| b == b' ')
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| validate_key(seg).map(|()| rest.slice_ref(seg)))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if keys.is_empty() {
+        return Err(ProtocolError::Malformed("get requires at least one key"));
+    }
+
+    Ok(Request::Get { keys })
+}
 
 fn validate_key(key: &[u8]) -> Result<(), ProtocolError> {
     if key.is_empty() {
@@ -24,6 +40,72 @@ fn validate_key(key: &[u8]) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_get_basic() {
+        let single = parse_get(Bytes::from_static(b"foo")).unwrap();
+        assert_eq!(
+            single,
+            Request::Get {
+                keys: vec![Bytes::from_static(b"foo")]
+            }
+        );
+
+        let Request::Get { keys } = parse_get(Bytes::from_static(b"foo bar baz")).unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                Bytes::from_static(b"foo"),
+                Bytes::from_static(b"bar"),
+                Bytes::from_static(b"baz"),
+            ]
+        );
+    }
+    #[test]
+    fn parse_get_whitespace() {
+        let cases: &[&[u8]] = &[
+            b"foo bar",
+            b"foo  bar",
+            b"  foo bar",
+            b"foo bar  ",
+            b"  foo   bar  ",
+        ];
+
+        cases.iter().for_each(|input| {
+            let Request::Get { keys } = parse_get(Bytes::copy_from_slice(input)).unwrap();
+            assert_eq!(keys.len(), 2);
+            assert_eq!(keys[0].as_ref(), b"foo");
+            assert_eq!(keys[1].as_ref(), b"bar");
+        });
+    }
+    #[test]
+    fn parse_get_rejects_empty() {
+        assert!(matches!(
+            parse_get(Bytes::new()),
+            Err(ProtocolError::Malformed(_))
+        ));
+
+        assert!(matches!(
+            parse_get(Bytes::from_static(b"   ")),
+            Err(ProtocolError::Malformed(_))
+        ));
+    }
+    #[test]
+    fn parse_get_rejects_invalid_keys() {
+        // validate_key errors should bubble through the iterator's collect.
+        assert!(matches!(
+            parse_get(Bytes::from_static(b"foo \x01bar")),
+            Err(ProtocolError::InvalidKey)
+        ));
+
+        let mut huge = b"foo ".to_vec();
+        huge.extend(std::iter::repeat(b'x').take(251));
+        assert!(matches!(
+            parse_get(Bytes::from(huge)),
+            Err(ProtocolError::KeyTooLong(251))
+        ));
+    }
+
     #[test]
     fn validate_key_basic_ascii() {
         assert!(validate_key(b"foo").is_ok());
