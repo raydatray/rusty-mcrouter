@@ -1,0 +1,7 @@
+[workspace]
+members = ["rusty-mcrouter", "rusty-mcrouter-core", "rusty-mcrouter-net", "rusty-mcrouter-protocol"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
