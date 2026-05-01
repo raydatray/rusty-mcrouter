@@ -4,6 +4,21 @@ use crate::{error::ProtocolError, request::Request};
 
 const MAX_KEY_LEN: usize = 250;
 
+fn parse_command(line: Bytes) -> Result<Request, ProtocolError> {
+    let space = line
+        .iter()
+        .position(|&b| b == b' ')
+        .ok_or(ProtocolError::Malformed("missing arguments"))?;
+
+    let cmd = &line[..space];
+    let rest = line.slice(space + 1..);
+
+    match cmd {
+        b"get" => parse_get(rest),
+        _ => Err(ProtocolError::Malformed("unknown command")),
+    }
+}
+
 fn parse_get(rest: Bytes) -> Result<Request, ProtocolError> {
     let keys = rest
         .split(|&b| b == b' ')
@@ -40,6 +55,72 @@ fn validate_key(key: &[u8]) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_command_get_single_key() {
+        let req = parse_command(Bytes::from_static(b"get foo")).unwrap();
+        assert_eq!(
+            req,
+            Request::Get {
+                keys: vec![Bytes::from_static(b"foo")]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_command_get_multiple_keys() {
+        let Request::Get { keys } = parse_command(Bytes::from_static(b"get foo bar baz")).unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                Bytes::from_static(b"foo"),
+                Bytes::from_static(b"bar"),
+                Bytes::from_static(b"baz"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_command_rejects_missing_space() {
+        assert!(matches!(
+            parse_command(Bytes::from_static(b"get")),
+            Err(ProtocolError::Malformed("missing arguments"))
+        ));
+
+        assert!(matches!(
+            parse_command(Bytes::new()),
+            Err(ProtocolError::Malformed("missing arguments"))
+        ));
+    }
+
+    #[test]
+    fn parse_command_rejects_unknown_command() {
+        let cases: &[&[u8]] = &[
+            b"set foo",
+            b"GET foo",
+            b" foo",
+        ];
+
+        cases.iter().for_each(|input| {
+            assert!(matches!(
+                parse_command(Bytes::copy_from_slice(input)),
+                Err(ProtocolError::Malformed("unknown command"))
+            ));
+        });
+    }
+
+    #[test]
+    fn parse_command_get_propagates_parse_get_errors() {
+        assert!(matches!(
+            parse_command(Bytes::from_static(b"get ")),
+            Err(ProtocolError::Malformed("get requires at least one key"))
+        ));
+
+        assert!(matches!(
+            parse_command(Bytes::from_static(b"get \x01bad")),
+            Err(ProtocolError::InvalidKey)
+        ));
+    }
 
     #[test]
     fn parse_get_basic() {
