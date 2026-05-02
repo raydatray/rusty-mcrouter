@@ -1,8 +1,40 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::{error::ProtocolError, request::Request};
 
 const MAX_KEY_LEN: usize = 250;
+
+pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolError> {
+    let eol_idx = match buf.iter().position(|&b| b == b'\n') {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+
+    let mut line = buf.split_to(eol_idx + 1).freeze();
+
+    if line.ends_with(b"\r\n") {
+        line.truncate(line.len() - 2);
+    } else {
+        line.truncate(line.len() - 1);
+    }
+
+    parse_command(line).map(Some)
+}
+
+fn parse_command(line: Bytes) -> Result<Request, ProtocolError> {
+    let space = line
+        .iter()
+        .position(|&b| b == b' ')
+        .ok_or(ProtocolError::Malformed("missing arguments"))?;
+
+    let cmd = &line[..space];
+    let rest = line.slice(space + 1..);
+
+    match cmd {
+        b"get" => parse_get(rest),
+        _ => Err(ProtocolError::Malformed("unknown command")),
+    }
+}
 
 fn parse_get(rest: Bytes) -> Result<Request, ProtocolError> {
     let keys = rest
@@ -40,6 +72,140 @@ fn validate_key(key: &[u8]) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_request_returns_none_when_no_newline() {
+        let mut empty = BytesMut::new();
+        assert!(matches!(parse_request(&mut empty), Ok(None)));
+        assert!(empty.is_empty());
+
+        let mut partial = BytesMut::from(&b"get fo"[..]);
+        assert!(matches!(parse_request(&mut partial), Ok(None)));
+        assert_eq!(partial.as_ref(), b"get fo");
+    }
+
+    #[test]
+    fn parse_request_strips_lf_and_crlf() {
+        let cases: &[&[u8]] = &[b"get foo\n", b"get foo\r\n"];
+
+        cases.iter().for_each(|input| {
+            let mut buf = BytesMut::from(*input);
+            let req = parse_request(&mut buf).unwrap().unwrap();
+            assert_eq!(
+                req,
+                Request::Get {
+                    keys: vec![Bytes::from_static(b"foo")]
+                }
+            );
+            assert!(buf.is_empty());
+        });
+    }
+
+    #[test]
+    fn parse_request_consumes_one_frame_at_a_time() {
+        let mut buf = BytesMut::from(&b"get foo\nget bar\n"[..]);
+
+        let first = parse_request(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            first,
+            Request::Get {
+                keys: vec![Bytes::from_static(b"foo")]
+            }
+        );
+        assert_eq!(buf.as_ref(), b"get bar\n");
+
+        let second = parse_request(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            second,
+            Request::Get {
+                keys: vec![Bytes::from_static(b"bar")]
+            }
+        );
+        assert!(buf.is_empty());
+
+        assert!(matches!(parse_request(&mut buf), Ok(None)));
+    }
+
+    #[test]
+    fn parse_request_propagates_errors_and_consumes_malformed_lines() {
+        let mut unknown = BytesMut::from(&b"set foo\n"[..]);
+        assert!(matches!(
+            parse_request(&mut unknown),
+            Err(ProtocolError::Malformed("unknown command"))
+        ));
+        assert!(unknown.is_empty());
+
+        for terminator in [&b"\n"[..], &b"\r\n"[..]] {
+            let mut buf = BytesMut::from(terminator);
+            assert!(matches!(
+                parse_request(&mut buf),
+                Err(ProtocolError::Malformed("missing arguments"))
+            ));
+            assert!(buf.is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_command_get_single_key() {
+        let req = parse_command(Bytes::from_static(b"get foo")).unwrap();
+        assert_eq!(
+            req,
+            Request::Get {
+                keys: vec![Bytes::from_static(b"foo")]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_command_get_multiple_keys() {
+        let Request::Get { keys } = parse_command(Bytes::from_static(b"get foo bar baz")).unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                Bytes::from_static(b"foo"),
+                Bytes::from_static(b"bar"),
+                Bytes::from_static(b"baz"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_command_rejects_missing_space() {
+        assert!(matches!(
+            parse_command(Bytes::from_static(b"get")),
+            Err(ProtocolError::Malformed("missing arguments"))
+        ));
+
+        assert!(matches!(
+            parse_command(Bytes::new()),
+            Err(ProtocolError::Malformed("missing arguments"))
+        ));
+    }
+
+    #[test]
+    fn parse_command_rejects_unknown_command() {
+        let cases: &[&[u8]] = &[b"set foo", b"GET foo", b" foo"];
+
+        cases.iter().for_each(|input| {
+            assert!(matches!(
+                parse_command(Bytes::copy_from_slice(input)),
+                Err(ProtocolError::Malformed("unknown command"))
+            ));
+        });
+    }
+
+    #[test]
+    fn parse_command_get_propagates_parse_get_errors() {
+        assert!(matches!(
+            parse_command(Bytes::from_static(b"get ")),
+            Err(ProtocolError::Malformed("get requires at least one key"))
+        ));
+
+        assert!(matches!(
+            parse_command(Bytes::from_static(b"get \x01bad")),
+            Err(ProtocolError::InvalidKey)
+        ));
+    }
 
     #[test]
     fn parse_get_basic() {
