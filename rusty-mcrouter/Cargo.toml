@@ -5,3 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+rusty-mcrouter-core = { path = "../rusty-mcrouter-core" }
+rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
+rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
