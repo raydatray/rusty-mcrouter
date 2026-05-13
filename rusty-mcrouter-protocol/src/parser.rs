@@ -316,7 +316,10 @@ mod tests {
 
     #[test]
     fn parse_command_get_multiple_keys() {
-        let Request::Get { keys } = parse_command(Bytes::from_static(b"get foo bar baz")).unwrap();
+        let Request::Get { keys } = parse_command(Bytes::from_static(b"get foo bar baz")).unwrap()
+        else {
+            panic!("expected Request::Get");
+        };
         assert_eq!(
             keys,
             vec![
@@ -375,7 +378,9 @@ mod tests {
             }
         );
 
-        let Request::Get { keys } = parse_get(Bytes::from_static(b"foo bar baz")).unwrap();
+        let Request::Get { keys } = parse_get(Bytes::from_static(b"foo bar baz")).unwrap() else {
+            panic!("expected Request::Get");
+        };
         assert_eq!(
             keys,
             vec![
@@ -396,7 +401,9 @@ mod tests {
         ];
 
         cases.iter().for_each(|input| {
-            let Request::Get { keys } = parse_get(Bytes::copy_from_slice(input)).unwrap();
+            let Request::Get { keys } = parse_get(Bytes::copy_from_slice(input)).unwrap() else {
+                panic!("expected Request::Get");
+            };
             assert_eq!(keys.len(), 2);
             assert_eq!(keys[0].as_ref(), b"foo");
             assert_eq!(keys[1].as_ref(), b"bar");

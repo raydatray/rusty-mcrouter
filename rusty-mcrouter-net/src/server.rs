@@ -85,7 +85,9 @@ mod tests {
     }
 
     async fn echo_handler(req: Request) -> Reply {
-        let Request::Get { keys } = req;
+        let Request::Get { keys } = req else {
+            panic!("echo_handler only handles Request::Get");
+        };
         Reply::Get {
             hits: keys
                 .into_iter()
