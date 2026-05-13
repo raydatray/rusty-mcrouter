@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use rusty_mcrouter_core::{DestinationRoute, Route};
 use rusty_mcrouter_net::{Client, Server};
 use rusty_mcrouter_protocol::reply::Reply;
@@ -28,12 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve(move |req| {
             let route = Arc::clone(&route);
             async move {
-                // v0: backend errors collapse to an empty reply (silent miss).
-                // Add Reply::Error variants and propagate properly later.
-                route
-                    .route(req)
-                    .await
-                    .unwrap_or_else(|_| Reply::Get { hits: vec![] })
+                route.route(req).await.unwrap_or_else(|_| {
+                    Reply::ServerError(Bytes::from_static(b"backend unavailable"))
+                })
             }
         })
         .await?;

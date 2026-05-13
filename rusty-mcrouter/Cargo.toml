@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bytes = "1.11.1"
 rusty-mcrouter-core = { path = "../rusty-mcrouter-core" }
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
