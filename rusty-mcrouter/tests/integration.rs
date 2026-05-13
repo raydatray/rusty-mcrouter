@@ -76,4 +76,20 @@ async fn end_to_end_get_round_trip_against_real_memcached() {
     app.write_all(b"get foo nonexistent\r\n").await.unwrap();
     let n = app.read(&mut buf).await.unwrap();
     assert_eq!(&buf[..n], b"VALUE foo 0 3\r\nbar\r\nEND\r\n");
+
+    app.write_all(b"set newkey 7 0 5\r\nhello\r\n").await.unwrap();
+    let n = app.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"STORED\r\n");
+
+    app.write_all(b"get newkey\r\n").await.unwrap();
+    let n = app.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"VALUE newkey 7 5\r\nhello\r\nEND\r\n");
+
+    app.write_all(b"set foo 0 0 7\r\nupdated\r\n").await.unwrap();
+    let n = app.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"STORED\r\n");
+
+    app.write_all(b"get foo\r\n").await.unwrap();
+    let n = app.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"VALUE foo 0 7\r\nupdated\r\nEND\r\n");
 }
