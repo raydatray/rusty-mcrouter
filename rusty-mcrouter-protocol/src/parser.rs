@@ -95,8 +95,13 @@ fn parse_set_request(
 ) -> Result<Option<Request>, ProtocolError> {
     // Header parse is pure over a slice; the wrapper handles buf mutation
     // so we keep partial-frame reads idempotent.
-    let (key, flags, exptime, bytes_count) = match parse_set_header(&buf[..line_text_end]) {
-        Ok(p) => p,
+    let SetHeader {
+        key,
+        flags,
+        exptime,
+        bytes_count,
+    } = match parse_set_header(&buf[..line_text_end]) {
+        Ok(h) => h,
         Err(e) => {
             let _ = buf.split_to(eol_idx + 1);
             return Err(e);
@@ -132,7 +137,14 @@ fn parse_set_request(
     }))
 }
 
-fn parse_set_header(header: &[u8]) -> Result<(Bytes, u32, i32, usize), ProtocolError> {
+struct SetHeader {
+    key: Bytes,
+    flags: u32,
+    exptime: i32,
+    bytes_count: usize,
+}
+
+fn parse_set_header(header: &[u8]) -> Result<SetHeader, ProtocolError> {
     let after_cmd = header
         .strip_prefix(b"set ")
         .ok_or(ProtocolError::Malformed("missing arguments"))?;
@@ -160,11 +172,12 @@ fn parse_set_header(header: &[u8]) -> Result<(Bytes, u32, i32, usize), ProtocolE
     }
 
     validate_key(key)?;
-    let flags = parse_u32(flags_bytes)?;
-    let exptime = parse_i32(exptime_bytes)?;
-    let bytes_count = parse_usize(bytes_bytes)?;
-
-    Ok((Bytes::copy_from_slice(key), flags, exptime, bytes_count))
+    Ok(SetHeader {
+        key: Bytes::copy_from_slice(key),
+        flags: parse_u32(flags_bytes)?,
+        exptime: parse_i32(exptime_bytes)?,
+        bytes_count: parse_usize(bytes_bytes)?,
+    })
 }
 
 pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
