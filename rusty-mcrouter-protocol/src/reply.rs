@@ -12,6 +12,16 @@ pub struct Value {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Reply {
     Get { hits: Vec<Value> },
+    Stored,
+    NotStored,
+    Exists,
+    NotFound,
+    // ERROR / CLIENT_ERROR / SERVER_ERROR are modeled as first-class replies
+    // (not parser errors) so routes can propagate backend failures
+    // semantically instead of dropping the connection on every hiccup.
+    Error,
+    ClientError(Bytes),
+    ServerError(Bytes),
 }
 
 impl Reply {
@@ -30,6 +40,21 @@ impl Reply {
                     out.put_slice(b"\r\n");
                 });
                 out.put_slice(b"END\r\n");
+            }
+            Reply::Stored => out.put_slice(b"STORED\r\n"),
+            Reply::NotStored => out.put_slice(b"NOT_STORED\r\n"),
+            Reply::Exists => out.put_slice(b"EXISTS\r\n"),
+            Reply::NotFound => out.put_slice(b"NOT_FOUND\r\n"),
+            Reply::Error => out.put_slice(b"ERROR\r\n"),
+            Reply::ClientError(msg) => {
+                out.put_slice(b"CLIENT_ERROR ");
+                out.put_slice(msg);
+                out.put_slice(b"\r\n");
+            }
+            Reply::ServerError(msg) => {
+                out.put_slice(b"SERVER_ERROR ");
+                out.put_slice(msg);
+                out.put_slice(b"\r\n");
             }
         }
     }
@@ -139,6 +164,45 @@ mod tests {
         }
         .serialize_into(&mut out);
         assert_eq!(out.as_ref(), b"prefix:VALUE k 0 1\r\nv\r\nEND\r\n");
+    }
+
+    #[test]
+    fn storage_acks_serialize_to_status_line() {
+        let cases: &[(Reply, &[u8])] = &[
+            (Reply::Stored, b"STORED\r\n"),
+            (Reply::NotStored, b"NOT_STORED\r\n"),
+            (Reply::Exists, b"EXISTS\r\n"),
+            (Reply::NotFound, b"NOT_FOUND\r\n"),
+        ];
+        cases.iter().for_each(|(reply, expected)| {
+            assert_eq!(serialize(reply).as_ref(), *expected, "reply={reply:?}");
+        });
+    }
+
+    #[test]
+    fn bare_error_serializes_to_error_line() {
+        assert_eq!(serialize(&Reply::Error).as_ref(), b"ERROR\r\n");
+    }
+
+    #[test]
+    fn client_error_includes_message() {
+        let reply = Reply::ClientError(Bytes::from_static(b"bad command line format"));
+        assert_eq!(
+            serialize(&reply).as_ref(),
+            b"CLIENT_ERROR bad command line format\r\n"
+        );
+    }
+
+    #[test]
+    fn server_error_includes_message() {
+        let reply = Reply::ServerError(Bytes::from_static(b"out of memory"));
+        assert_eq!(serialize(&reply).as_ref(), b"SERVER_ERROR out of memory\r\n");
+    }
+
+    #[test]
+    fn error_messages_with_empty_body_still_emit_separator_space() {
+        let reply = Reply::ClientError(Bytes::from_static(b""));
+        assert_eq!(serialize(&reply).as_ref(), b"CLIENT_ERROR \r\n");
     }
 
 }

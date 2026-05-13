@@ -468,7 +468,9 @@ mod tests {
     fn parse_reply_multiple_hits_with_distinct_flags() {
         let (result, buf) =
             pr(b"VALUE k1 0 1\r\na\r\nVALUE k2 5 2\r\nbc\r\nVALUE k3 99 4\r\nzzzz\r\nEND\r\n");
-        let Reply::Get { hits } = result.unwrap().unwrap();
+        let Reply::Get { hits } = result.unwrap().unwrap() else {
+            panic!("expected Reply::Get");
+        };
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].key.as_ref(), b"k1");
         assert_eq!(hits[0].flags, 0);
@@ -542,7 +544,9 @@ mod tests {
     fn parse_reply_accepts_lf_only_line_terminator() {
         // Match parse_request's lenient behavior: accept LF or CRLF terminators.
         let (result, buf) = pr(b"VALUE foo 0 3\nbar\nEND\n");
-        let Reply::Get { hits } = result.unwrap().unwrap();
+        let Reply::Get { hits } = result.unwrap().unwrap() else {
+            panic!("expected Reply::Get");
+        };
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].key.as_ref(), b"foo");
         assert_eq!(hits[0].data.as_ref(), b"bar");
@@ -563,7 +567,9 @@ mod tests {
         wire.extend_from_slice(b"\r\nEND\r\n");
 
         let mut buf = wire;
-        let Reply::Get { hits } = parse_reply(&mut buf).unwrap().unwrap();
+        let Reply::Get { hits } = parse_reply(&mut buf).unwrap().unwrap() else {
+            panic!("expected Reply::Get");
+        };
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].data.as_ref(), payload);
         assert!(buf.is_empty());

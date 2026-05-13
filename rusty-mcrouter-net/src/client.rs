@@ -97,7 +97,9 @@ mod tests {
         let addr = mock_backend(b"VALUE foo 0 3\r\nbar\r\nEND\r\n").await;
         let mut client = Client::connect(addr).await.unwrap();
         let reply = client.send(&req(&[b"foo"])).await.unwrap();
-        let Reply::Get { hits } = reply;
+        let Reply::Get { hits } = reply else {
+            panic!("expected Reply::Get");
+        };
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].key.as_ref(), b"foo");
         assert_eq!(hits[0].data.as_ref(), b"bar");
@@ -110,7 +112,9 @@ mod tests {
             mock_backend_chunked(vec![b"VALUE foo 0", b" 3\r\nb", b"ar\r\nE", b"ND\r\n"]).await;
         let mut client = Client::connect(addr).await.unwrap();
         let reply = client.send(&req(&[b"foo"])).await.unwrap();
-        let Reply::Get { hits } = reply;
+        let Reply::Get { hits } = reply else {
+            panic!("expected Reply::Get");
+        };
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].key.as_ref(), b"foo");
         assert_eq!(hits[0].data.as_ref(), b"bar");
@@ -184,12 +188,16 @@ mod tests {
         let mut client = Client::connect(addr).await.unwrap();
 
         let r1 = client.send(&req(&[b"k1"])).await.unwrap();
-        let Reply::Get { hits: hits1 } = r1;
+        let Reply::Get { hits: hits1 } = r1 else {
+            panic!("expected Reply::Get");
+        };
         assert_eq!(hits1[0].key.as_ref(), b"k1");
         assert_eq!(hits1[0].data.as_ref(), b"A");
 
         let r2 = client.send(&req(&[b"k2"])).await.unwrap();
-        let Reply::Get { hits: hits2 } = r2;
+        let Reply::Get { hits: hits2 } = r2 else {
+            panic!("expected Reply::Get");
+        };
         assert_eq!(hits2[0].key.as_ref(), b"k2");
         assert_eq!(hits2[0].data.as_ref(), b"B");
     }
