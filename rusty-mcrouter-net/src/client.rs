@@ -1,21 +1,11 @@
 use bytes::BytesMut;
-use rusty_mcrouter_protocol::{
-    error::ProtocolError, parser::parse_reply, reply::Reply, request::Request,
-};
-use thiserror::Error;
+use rusty_mcrouter_protocol::{parser::parse_reply, reply::Reply, request::Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
+use crate::NetError;
+
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
-
-#[derive(Debug, Error)]
-pub enum ClientError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("protocol error: {0}")]
-    Protocol(#[from] ProtocolError),
-}
 
 pub struct Client {
     stream: TcpStream,
@@ -31,7 +21,7 @@ impl Client {
         })
     }
 
-    pub async fn send(&mut self, req: &Request) -> Result<Reply, ClientError> {
+    pub async fn send(&mut self, req: &Request) -> Result<Reply, NetError> {
         let mut send_buf = BytesMut::new();
         req.serialize_into(&mut send_buf);
         self.stream.write_all(&send_buf).await?;
@@ -39,7 +29,7 @@ impl Client {
         loop {
             let n = self.stream.read_buf(&mut self.buf).await?;
             if n == 0 {
-                return Err(ClientError::Io(std::io::Error::new(
+                return Err(NetError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "backend closed connection mid-reply",
                 )));
@@ -55,6 +45,7 @@ impl Client {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use rusty_mcrouter_protocol::error::ProtocolError;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -132,7 +123,7 @@ mod tests {
         let result = client.send(&req(&[b"foo"])).await;
         assert!(matches!(
             result,
-            Err(ClientError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof
+            Err(NetError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof
         ));
     }
 
@@ -143,7 +134,7 @@ mod tests {
         let result = client.send(&req(&[b"foo"])).await;
         assert!(matches!(
             result,
-            Err(ClientError::Protocol(ProtocolError::Malformed(
+            Err(NetError::Protocol(ProtocolError::Malformed(
                 "expected VALUE or END"
             )))
         ));
