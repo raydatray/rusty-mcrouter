@@ -1,15 +1,19 @@
 [package]
 name = "rusty-mcrouter-core"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
-thiserror = "2.0.18"
-tokio = { version = "1", features = ["sync"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
-bytes = "1.11.1"
-tokio = { version = "1", features = ["full"] }
+bytes.workspace = true
+tokio = { workspace = true, features = ["full"] }
