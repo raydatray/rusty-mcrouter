@@ -16,4 +16,5 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 bytes.workspace = true
+rusty-mcrouter-net = { path = "../rusty-mcrouter-net", features = ["testing"] }
 tokio = { workspace = true, features = ["full"] }
