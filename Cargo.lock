@@ -119,6 +119,13 @@ version = "0.1.0"
 [[package]]
 name = "rusty-mcrouter-core"
 version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rusty-mcrouter-net",
+ "rusty-mcrouter-protocol",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "rusty-mcrouter-net"
