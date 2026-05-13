@@ -68,7 +68,9 @@ mod tests {
         let route = DestinationRoute::new(client);
 
         let reply = route.route(req_get(&[b"foo"])).await.unwrap();
-        let Reply::Get { hits } = reply;
+        let Reply::Get { hits } = reply else {
+            panic!("expected Reply::Get");
+        };
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].key.as_ref(), b"foo");
         assert_eq!(hits[0].data.as_ref(), b"bar");
