@@ -167,6 +167,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_set_returns_stored() {
+        let addr = mock_backend(b"STORED\r\n").await;
+        let mut client = Client::connect(addr).await.unwrap();
+        let req = Request::Set {
+            key: Bytes::from_static(b"foo"),
+            flags: 0,
+            exptime: 0,
+            data: Bytes::from_static(b"bar"),
+        };
+        let reply = client.send(&req).await.unwrap();
+        assert_eq!(reply, Reply::Stored);
+    }
+
+    #[tokio::test]
+    async fn send_propagates_server_error_as_reply_variant() {
+        // Backend errors are now first-class replies, not parser failures.
+        // The connection stays open so the next request can proceed.
+        let addr = mock_backend(b"SERVER_ERROR out of memory\r\n").await;
+        let mut client = Client::connect(addr).await.unwrap();
+        let reply = client.send(&req(&[b"foo"])).await.unwrap();
+        assert_eq!(
+            reply,
+            Reply::ServerError(Bytes::from_static(b"out of memory"))
+        );
+    }
+
+    #[tokio::test]
+    async fn send_writes_correct_set_request_bytes_to_backend() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let received_clone = Arc::clone(&received);
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap();
+            received_clone.lock().unwrap().extend_from_slice(&buf[..n]);
+            stream.write_all(b"STORED\r\n").await.unwrap();
+        });
+
+        let mut client = Client::connect(addr).await.unwrap();
+        let req = Request::Set {
+            key: Bytes::from_static(b"foo"),
+            flags: 5,
+            exptime: 3600,
+            data: Bytes::from_static(b"bar"),
+        };
+        let _ = client.send(&req).await.unwrap();
+
+        let bytes = received.lock().unwrap().clone();
+        assert_eq!(bytes, b"set foo 5 3600 3\r\nbar\r\n");
+    }
+
+    #[tokio::test]
     async fn two_sequential_sends_on_same_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

@@ -181,6 +181,89 @@ mod tests {
         assert_eq!(b.unwrap(), b"VALUE bbb 0 1\r\nx\r\nEND\r\n");
     }
 
+    async fn ack_set_handler(req: Request) -> Reply {
+        match req {
+            Request::Set { .. } => Reply::Stored,
+            Request::Get { .. } => Reply::Get { hits: vec![] },
+        }
+    }
+
+    #[tokio::test]
+    async fn server_responds_to_set_request() {
+        let addr = spawn_server(ack_set_handler).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(b"set foo 0 0 3\r\nbar\r\n").await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"STORED\r\n");
+    }
+
+    #[tokio::test]
+    async fn server_handles_set_then_get_pipelined() {
+        async fn handler(req: Request) -> Reply {
+            match req {
+                Request::Set { .. } => Reply::Stored,
+                Request::Get { keys } => Reply::Get {
+                    hits: keys
+                        .into_iter()
+                        .map(|k| Value {
+                            key: k,
+                            flags: 0,
+                            data: Bytes::from_static(b"x"),
+                        })
+                        .collect(),
+                },
+            }
+        }
+        let addr = spawn_server(handler).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"set foo 0 0 3\r\nbar\r\nget foo\r\n")
+            .await
+            .unwrap();
+
+        let expected = b"STORED\r\nVALUE foo 0 1\r\nx\r\nEND\r\n";
+        let mut received = Vec::new();
+        let mut tmp = vec![0u8; 1024];
+        while received.len() < expected.len() {
+            let n = stream.read(&mut tmp).await.unwrap();
+            assert!(n > 0, "server closed before full response");
+            received.extend_from_slice(&tmp[..n]);
+        }
+        assert_eq!(received, expected);
+    }
+
+    #[tokio::test]
+    async fn server_handles_set_with_fragmented_body() {
+        let addr = spawn_server(ack_set_handler).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        let chunks: &[&[u8]] = &[b"set foo 0 0 5\r\n", b"hel", b"lo\r\n"];
+        for chunk in chunks {
+            stream.write_all(chunk).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"STORED\r\n");
+    }
+
+    #[tokio::test]
+    async fn server_handler_can_emit_server_error_reply() {
+        async fn err_handler(_req: Request) -> Reply {
+            Reply::ServerError(Bytes::from_static(b"backend down"))
+        }
+        let addr = spawn_server(err_handler).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(b"get foo\r\n").await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"SERVER_ERROR backend down\r\n");
+    }
+
     #[tokio::test]
     async fn server_closes_session_on_malformed_request() {
         let addr = spawn_server(echo_handler).await;
