@@ -1,16 +1,20 @@
 [package]
 name = "rusty-mcrouter"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
-bytes = "1.11.1"
+bytes.workspace = true
 rusty-mcrouter-core = { path = "../rusty-mcrouter-core" }
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 
 [dev-dependencies]
 testcontainers = "0.21"
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
