@@ -13,24 +13,29 @@ use crate::{
 const MAX_KEY_LEN: usize = 250;
 const SET_HEADER_HELP: &str = "set requires <key> <flags> <exptime> <bytes>";
 
-pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolError> {
-    let eol_idx = match buf.iter().position(|&b| b == b'\n') {
-        Some(i) => i,
-        None => return Ok(None),
-    };
-    let line_text_end = if eol_idx > 0 && buf[eol_idx - 1] == b'\r' {
-        eol_idx - 1
+fn read_line(buf: &[u8], offset: usize) -> Option<(usize, usize)> {
+    let lf = offset + buf[offset..].iter().position(|&b| b == b'\n')?;
+    let text_end = if lf > offset && buf[lf - 1] == b'\r' {
+        lf - 1
     } else {
-        eol_idx
+        lf
     };
+    Some((text_end, lf + 1))
+}
 
-    let cmd = command_name(&buf[..line_text_end]);
+pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolError> {
+    let Some((line_end, total)) = read_line(buf, 0) else {
+        return Ok(None);
+    };
+    let eol_idx = total - 1;
+
+    let cmd = command_name(&buf[..line_end]);
 
     match cmd {
         b"get" => parse_get_request(buf, eol_idx),
-        b"set" => parse_set_request(buf, eol_idx, line_text_end),
+        b"set" => parse_set_request(buf, eol_idx, line_end),
         _ => {
-            let _ = buf.split_to(eol_idx + 1);
+            let _ = buf.split_to(total);
             Err(ProtocolError::Malformed("unknown command"))
         }
     }
@@ -148,18 +153,11 @@ fn parse_set_header(header: &[u8]) -> Result<(Bytes, u32, i32, usize), ProtocolE
 }
 
 pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
-    let line_end = match buf.iter().position(|&b| b == b'\n') {
-        Some(i) => i,
-        None => return Ok(None),
+    let Some((line_end, total)) = read_line(buf, 0) else {
+        return Ok(None);
     };
-    let line_text_end = if line_end > 0 && buf[line_end - 1] == b'\r' {
-        line_end - 1
-    } else {
-        line_end
-    };
-    let total = line_end + 1;
 
-    match classify_first_line(&buf[..line_text_end]) {
+    match classify_first_line(&buf[..line_end]) {
         FirstLine::GetReply => parse_get_reply(buf),
         FirstLine::Simple(reply) => {
             let _ = buf.split_to(total);
@@ -167,12 +165,12 @@ pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
         }
         FirstLine::ClientErrorMessage => {
             let frozen = buf.split_to(total).freeze();
-            let msg = frozen.slice(b"CLIENT_ERROR ".len()..line_text_end);
+            let msg = frozen.slice(b"CLIENT_ERROR ".len()..line_end);
             Ok(Some(Reply::ClientError(msg)))
         }
         FirstLine::ServerErrorMessage => {
             let frozen = buf.split_to(total).freeze();
-            let msg = frozen.slice(b"SERVER_ERROR ".len()..line_text_end);
+            let msg = frozen.slice(b"SERVER_ERROR ".len()..line_end);
             Ok(Some(Reply::ServerError(msg)))
         }
     }
@@ -203,21 +201,13 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
     let mut blocks: Vec<(usize, usize, u32, usize, usize)> = Vec::new();
 
     loop {
-        let line_end = match buf[cursor..].iter().position(|&b| b == b'\n') {
-            Some(i) => cursor + i,
-            None => return Ok(None),
+        let Some((line_end, line_total)) = read_line(buf, cursor) else {
+            return Ok(None);
         };
-
-        let line_text_end = if line_end > cursor && buf[line_end - 1] == b'\r' {
-            line_end - 1
-        } else {
-            line_end
-        };
-        let line = &buf[cursor..line_text_end];
+        let line = &buf[cursor..line_end];
 
         if line == b"END" {
-            let total = line_end + 1;
-            let frozen = buf.split_to(total).freeze();
+            let frozen = buf.split_to(line_total).freeze();
             let hits = blocks
                 .into_iter()
                 .map(|(ks, ke, flags, ds, de)| Value {
@@ -257,7 +247,7 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
         // bytes_count bytes, then a CRLF or LF that does NOT count toward
         // bytes_count. Embedded \r, \n, NULs, or fake protocol keywords in
         // the payload must pass through untouched.
-        let data_start = line_end + 1;
+        let data_start = line_total;
         let data_end = data_start + bytes_count;
         if buf.len() < data_end + 1 {
             return Ok(None);
