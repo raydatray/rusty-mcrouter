@@ -1,6 +1,10 @@
 use bytes::{Bytes, BytesMut};
 
-use crate::{error::ProtocolError, request::Request};
+use crate::{
+    error::ProtocolError,
+    reply::{Reply, Value},
+    request::Request,
+};
 
 const MAX_KEY_LEN: usize = 250;
 
@@ -19,6 +23,103 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolErro
     }
 
     parse_command(line).map(Some)
+}
+
+// only works for get
+pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
+    let mut cursor = 0;
+    let mut blocks: Vec<(usize, usize, u32, usize, usize)> = Vec::new();
+
+    loop {
+        let line_end = match buf[cursor..].iter().position(|&b| b == b'\n') {
+            Some(i) => cursor + i,
+            None => return Ok(None),
+        };
+
+        let line_text_end = if line_end > cursor && buf[line_end - 1] == b'\r' {
+            line_end - 1
+        } else {
+            line_end
+        };
+        let line = &buf[cursor..line_text_end];
+
+        if line == b"END" {
+            let total = line_end + 1;
+            let frozen = buf.split_to(total).freeze();
+            let hits = blocks
+                .into_iter()
+                .map(|(ks, ke, flags, ds, de)| Value {
+                    key: frozen.slice(ks..ke),
+                    flags,
+                    data: frozen.slice(ds..de),
+                })
+                .collect();
+            return Ok(Some(Reply::Get { hits }));
+        }
+
+        if line == b"ERROR"
+            || line.starts_with(b"CLIENT_ERROR")
+            || line.starts_with(b"SERVER_ERROR")
+        {
+            return Err(ProtocolError::Malformed("backend returned error reply"));
+        }
+
+        if !line.starts_with(b"VALUE ") {
+            return Err(ProtocolError::Malformed("expected VALUE or END"));
+        }
+
+        let after_value = &line[6..];
+        let mut parts = after_value.split(|&b| b == b' ');
+        let key = parts
+            .next()
+            .filter(|k| !k.is_empty())
+            .ok_or(ProtocolError::Malformed("missing or empty key in VALUE"))?;
+        let flags_bytes = parts
+            .next()
+            .ok_or(ProtocolError::Malformed("missing flags in VALUE"))?;
+        let bytes_str = parts
+            .next()
+            .ok_or(ProtocolError::Malformed("missing byte count in VALUE"))?;
+        // Extra fields (e.g. CAS for `gets`) are accepted and silently ignored.
+
+        let flags = parse_u32(flags_bytes)?;
+        let bytes_count = parse_usize(bytes_str)?;
+
+        let key_start = cursor + 6;
+        let key_end = key_start + key.len();
+
+        // Data is binary-counted, NOT line-terminated. Consume exactly
+        // bytes_count bytes, then a CRLF or LF that does NOT count toward
+        // bytes_count. Embedded \r, \n, NULs, or fake protocol keywords in
+        // the payload must pass through untouched.
+        let data_start = line_end + 1;
+        let data_end = data_start + bytes_count;
+        if buf.len() < data_end + 1 {
+            return Ok(None);
+        }
+        let terminator_len = match buf[data_end] {
+            b'\n' => 1,
+            b'\r' => {
+                if buf.len() < data_end + 2 {
+                    return Ok(None);
+                }
+                if buf[data_end + 1] != b'\n' {
+                    return Err(ProtocolError::Malformed(
+                        "missing LF after CR in value terminator",
+                    ));
+                }
+                2
+            }
+            _ => {
+                return Err(ProtocolError::Malformed(
+                    "missing CRLF after value data block",
+                ))
+            }
+        };
+
+        blocks.push((key_start, key_end, flags, data_start, data_end));
+        cursor = data_end + terminator_len;
+    }
 }
 
 fn parse_command(line: Bytes) -> Result<Request, ProtocolError> {
@@ -67,6 +168,20 @@ fn validate_key(key: &[u8]) -> Result<(), ProtocolError> {
     }
 
     Ok(())
+}
+
+fn parse_u32(s: &[u8]) -> Result<u32, ProtocolError> {
+    std::str::from_utf8(s)
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .ok_or(ProtocolError::Malformed("invalid u32"))
+}
+
+fn parse_usize(s: &[u8]) -> Result<usize, ProtocolError> {
+    std::str::from_utf8(s)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or(ProtocolError::Malformed("invalid usize"))
 }
 
 #[cfg(test)]
@@ -318,5 +433,213 @@ mod tests {
             let key = [b'a', *c, b'b'];
             assert!(matches!(validate_key(&key), Err(ProtocolError::InvalidKey)));
         });
+    }
+
+    fn pr(bytes: &[u8]) -> (Result<Option<Reply>, ProtocolError>, BytesMut) {
+        let mut buf = BytesMut::from(bytes);
+        let result = parse_reply(&mut buf);
+        (result, buf)
+    }
+
+    #[test]
+    fn parse_reply_miss_returns_empty_hits() {
+        let (result, buf) = pr(b"END\r\n");
+        assert_eq!(result.unwrap().unwrap(), Reply::Get { hits: vec![] });
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_single_hit() {
+        let (result, buf) = pr(b"VALUE foo 0 3\r\nbar\r\nEND\r\n");
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Reply::Get {
+                hits: vec![Value {
+                    key: Bytes::from_static(b"foo"),
+                    flags: 0,
+                    data: Bytes::from_static(b"bar"),
+                }]
+            }
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_multiple_hits_with_distinct_flags() {
+        let (result, buf) =
+            pr(b"VALUE k1 0 1\r\na\r\nVALUE k2 5 2\r\nbc\r\nVALUE k3 99 4\r\nzzzz\r\nEND\r\n");
+        let Reply::Get { hits } = result.unwrap().unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].key.as_ref(), b"k1");
+        assert_eq!(hits[0].flags, 0);
+        assert_eq!(hits[0].data.as_ref(), b"a");
+        assert_eq!(hits[1].key.as_ref(), b"k2");
+        assert_eq!(hits[1].flags, 5);
+        assert_eq!(hits[1].data.as_ref(), b"bc");
+        assert_eq!(hits[2].key.as_ref(), b"k3");
+        assert_eq!(hits[2].flags, 99);
+        assert_eq!(hits[2].data.as_ref(), b"zzzz");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_empty_value_block() {
+        let (result, buf) = pr(b"VALUE k 5 0\r\n\r\nEND\r\n");
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Reply::Get {
+                hits: vec![Value {
+                    key: Bytes::from_static(b"k"),
+                    flags: 5,
+                    data: Bytes::from_static(b""),
+                }]
+            }
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_returns_none_on_partial_header() {
+        let (result, buf) = pr(b"VALUE foo 0");
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(buf.as_ref(), b"VALUE foo 0");
+    }
+
+    #[test]
+    fn parse_reply_returns_none_on_partial_data_block() {
+        let (result, buf) = pr(b"VALUE foo 0 5\r\nfoo");
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(buf.as_ref(), b"VALUE foo 0 5\r\nfoo");
+    }
+
+    #[test]
+    fn parse_reply_returns_none_on_partial_trailing_crlf() {
+        let (result, buf) = pr(b"VALUE foo 0 3\r\nbar\r");
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(buf.as_ref(), b"VALUE foo 0 3\r\nbar\r");
+    }
+
+    #[test]
+    fn parse_reply_returns_none_when_end_missing() {
+        let (result, buf) = pr(b"VALUE foo 0 3\r\nbar\r\n");
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(buf.as_ref(), b"VALUE foo 0 3\r\nbar\r\n");
+    }
+
+    #[test]
+    fn parse_reply_consumes_only_first_complete_reply() {
+        let mut buf = BytesMut::from(&b"END\r\nEND\r\n"[..]);
+        let first = parse_reply(&mut buf).unwrap().unwrap();
+        assert_eq!(first, Reply::Get { hits: vec![] });
+        assert_eq!(buf.as_ref(), b"END\r\n");
+
+        let second = parse_reply(&mut buf).unwrap().unwrap();
+        assert_eq!(second, Reply::Get { hits: vec![] });
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_accepts_lf_only_line_terminator() {
+        // Match parse_request's lenient behavior: accept LF or CRLF terminators.
+        let (result, buf) = pr(b"VALUE foo 0 3\nbar\nEND\n");
+        let Reply::Get { hits } = result.unwrap().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].key.as_ref(), b"foo");
+        assert_eq!(hits[0].data.as_ref(), b"bar");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_data_block_is_binary_safe() {
+        // Payload deliberately contains NULs, embedded CRLFs, and fake
+        // VALUE/END keywords. The parser must trust the byte count and pass
+        // these bytes through unaltered, never mistaking them for framing.
+        let payload: &[u8] = b"\x00\r\nVALUE fake 0 0\r\nEND\r\nbinary\xff";
+        let mut wire = BytesMut::new();
+        wire.extend_from_slice(b"VALUE k 0 ");
+        wire.extend_from_slice(payload.len().to_string().as_bytes());
+        wire.extend_from_slice(b"\r\n");
+        wire.extend_from_slice(payload);
+        wire.extend_from_slice(b"\r\nEND\r\n");
+
+        let mut buf = wire;
+        let Reply::Get { hits } = parse_reply(&mut buf).unwrap().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].data.as_ref(), payload);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_rejects_unknown_line() {
+        let (result, _buf) = pr(b"FOO\r\n");
+        assert!(matches!(
+            result,
+            Err(ProtocolError::Malformed("expected VALUE or END"))
+        ));
+    }
+
+    #[test]
+    fn parse_reply_rejects_error_replies() {
+        let inputs: &[&[u8]] = &[
+            b"ERROR\r\n",
+            b"CLIENT_ERROR oops\r\n",
+            b"SERVER_ERROR boom\r\n",
+        ];
+        inputs.iter().for_each(|input| {
+            let mut buf = BytesMut::from(*input);
+            assert!(matches!(
+                parse_reply(&mut buf),
+                Err(ProtocolError::Malformed("backend returned error reply"))
+            ));
+        });
+    }
+
+    #[test]
+    fn parse_reply_rejects_non_numeric_byte_count() {
+        let (result, _buf) = pr(b"VALUE foo 0 abc\r\nbar\r\nEND\r\n");
+        assert!(matches!(
+            result,
+            Err(ProtocolError::Malformed("invalid usize"))
+        ));
+    }
+
+    #[test]
+    fn parse_reply_rejects_missing_crlf_after_data() {
+        let (result, _buf) = pr(b"VALUE foo 0 3\r\nbarXX\r\nEND\r\n");
+        assert!(matches!(
+            result,
+            Err(ProtocolError::Malformed(
+                "missing CRLF after value data block"
+            ))
+        ));
+    }
+
+    #[test]
+    fn parse_reply_round_trips_with_serializer() {
+        let original = Reply::Get {
+            hits: vec![
+                Value {
+                    key: Bytes::from_static(b"alpha"),
+                    flags: 0,
+                    data: Bytes::from_static(b"hello"),
+                },
+                Value {
+                    key: Bytes::from_static(b"beta"),
+                    flags: 99,
+                    data: Bytes::from_static(b""),
+                },
+                Value {
+                    key: Bytes::from_static(b"gamma"),
+                    flags: u32::MAX,
+                    data: Bytes::from_static(b"\x00\x01\xff binary \r\n"),
+                },
+            ],
+        };
+
+        let mut buf = BytesMut::new();
+        original.serialize_into(&mut buf);
+        let parsed = parse_reply(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed, original);
+        assert!(buf.is_empty());
     }
 }
