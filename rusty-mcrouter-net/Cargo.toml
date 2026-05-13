@@ -5,3 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bytes = "1.11.1"
+rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
+thiserror = "2.0.18"
+tokio = { version = "1", features = ["net", "io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
