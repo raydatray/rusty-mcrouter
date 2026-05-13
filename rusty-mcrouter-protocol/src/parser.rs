@@ -25,8 +25,58 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolErro
     parse_command(line).map(Some)
 }
 
-// only works for get
 pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
+    let line_end = match buf.iter().position(|&b| b == b'\n') {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+    let line_text_end = if line_end > 0 && buf[line_end - 1] == b'\r' {
+        line_end - 1
+    } else {
+        line_end
+    };
+    let total = line_end + 1;
+
+    match classify_first_line(&buf[..line_text_end]) {
+        FirstLine::GetReply => parse_get_reply(buf),
+        FirstLine::Simple(reply) => {
+            let _ = buf.split_to(total);
+            Ok(Some(reply))
+        }
+        FirstLine::ClientErrorMessage => {
+            let frozen = buf.split_to(total).freeze();
+            let msg = frozen.slice(b"CLIENT_ERROR ".len()..line_text_end);
+            Ok(Some(Reply::ClientError(msg)))
+        }
+        FirstLine::ServerErrorMessage => {
+            let frozen = buf.split_to(total).freeze();
+            let msg = frozen.slice(b"SERVER_ERROR ".len()..line_text_end);
+            Ok(Some(Reply::ServerError(msg)))
+        }
+    }
+}
+
+enum FirstLine {
+    GetReply,
+    Simple(Reply),
+    ClientErrorMessage,
+    ServerErrorMessage,
+}
+
+fn classify_first_line(line: &[u8]) -> FirstLine {
+    match line {
+        b"STORED" => FirstLine::Simple(Reply::Stored),
+        b"NOT_STORED" => FirstLine::Simple(Reply::NotStored),
+        b"EXISTS" => FirstLine::Simple(Reply::Exists),
+        b"NOT_FOUND" => FirstLine::Simple(Reply::NotFound),
+        b"ERROR" => FirstLine::Simple(Reply::Error),
+        _ if line.starts_with(b"CLIENT_ERROR ") => FirstLine::ClientErrorMessage,
+        _ if line.starts_with(b"SERVER_ERROR ") => FirstLine::ServerErrorMessage,
+        _ => FirstLine::GetReply,
+    }
+}
+
+fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
     let mut cursor = 0;
     let mut blocks: Vec<(usize, usize, u32, usize, usize)> = Vec::new();
 
@@ -55,13 +105,6 @@ pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
                 })
                 .collect();
             return Ok(Some(Reply::Get { hits }));
-        }
-
-        if line == b"ERROR"
-            || line.starts_with(b"CLIENT_ERROR")
-            || line.starts_with(b"SERVER_ERROR")
-        {
-            return Err(ProtocolError::Malformed("backend returned error reply"));
         }
 
         if !line.starts_with(b"VALUE ") {
@@ -585,18 +628,90 @@ mod tests {
     }
 
     #[test]
-    fn parse_reply_rejects_error_replies() {
-        let inputs: &[&[u8]] = &[
-            b"ERROR\r\n",
-            b"CLIENT_ERROR oops\r\n",
-            b"SERVER_ERROR boom\r\n",
+    fn parse_reply_returns_error_replies_as_first_class_variants() {
+        let cases: &[(&[u8], Reply)] = &[
+            (b"ERROR\r\n", Reply::Error),
+            (
+                b"CLIENT_ERROR oops\r\n",
+                Reply::ClientError(Bytes::from_static(b"oops")),
+            ),
+            (
+                b"SERVER_ERROR boom\r\n",
+                Reply::ServerError(Bytes::from_static(b"boom")),
+            ),
         ];
-        inputs.iter().for_each(|input| {
+        cases.iter().for_each(|(input, expected)| {
             let mut buf = BytesMut::from(*input);
-            assert!(matches!(
-                parse_reply(&mut buf),
-                Err(ProtocolError::Malformed("backend returned error reply"))
-            ));
+            assert_eq!(parse_reply(&mut buf).unwrap().unwrap(), *expected);
+            assert!(buf.is_empty(), "input fully consumed for {expected:?}");
+        });
+    }
+
+    #[test]
+    fn parse_reply_storage_acks_parse_to_correct_variants() {
+        let cases: &[(&[u8], Reply)] = &[
+            (b"STORED\r\n", Reply::Stored),
+            (b"NOT_STORED\r\n", Reply::NotStored),
+            (b"EXISTS\r\n", Reply::Exists),
+            (b"NOT_FOUND\r\n", Reply::NotFound),
+        ];
+        cases.iter().for_each(|(input, expected)| {
+            let mut buf = BytesMut::from(*input);
+            assert_eq!(parse_reply(&mut buf).unwrap().unwrap(), *expected);
+            assert!(buf.is_empty(), "input fully consumed for {expected:?}");
+        });
+    }
+
+    #[test]
+    fn parse_reply_storage_acks_accept_lf_only_terminator() {
+        let mut buf = BytesMut::from(&b"STORED\n"[..]);
+        assert_eq!(parse_reply(&mut buf).unwrap().unwrap(), Reply::Stored);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_error_message_with_empty_body() {
+        let mut buf = BytesMut::from(&b"CLIENT_ERROR \r\n"[..]);
+        assert_eq!(
+            parse_reply(&mut buf).unwrap().unwrap(),
+            Reply::ClientError(Bytes::from_static(b""))
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_storage_acks_consume_only_first_complete_reply() {
+        let mut buf = BytesMut::from(&b"STORED\r\nNOT_STORED\r\n"[..]);
+        assert_eq!(parse_reply(&mut buf).unwrap().unwrap(), Reply::Stored);
+        assert_eq!(buf.as_ref(), b"NOT_STORED\r\n");
+        assert_eq!(parse_reply(&mut buf).unwrap().unwrap(), Reply::NotStored);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_storage_ack_returns_none_on_partial_line() {
+        let mut buf = BytesMut::from(&b"STOR"[..]);
+        assert!(matches!(parse_reply(&mut buf), Ok(None)));
+        assert_eq!(buf.as_ref(), b"STOR");
+    }
+
+    #[test]
+    fn parse_reply_round_trips_storage_and_error_replies() {
+        let replies = [
+            Reply::Stored,
+            Reply::NotStored,
+            Reply::Exists,
+            Reply::NotFound,
+            Reply::Error,
+            Reply::ClientError(Bytes::from_static(b"bad command")),
+            Reply::ServerError(Bytes::from_static(b"out of memory")),
+        ];
+        replies.iter().for_each(|original| {
+            let mut buf = BytesMut::new();
+            original.serialize_into(&mut buf);
+            let parsed = parse_reply(&mut buf).unwrap().unwrap();
+            assert_eq!(parsed, *original);
+            assert!(buf.is_empty());
         });
     }
 
