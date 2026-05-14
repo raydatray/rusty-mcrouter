@@ -4,6 +4,9 @@ use thiserror::Error;
 pub mod client;
 pub mod server;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 pub use client::Client;
 pub use server::Server;
 

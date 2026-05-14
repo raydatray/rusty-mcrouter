@@ -57,17 +57,7 @@ mod tests {
         }
     }
 
-    async fn mock_backend(reply: &'static [u8]) -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut consume = vec![0u8; 1024];
-            let _ = stream.read(&mut consume).await.unwrap();
-            stream.write_all(reply).await.unwrap();
-        });
-        addr
-    }
+    use crate::testing::mock_backend;
 
     async fn mock_backend_chunked(chunks: Vec<&'static [u8]>) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
