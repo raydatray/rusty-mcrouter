@@ -211,9 +211,17 @@ fn classify_first_line(line: &[u8]) -> FirstLine {
     }
 }
 
+struct ValueOffsets {
+    key_start: usize,
+    key_end: usize,
+    flags: u32,
+    data_start: usize,
+    data_end: usize,
+}
+
 fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
     let mut cursor = 0;
-    let mut blocks: Vec<(usize, usize, u32, usize, usize)> = Vec::new();
+    let mut blocks: Vec<ValueOffsets> = Vec::new();
 
     loop {
         let Some((line_end, line_total)) = read_line(buf, cursor) else {
@@ -225,10 +233,10 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
             let frozen = buf.split_to(line_total).freeze();
             let hits = blocks
                 .into_iter()
-                .map(|(ks, ke, flags, ds, de)| Value {
-                    key: frozen.slice(ks..ke),
-                    flags,
-                    data: frozen.slice(ds..de),
+                .map(|b| Value {
+                    key: frozen.slice(b.key_start..b.key_end),
+                    flags: b.flags,
+                    data: frozen.slice(b.data_start..b.data_end),
                 })
                 .collect();
             return Ok(Some(Reply::Get { hits }));
@@ -274,7 +282,13 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
             None => return Ok(None),
         };
 
-        blocks.push((key_start, key_end, flags, data_start, data_end));
+        blocks.push(ValueOffsets {
+            key_start,
+            key_end,
+            flags,
+            data_start,
+            data_end,
+        });
         cursor = data_end + terminator_len;
     }
 }
