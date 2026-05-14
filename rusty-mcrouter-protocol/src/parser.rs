@@ -23,6 +23,30 @@ fn read_line(buf: &[u8], offset: usize) -> Option<(usize, usize)> {
     Some((text_end, lf + 1))
 }
 
+fn body_terminator_len(
+    buf: &[u8],
+    data_end: usize,
+    missing_terminator: &'static str,
+    missing_lf_after_cr: &'static str,
+) -> Result<Option<usize>, ProtocolError> {
+    if buf.len() <= data_end {
+        return Ok(None);
+    }
+    match buf[data_end] {
+        b'\n' => Ok(Some(1)),
+        b'\r' => {
+            if buf.len() < data_end + 2 {
+                Ok(None)
+            } else if buf[data_end + 1] != b'\n' {
+                Err(ProtocolError::Malformed(missing_lf_after_cr))
+            } else {
+                Ok(Some(2))
+            }
+        }
+        _ => Err(ProtocolError::Malformed(missing_terminator)),
+    }
+}
+
 pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolError> {
     let Some((line_end, total)) = read_line(buf, 0) else {
         return Ok(None);
@@ -83,26 +107,17 @@ fn parse_set_request(
     // CRLF or LF that does NOT count toward bytes_count.
     let data_start = eol_idx + 1;
     let data_end = data_start + bytes_count;
-    if buf.len() < data_end + 1 {
-        return Ok(None);
-    }
-    let terminator_len = match buf[data_end] {
-        b'\n' => 1,
-        b'\r' => {
-            if buf.len() < data_end + 2 {
-                return Ok(None);
-            }
-            if buf[data_end + 1] != b'\n' {
-                let _ = buf.split_to(data_end + 1);
-                return Err(ProtocolError::Malformed(
-                    "missing LF after CR in set body terminator",
-                ));
-            }
-            2
-        }
-        _ => {
+    let terminator_len = match body_terminator_len(
+        buf,
+        data_end,
+        "missing CRLF after set body",
+        "missing LF after CR in set body terminator",
+    ) {
+        Ok(Some(len)) => len,
+        Ok(None) => return Ok(None),
+        Err(e) => {
             let _ = buf.split_to(data_end + 1);
-            return Err(ProtocolError::Malformed("missing CRLF after set body"));
+            return Err(e);
         }
     };
 
@@ -249,27 +264,14 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
         // the payload must pass through untouched.
         let data_start = line_total;
         let data_end = data_start + bytes_count;
-        if buf.len() < data_end + 1 {
-            return Ok(None);
-        }
-        let terminator_len = match buf[data_end] {
-            b'\n' => 1,
-            b'\r' => {
-                if buf.len() < data_end + 2 {
-                    return Ok(None);
-                }
-                if buf[data_end + 1] != b'\n' {
-                    return Err(ProtocolError::Malformed(
-                        "missing LF after CR in value terminator",
-                    ));
-                }
-                2
-            }
-            _ => {
-                return Err(ProtocolError::Malformed(
-                    "missing CRLF after value data block",
-                ))
-            }
+        let terminator_len = match body_terminator_len(
+            buf,
+            data_end,
+            "missing CRLF after value data block",
+            "missing LF after CR in value terminator",
+        )? {
+            Some(len) => len,
+            None => return Ok(None),
         };
 
         blocks.push((key_start, key_end, flags, data_start, data_end));
