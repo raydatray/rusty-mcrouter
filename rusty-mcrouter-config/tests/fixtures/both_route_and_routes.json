@@ -1,0 +1,10 @@
+// hand-written: no mcrouter equivalent (negative case for ConfigError::BothRouteAndRoutes)
+{
+  "pools": {
+    "A": { "servers": ["localhost:12345"] }
+  },
+  "route": "PoolRoute|A",
+  "routes": [
+    { "aliases": ["/a/"], "route": "PoolRoute|A" }
+  ]
+}

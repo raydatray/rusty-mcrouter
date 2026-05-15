@@ -1,0 +1,7 @@
+// hand-written: no mcrouter equivalent (negative case for ConfigError::Json on type mismatch)
+{
+  "pools": {
+    "A": { "servers": "localhost:12345" }
+  },
+  "route": "PoolRoute|A"
+}
