@@ -1,0 +1,4 @@
+// source: mcrouter/test/test_nullroute.json
+{
+  "route": "NullRoute"
+}

@@ -1,0 +1,9 @@
+// source: mcrouter/test/mcrouter_test_basic_1_1_1.json
+{
+  "pools": {
+    "foo": {
+      "servers": [ "localhost:12345" ]
+    }
+  },
+  "route": "PoolRoute|foo"
+}
