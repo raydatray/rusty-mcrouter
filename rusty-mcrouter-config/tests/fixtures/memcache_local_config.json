@@ -1,0 +1,9 @@
+// source: mcrouter/test/cpp_unit_tests/files/memcache_local_config.json
+{
+  "pools": {
+    "A": {
+      "servers": [ "localhost:PORT" ]
+    }
+  },
+  "route": "PoolRoute|A"
+}

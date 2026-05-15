@@ -1,0 +1,6 @@
+// hand-written: no mcrouter equivalent (negative case for ConfigError::MissingRoute)
+{
+  "pools": {
+    "A": { "servers": ["localhost:12345"] }
+  }
+}

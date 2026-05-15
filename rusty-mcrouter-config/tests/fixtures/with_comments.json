@@ -1,0 +1,15 @@
+// hand-written: no mcrouter equivalent (exercises json_comments::StripComments)
+{
+  // Pools are optional but useful.
+  "pools": {
+    "foo": {
+      "servers": [
+        "localhost:11211" /* primary */
+      ]
+    }
+  },
+  /*
+   * Single route handle for the whole router.
+   */
+  "route": "PoolRoute|foo"
+}
