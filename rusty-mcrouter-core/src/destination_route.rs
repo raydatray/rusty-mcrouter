@@ -20,7 +20,7 @@ impl Route for DestinationRoute {
     async fn route(&self, req: Request) -> Result<Reply, RouteError> {
         let mut client = self.client.lock().await;
 
-        Ok(client.send(&req).await?)
+        client.send(&req).await.map_err(RouteError::from)
     }
 }
 #[cfg(test)]
