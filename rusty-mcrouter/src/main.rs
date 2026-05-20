@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use rusty_mcrouter_core::{DestinationRoute, Route};
+use rusty_mcrouter_core::{destination_route::DestinationRoute, route::Route};
 use rusty_mcrouter_net::{Client, Server};
 use rusty_mcrouter_protocol::reply::Reply;
 use std::sync::Arc;
@@ -9,8 +9,8 @@ const DEFAULT_BACKEND_ADDR: &str = "127.0.0.1:11211";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let listen = std::env::var("RUSTY_MCROUTER_LISTEN")
-        .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_string());
+    let listen =
+        std::env::var("RUSTY_MCROUTER_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_string());
     let backend = std::env::var("RUSTY_MCROUTER_BACKEND")
         .unwrap_or_else(|_| DEFAULT_BACKEND_ADDR.to_string());
 
@@ -23,7 +23,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Machine-readable readiness line on stdout for process supervisors and
     // integration tests; human log goes to stderr.
     println!("READY {}", bound);
-    eprintln!("rusty-mcrouter listening on {} -> backend {}", bound, backend);
+    eprintln!(
+        "rusty-mcrouter listening on {} -> backend {}",
+        bound, backend
+    );
 
     server
         .serve(move |req| {
