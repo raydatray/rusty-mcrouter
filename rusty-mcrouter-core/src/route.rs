@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use rusty_mcrouter_net::NetError;
-use rusty_mcrouter_protocol::{reply::Reply, request::Request};
+use rusty_mcrouter_protocol::{Reply, Request};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

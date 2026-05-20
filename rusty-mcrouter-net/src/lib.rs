@@ -1,14 +1,14 @@
-use rusty_mcrouter_protocol::error::ProtocolError;
+use rusty_mcrouter_protocol::ProtocolError;
 use thiserror::Error;
 
-pub mod client;
-pub mod server;
+mod client;
+mod server;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use client::Client;
-pub use server::Server;
+pub use crate::client::Client;
+pub use crate::server::Server;
 
 #[derive(Debug, Error)]
 pub enum NetError {
