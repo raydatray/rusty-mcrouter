@@ -296,3 +296,53 @@ async fn replace_changes_value() {
         b"VALUE replace_changes_key 0 6\r\nsecond\r\nEND\r\n"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn append_to_missing_key_returns_not_stored() {
+    let fx = fixture().await;
+    let resp = round_trip(fx.router_addr, b"append append_missing_key 0 0 3\r\nbar\r\n").await;
+    assert_eq!(resp, b"NOT_STORED\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn append_extends_existing_value() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set append_extends_key 0 0 5\r\nhello\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let appended = round_trip(
+        fx.router_addr,
+        b"append append_extends_key 0 0 6\r\n world\r\n",
+    )
+    .await;
+    assert_eq!(appended, b"STORED\r\n");
+
+    let fetched = round_trip(fx.router_addr, b"get append_extends_key\r\n").await;
+    assert_eq!(
+        fetched,
+        b"VALUE append_extends_key 0 11\r\nhello world\r\nEND\r\n"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn append_keeps_original_flags_when_command_specifies_different_flags() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set append_ignores_key 7 0 5\r\nhello\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let appended = round_trip(
+        fx.router_addr,
+        b"append append_ignores_key 999 999 6\r\n world\r\n",
+    )
+    .await;
+    assert_eq!(appended, b"STORED\r\n");
+
+    let fetched = round_trip(fx.router_addr, b"get append_ignores_key\r\n").await;
+    assert_eq!(
+        fetched,
+        b"VALUE append_ignores_key 7 11\r\nhello world\r\nEND\r\n"
+    );
+}
