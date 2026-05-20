@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+bytes.workspace = true
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
 thiserror.workspace = true
