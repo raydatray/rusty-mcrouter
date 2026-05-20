@@ -10,6 +10,7 @@ impl Route for NullRoute {
             // todo - add the other dummy replies as more request types added
             Request::Get { .. } => Reply::Get { hits: vec![] },
             Request::Set { .. } => Reply::Stored,
+            Request::Delete { .. } => Reply::Deleted,
         })
     }
 }
@@ -60,5 +61,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
+    }
+
+    #[tokio::test]
+    async fn returns_deleted_for_delete() {
+        let r = NullRoute;
+        let reply = r
+            .route(Request::Delete {
+                key: Bytes::from_static(b"k"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply, Reply::Deleted);
     }
 }
