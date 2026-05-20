@@ -1,3 +1,4 @@
+mod route;
 use rusty_mcrouter_net::{Client, NetError};
 use rusty_mcrouter_protocol::{reply::Reply, request::Request};
 use std::future::Future;
