@@ -62,7 +62,7 @@ impl ConfigDocument {
 
 fn deserialize_named_handles<'de, D>(
     deserializer: D,
-) -> std::result::Result<BTreeMap<String, RouteHandleConfig>, D::Error>
+) -> Result<BTreeMap<String, RouteHandleConfig>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -116,14 +116,12 @@ struct PrefixedRouteRaw {
     route: RouteHandleConfig,
 }
 
-fn deserialize_routes_field<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<Vec<PrefixedRoute>>, D::Error>
+fn deserialize_routes_field<'de, D>(deserializer: D) -> Result<Option<Vec<PrefixedRoute>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = Value::deserialize(deserializer)?;
-    let entries: std::result::Result<Vec<PrefixedRoute>, D::Error> = match value {
+    let entries: Result<Vec<PrefixedRoute>, D::Error> = match value {
         Value::Object(map) => map
             .into_iter()
             .map(|(prefix, val)| {
