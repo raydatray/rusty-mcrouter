@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rand::random_range;
-use rusty_mcrouter_protocol::{reply::Reply, request::Request};
+use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::{
     destination_route::DestinationRoute,

@@ -1,9 +1,9 @@
 use bytes::Bytes;
 use clap::Parser;
 use rusty_mcrouter_config::parse_file;
-use rusty_mcrouter_core::route_builder::build_route;
+use rusty_mcrouter_core::build_route;
 use rusty_mcrouter_net::Server;
-use rusty_mcrouter_protocol::reply::Reply;
+use rusty_mcrouter_protocol::Reply;
 use std::{path::PathBuf, sync::Arc};
 
 #[derive(Parser)]
