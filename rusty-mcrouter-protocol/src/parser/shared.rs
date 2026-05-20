@@ -1,5 +1,7 @@
 use std::str::from_utf8;
 
+use bytes::{Bytes, BytesMut};
+
 use crate::error::ProtocolError;
 
 const MAX_KEY_LEN: usize = 250;
@@ -12,6 +14,24 @@ pub(super) fn read_line(buf: &[u8], offset: usize) -> Option<(usize, usize)> {
         lf
     };
     Some((text_end, lf + 1))
+}
+
+pub(super) fn extract_command_args(
+    buf: &mut BytesMut,
+    eol_idx: usize,
+    command_with_space: &[u8],
+) -> Result<Bytes, ProtocolError> {
+    let mut line = buf.split_to(eol_idx + 1).freeze();
+    if line.ends_with(b"\r\n") {
+        line.truncate(line.len() - 2);
+    } else {
+        line.truncate(line.len() - 1);
+    }
+    if line.starts_with(command_with_space) {
+        Ok(line.slice(command_with_space.len()..))
+    } else {
+        Err(ProtocolError::Malformed("missing arguments"))
+    }
 }
 
 pub(super) fn body_terminator_len(
