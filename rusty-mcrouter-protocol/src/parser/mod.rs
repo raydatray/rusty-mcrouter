@@ -6,46 +6,15 @@ use crate::{
     request::Request,
 };
 
+mod shared;
+
+use shared::{body_terminator_len, parse_i32, parse_u32, parse_usize, read_line, validate_key};
+
 // TODO: parser is stateless and re-parses headers on every partial-read call.
 // mcrouter's McServerAsciiParser holds in-progress state across calls. Make
 // this stateful via a RequestParser struct holding ParseState — low priority,
 // costs ~µs + 1 small alloc per partial read on multi-fragment set bodies.
-const MAX_KEY_LEN: usize = 250;
 const SET_HEADER_HELP: &str = "set requires <key> <flags> <exptime> <bytes>";
-
-fn read_line(buf: &[u8], offset: usize) -> Option<(usize, usize)> {
-    let lf = offset + buf[offset..].iter().position(|&b| b == b'\n')?;
-    let text_end = if lf > offset && buf[lf - 1] == b'\r' {
-        lf - 1
-    } else {
-        lf
-    };
-    Some((text_end, lf + 1))
-}
-
-fn body_terminator_len(
-    buf: &[u8],
-    data_end: usize,
-    missing_terminator: &'static str,
-    missing_lf_after_cr: &'static str,
-) -> Result<Option<usize>, ProtocolError> {
-    if buf.len() <= data_end {
-        return Ok(None);
-    }
-    match buf[data_end] {
-        b'\n' => Ok(Some(1)),
-        b'\r' => {
-            if buf.len() < data_end + 2 {
-                Ok(None)
-            } else if buf[data_end + 1] != b'\n' {
-                Err(ProtocolError::Malformed(missing_lf_after_cr))
-            } else {
-                Ok(Some(2))
-            }
-        }
-        _ => Err(ProtocolError::Malformed(missing_terminator)),
-    }
-}
 
 pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolError> {
     let Some((line_end, total)) = read_line(buf, 0) else {
@@ -115,12 +84,7 @@ fn parse_set_request(
     let data_end = data_start
         .checked_add(bytes_count)
         .ok_or(ProtocolError::Malformed("body length overflow"))?;
-    let terminator_len = match body_terminator_len(
-        buf,
-        data_end,
-        "missing CRLF after set body",
-        "missing LF after CR in set body terminator",
-    ) {
+    let terminator_len = match body_terminator_len(buf, data_end) {
         Ok(Some(len)) => len,
         Ok(None) => return Ok(None),
         Err(e) => {
@@ -324,12 +288,7 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
         let data_end = data_start
             .checked_add(bytes_count)
             .ok_or(ProtocolError::Malformed("body length overflow"))?;
-        let terminator_len = match body_terminator_len(
-            buf,
-            data_end,
-            "missing CRLF after value data block",
-            "missing LF after CR in value terminator",
-        )? {
+        let terminator_len = match body_terminator_len(buf, data_end)? {
             Some(len) => len,
             None => return Ok(None),
         };
@@ -357,46 +316,6 @@ fn parse_get(rest: Bytes) -> Result<Request, ProtocolError> {
     }
 
     Ok(Request::Get { keys })
-}
-
-fn validate_key(key: &[u8]) -> Result<(), ProtocolError> {
-    if key.is_empty() {
-        return Err(ProtocolError::InvalidKey);
-    }
-
-    if key.len() > MAX_KEY_LEN {
-        return Err(ProtocolError::KeyTooLong(key.len()));
-    }
-
-    if key
-        .iter()
-        .any(|&b| b.is_ascii_whitespace() || b.is_ascii_control())
-    {
-        return Err(ProtocolError::InvalidKey);
-    }
-
-    Ok(())
-}
-
-fn parse_u32(s: &[u8]) -> Result<u32, ProtocolError> {
-    std::str::from_utf8(s)
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .ok_or(ProtocolError::Malformed("invalid u32"))
-}
-
-fn parse_i32(s: &[u8]) -> Result<i32, ProtocolError> {
-    std::str::from_utf8(s)
-        .ok()
-        .and_then(|s| s.parse::<i32>().ok())
-        .ok_or(ProtocolError::Malformed("invalid i32"))
-}
-
-fn parse_usize(s: &[u8]) -> Result<usize, ProtocolError> {
-    std::str::from_utf8(s)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .ok_or(ProtocolError::Malformed("invalid usize"))
 }
 
 #[cfg(test)]
@@ -598,54 +517,6 @@ mod tests {
             parse_get(Bytes::from(huge)),
             Err(ProtocolError::KeyTooLong(251))
         ));
-    }
-
-    #[test]
-    fn validate_key_basic_ascii() {
-        assert!(validate_key(b"foo").is_ok());
-        assert!(validate_key(b"a").is_ok());
-    }
-
-    #[test]
-    fn validate_key_length() {
-        assert!(matches!(validate_key(b""), Err(ProtocolError::InvalidKey)));
-
-        let key_250 = vec![b'x'; 250];
-        assert!(validate_key(&key_250).is_ok());
-
-        let key_251 = vec![b'x'; 251];
-        assert!(matches!(
-            validate_key(&key_251),
-            Err(ProtocolError::KeyTooLong(251))
-        ))
-    }
-
-    #[test]
-    fn validate_key_rejects_whitespace() {
-        let cases: &[&[u8]] = &[
-            b" foo",
-            b"foo ",
-            b"foo bar",
-            b"foo\tbar",
-            b"foo\nbar",
-            b"foo\rbar",
-            b"\x0Bfoo", // vertical tab
-            b"foo\x0C", // form feed
-        ];
-
-        cases
-            .iter()
-            .for_each(|c| assert!(matches!(validate_key(c), Err(ProtocolError::InvalidKey))));
-    }
-
-    #[test]
-    fn validate_key_rejects_control_chars() {
-        let cases: &[u8] = &[0x00u8, 0x01, 0x07, 0x1B, 0x1F, 0x7F];
-
-        cases.iter().for_each(|c| {
-            let key = [b'a', *c, b'b'];
-            assert!(matches!(validate_key(&key), Err(ProtocolError::InvalidKey)));
-        });
     }
 
     fn pr(bytes: &[u8]) -> (Result<Option<Reply>, ProtocolError>, BytesMut) {
@@ -900,9 +771,7 @@ mod tests {
         let (result, _buf) = pr(b"VALUE foo 0 3\r\nbarXX\r\nEND\r\n");
         assert!(matches!(
             result,
-            Err(ProtocolError::Malformed(
-                "missing CRLF after value data block"
-            ))
+            Err(ProtocolError::Malformed("missing CRLF after body"))
         ));
     }
 
@@ -1129,7 +998,7 @@ mod tests {
         let mut buf = BytesMut::from(&b"set foo 0 0 3\r\nbarXX\r\nEND\r\n"[..]);
         assert!(matches!(
             parse_request(&mut buf),
-            Err(ProtocolError::Malformed("missing CRLF after set body"))
+            Err(ProtocolError::Malformed("missing CRLF after body"))
         ));
     }
 
@@ -1139,7 +1008,7 @@ mod tests {
         assert!(matches!(
             parse_request(&mut buf),
             Err(ProtocolError::Malformed(
-                "missing LF after CR in set body terminator"
+                "missing LF after CR in body terminator"
             ))
         ));
     }
