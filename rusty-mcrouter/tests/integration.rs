@@ -181,3 +181,40 @@ async fn set_overwrites_existing_value() {
         b"VALUE set_overwrites_key 0 7\r\nupdated\r\nEND\r\n"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn delete_existing_key_returns_deleted() {
+    let fx = fixture().await;
+    let stored = round_trip(
+        fx.router_addr,
+        b"set delete_existing_key 0 0 3\r\nbar\r\n",
+    )
+    .await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let deleted = round_trip(fx.router_addr, b"delete delete_existing_key\r\n").await;
+    assert_eq!(deleted, b"DELETED\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn delete_missing_key_returns_not_found() {
+    let fx = fixture().await;
+    let resp = round_trip(fx.router_addr, b"delete delete_missing_key\r\n").await;
+    assert_eq!(resp, b"NOT_FOUND\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn set_delete_get_round_trip() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set set_delete_get_key 0 0 5\r\nhello\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let deleted = round_trip(fx.router_addr, b"delete set_delete_get_key\r\n").await;
+    assert_eq!(deleted, b"DELETED\r\n");
+
+    let fetched = round_trip(fx.router_addr, b"get set_delete_get_key\r\n").await;
+    assert_eq!(fetched, b"END\r\n");
+}
