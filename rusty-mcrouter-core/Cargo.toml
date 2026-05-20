@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 bytes.workspace = true
 rand = "0.10"
+rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
 thiserror.workspace = true

@@ -1195,6 +1195,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "rand",
+ "rusty-mcrouter-config",
  "rusty-mcrouter-net",
  "rusty-mcrouter-protocol",
  "thiserror 2.0.18",
