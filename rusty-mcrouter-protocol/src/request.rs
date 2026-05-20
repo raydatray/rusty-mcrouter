@@ -13,6 +13,9 @@ pub enum Request {
         exptime: i32,
         data: Bytes,
     },
+    Delete {
+        key: Bytes,
+    },
 }
 
 impl Request {
@@ -42,6 +45,11 @@ impl Request {
                 write_decimal(out, data.len() as u64);
                 out.put_slice(b"\r\n");
                 out.put_slice(data);
+                out.put_slice(b"\r\n");
+            }
+            Request::Delete { key } => {
+                out.put_slice(b"delete ");
+                out.put_slice(key);
                 out.put_slice(b"\r\n");
             }
         }
@@ -148,9 +156,14 @@ mod tests {
             exptime: 0,
             data: Bytes::from_static(b"v"),
         };
-        assert_eq!(
-            serialize(&req).as_ref(),
-            b"set k 4294967295 0 1\r\nv\r\n"
-        );
+        assert_eq!(serialize(&req).as_ref(), b"set k 4294967295 0 1\r\nv\r\n");
+    }
+
+    #[test]
+    fn delete_serializes_to_canonical_wire_format() {
+        let req = Request::Delete {
+            key: Bytes::from_static(b"foo"),
+        };
+        assert_eq!(serialize(&req).as_ref(), b"delete foo\r\n");
     }
 }
