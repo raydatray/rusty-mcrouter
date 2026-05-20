@@ -151,7 +151,7 @@ mod tests {
     use bytes::Bytes;
     use rusty_mcrouter_config::parse;
     use rusty_mcrouter_net::testing::mock_backend;
-    use rusty_mcrouter_protocol::{reply::Reply, request::Request};
+    use rusty_mcrouter_protocol::{Reply, Request};
 
     fn req_get(keys: &[&'static [u8]]) -> Request {
         Request::Get {

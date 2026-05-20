@@ -1,5 +1,5 @@
 use rusty_mcrouter_net::Client;
-use rusty_mcrouter_protocol::{reply::Reply, request::Request};
+use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::Mutex;
 
 use crate::route::{Route, RouteError};

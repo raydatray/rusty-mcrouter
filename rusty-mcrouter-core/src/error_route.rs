@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use rusty_mcrouter_protocol::{reply::Reply, request::Request};
+use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::route::{Route, RouteError};
 
