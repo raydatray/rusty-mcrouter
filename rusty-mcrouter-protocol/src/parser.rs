@@ -111,7 +111,9 @@ fn parse_set_request(
     // Body framing mirrors VALUE block parsing: bytes_count payload, then a
     // CRLF or LF that does NOT count toward bytes_count.
     let data_start = eol_idx + 1;
-    let data_end = data_start + bytes_count;
+    let data_end = data_start
+        .checked_add(bytes_count)
+        .ok_or(ProtocolError::Malformed("body length overflow"))?;
     let terminator_len = match body_terminator_len(
         buf,
         data_end,
@@ -284,7 +286,9 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
         // bytes_count. Embedded \r, \n, NULs, or fake protocol keywords in
         // the payload must pass through untouched.
         let data_start = line_total;
-        let data_end = data_start + bytes_count;
+        let data_end = data_start
+            .checked_add(bytes_count)
+            .ok_or(ProtocolError::Malformed("body length overflow"))?;
         let terminator_len = match body_terminator_len(
             buf,
             data_end,
