@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use rusty_mcrouter_protocol::{parser::parse_request, reply::Reply, request::Request};
+use rusty_mcrouter_protocol::{parse_request, Reply, Request};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -68,7 +68,7 @@ where
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use rusty_mcrouter_protocol::reply::Value;
+    use rusty_mcrouter_protocol::Value;
 
     async fn spawn_server<F, Fut>(handler: F) -> SocketAddr
     where
