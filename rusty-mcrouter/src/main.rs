@@ -1,35 +1,50 @@
 use bytes::Bytes;
-use rusty_mcrouter_core::{DestinationRoute, Route};
-use rusty_mcrouter_net::{Client, Server};
-use rusty_mcrouter_protocol::reply::Reply;
-use std::sync::Arc;
+use clap::Parser;
+use rusty_mcrouter_config::parse_file;
+use rusty_mcrouter_core::build_route;
+use rusty_mcrouter_net::Server;
+use rusty_mcrouter_protocol::Reply;
+use std::{path::PathBuf, sync::Arc};
 
-const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:5000";
-const DEFAULT_BACKEND_ADDR: &str = "127.0.0.1:11211";
+#[derive(Parser)]
+struct Args {
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "path to mcrouter-format JSON config file"
+    )]
+    config: PathBuf,
+
+    #[arg(
+        long,
+        value_name = "ADDR",
+        default_value = "127.0.0.1:5000",
+        env = "RUSTY_MCROUTER_LISTEN",
+        help = "address to listen on"
+    )]
+    listen: String,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let listen = std::env::var("RUSTY_MCROUTER_LISTEN")
-        .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_string());
-    let backend = std::env::var("RUSTY_MCROUTER_BACKEND")
-        .unwrap_or_else(|_| DEFAULT_BACKEND_ADDR.to_string());
-
-    let client = Client::connect(&backend).await?;
-    let route = Arc::new(DestinationRoute::new(client));
-
-    let server = Server::bind(&listen).await?;
+    let args = Args::parse();
+    let config = parse_file(&args.config)?;
+    let route = build_route(&config).await?;
+    let server = Server::bind(&args.listen).await?;
     let bound = server.local_addr()?;
 
-    // Machine-readable readiness line on stdout for process supervisors and
-    // integration tests; human log goes to stderr.
     println!("READY {}", bound);
-    eprintln!("rusty-mcrouter listening on {} -> backend {}", bound, backend);
+    eprintln!(
+        "rusty-mcrouter listening on {} -> backend {}",
+        bound,
+        args.config.display()
+    );
 
     server
         .serve(move |req| {
             let route = Arc::clone(&route);
             async move {
-                route.route(req).await.unwrap_or_else(|_| {
+                route.route_dyn(req).await.unwrap_or_else(|_| {
                     Reply::ServerError(Bytes::from_static(b"backend unavailable"))
                 })
             }

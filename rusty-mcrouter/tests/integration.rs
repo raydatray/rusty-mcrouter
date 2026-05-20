@@ -1,10 +1,9 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use testcontainers::{
-    core::IntoContainerPort, runners::AsyncRunner, ContainerAsync, GenericImage,
-};
+use testcontainers::{core::IntoContainerPort, runners::AsyncRunner, ContainerAsync, GenericImage};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
@@ -17,6 +16,7 @@ struct Fixture {
     // lifetime. Tests share one backend + one router instance via OnceCell.
     _backend: ContainerAsync<GenericImage>,
     _router: Child,
+    _config_path: PathBuf,
 }
 
 static FIXTURE: OnceCell<Fixture> = OnceCell::const_new();
@@ -34,8 +34,7 @@ async fn fixture() -> &'static Fixture {
                 .get_host_port_ipv4(11211)
                 .await
                 .expect("get backend port");
-            let backend_addr: SocketAddr =
-                format!("127.0.0.1:{}", backend_port).parse().unwrap();
+            let backend_addr: SocketAddr = format!("127.0.0.1:{}", backend_port).parse().unwrap();
 
             // Pre-seed a read-only key. Tests that need fresh writes use their
             // own per-test key namespace so they're safe under parallel
@@ -49,7 +48,19 @@ async fn fixture() -> &'static Fixture {
             assert_eq!(&buf[..n], b"STORED\r\n");
             drop(conn);
 
+            let config_path = std::env::temp_dir().join(format!(
+                "rusty-mcrouter-integration-{}.json",
+                std::process::id()
+            ));
+            let config_body = format!(
+                r#"{{ "pools": {{ "memcached": {{ "servers": ["{}"] }} }}, "route": "PoolRoute|memcached" }}"#,
+                backend_addr
+            );
+            std::fs::write(&config_path, &config_body).expect("write config file");
+
             let mut router = Command::new(env!("CARGO_BIN_EXE_rusty-mcrouter"))
+                .arg("--config")
+                .arg(&config_path)
                 .env("RUSTY_MCROUTER_LISTEN", "127.0.0.1:0")
                 .env("RUSTY_MCROUTER_BACKEND", backend_addr.to_string())
                 .stdout(Stdio::piped())
@@ -75,6 +86,7 @@ async fn fixture() -> &'static Fixture {
                 router_addr,
                 _backend: backend,
                 _router: router,
+                _config_path: config_path,
             }
         })
         .await
@@ -122,11 +134,7 @@ async fn get_missing_key_returns_end() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn get_multi_key_returns_only_hits() {
     let fx = fixture().await;
-    let resp = round_trip(
-        fx.router_addr,
-        b"get seeded_foo get_multi_key_miss\r\n",
-    )
-    .await;
+    let resp = round_trip(fx.router_addr, b"get seeded_foo get_multi_key_miss\r\n").await;
     assert_eq!(resp, b"VALUE seeded_foo 0 3\r\nbar\r\nEND\r\n");
 }
 
@@ -146,11 +154,7 @@ async fn set_returns_stored() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn set_then_get_round_trip() {
     let fx = fixture().await;
-    let stored = round_trip(
-        fx.router_addr,
-        b"set set_then_get_key 9 0 5\r\nworld\r\n",
-    )
-    .await;
+    let stored = round_trip(fx.router_addr, b"set set_then_get_key 9 0 5\r\nworld\r\n").await;
     assert_eq!(stored, b"STORED\r\n");
 
     let fetched = round_trip(fx.router_addr, b"get set_then_get_key\r\n").await;
@@ -161,11 +165,7 @@ async fn set_then_get_round_trip() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn set_overwrites_existing_value() {
     let fx = fixture().await;
-    let initial = round_trip(
-        fx.router_addr,
-        b"set set_overwrites_key 0 0 3\r\nbar\r\n",
-    )
-    .await;
+    let initial = round_trip(fx.router_addr, b"set set_overwrites_key 0 0 3\r\nbar\r\n").await;
     assert_eq!(initial, b"STORED\r\n");
 
     let updated = round_trip(
@@ -176,5 +176,45 @@ async fn set_overwrites_existing_value() {
     assert_eq!(updated, b"STORED\r\n");
 
     let fetched = round_trip(fx.router_addr, b"get set_overwrites_key\r\n").await;
-    assert_eq!(fetched, b"VALUE set_overwrites_key 0 7\r\nupdated\r\nEND\r\n");
+    assert_eq!(
+        fetched,
+        b"VALUE set_overwrites_key 0 7\r\nupdated\r\nEND\r\n"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn delete_existing_key_returns_deleted() {
+    let fx = fixture().await;
+    let stored = round_trip(
+        fx.router_addr,
+        b"set delete_existing_key 0 0 3\r\nbar\r\n",
+    )
+    .await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let deleted = round_trip(fx.router_addr, b"delete delete_existing_key\r\n").await;
+    assert_eq!(deleted, b"DELETED\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn delete_missing_key_returns_not_found() {
+    let fx = fixture().await;
+    let resp = round_trip(fx.router_addr, b"delete delete_missing_key\r\n").await;
+    assert_eq!(resp, b"NOT_FOUND\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn set_delete_get_round_trip() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set set_delete_get_key 0 0 5\r\nhello\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let deleted = round_trip(fx.router_addr, b"delete set_delete_get_key\r\n").await;
+    assert_eq!(deleted, b"DELETED\r\n");
+
+    let fetched = round_trip(fx.router_addr, b"get set_delete_get_key\r\n").await;
+    assert_eq!(fetched, b"END\r\n");
 }

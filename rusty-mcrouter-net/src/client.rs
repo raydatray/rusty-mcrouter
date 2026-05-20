@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use rusty_mcrouter_protocol::{parser::parse_reply, reply::Reply, request::Request};
+use rusty_mcrouter_protocol::{parse_reply, Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
@@ -45,7 +45,7 @@ impl Client {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use rusty_mcrouter_protocol::error::ProtocolError;
+    use rusty_mcrouter_protocol::ProtocolError;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;

@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use rusty_mcrouter_protocol::{parser::parse_request, reply::Reply, request::Request};
+use rusty_mcrouter_protocol::{parse_request, Reply, Request};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn bind<A: ToSocketAddrs>(addr: A) -> std::io::Result<Self> {
+    pub async fn bind(addr: impl ToSocketAddrs) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         Ok(Self { listener })
     }
@@ -40,10 +40,7 @@ impl Server {
     }
 }
 
-async fn serve_session<F, Fut>(
-    mut stream: TcpStream,
-    handler: Arc<F>,
-) -> Result<(), NetError>
+async fn serve_session<F, Fut>(mut stream: TcpStream, handler: Arc<F>) -> Result<(), NetError>
 where
     F: Fn(Request) -> Fut + Send + Sync,
     Fut: Future<Output = Reply> + Send,
@@ -71,7 +68,7 @@ where
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use rusty_mcrouter_protocol::reply::Value;
+    use rusty_mcrouter_protocol::Value;
 
     async fn spawn_server<F, Fut>(handler: F) -> SocketAddr
     where
@@ -185,6 +182,7 @@ mod tests {
         match req {
             Request::Set { .. } => Reply::Stored,
             Request::Get { .. } => Reply::Get { hits: vec![] },
+            Request::Delete { .. } => Reply::Deleted,
         }
     }
 
@@ -214,6 +212,7 @@ mod tests {
                         })
                         .collect(),
                 },
+                Request::Delete { .. } => Reply::Deleted,
             }
         }
         let addr = spawn_server(handler).await;
