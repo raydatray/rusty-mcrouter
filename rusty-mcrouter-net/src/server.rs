@@ -15,7 +15,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn bind<A: ToSocketAddrs>(addr: A) -> std::io::Result<Self> {
+    pub async fn bind(addr: impl ToSocketAddrs) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         Ok(Self { listener })
     }
@@ -40,10 +40,7 @@ impl Server {
     }
 }
 
-async fn serve_session<F, Fut>(
-    mut stream: TcpStream,
-    handler: Arc<F>,
-) -> Result<(), NetError>
+async fn serve_session<F, Fut>(mut stream: TcpStream, handler: Arc<F>) -> Result<(), NetError>
 where
     F: Fn(Request) -> Fut + Send + Sync,
     Fut: Future<Output = Reply> + Send,
