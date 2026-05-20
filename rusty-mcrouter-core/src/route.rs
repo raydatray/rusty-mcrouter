@@ -36,6 +36,6 @@ pub trait DynRoute: Send + Sync + 'static {
 
 impl<R: Route> DynRoute for R {
     fn route_dyn<'a>(&'a self, req: Request) -> RouteFuture<'a> {
-        Box::pin(<R as Route>::route(&self, req))
+        Box::pin(<R as Route>::route(self, req))
     }
 }
