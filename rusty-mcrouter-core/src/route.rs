@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use rusty_mcrouter_net::NetError;
 use rusty_mcrouter_protocol::{reply::Reply, request::Request};
@@ -12,6 +12,20 @@ pub enum RouteError {
 
 pub trait Route: Send + Sync + 'static {
     fn route(&self, req: Request) -> impl Future<Output = Result<Reply, RouteError>> + Send;
+
+    fn into_dyn(self) -> Arc<dyn DynRoute>
+    where
+        Self: Sized,
+    {
+        Arc::new(self)
+    }
+
+    fn arc_into_dyn(self: Arc<Self>) -> Arc<dyn DynRoute>
+    where
+        Self: Sized,
+    {
+        self
+    }
 }
 
 pub type RouteFuture<'a> = Pin<Box<dyn Future<Output = Result<Reply, RouteError>> + Send + 'a>>;
