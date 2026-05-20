@@ -182,6 +182,7 @@ mod tests {
         match req {
             Request::Set { .. } => Reply::Stored,
             Request::Get { .. } => Reply::Get { hits: vec![] },
+            Request::Delete { .. } => Reply::Deleted,
         }
     }
 
@@ -211,6 +212,7 @@ mod tests {
                         })
                         .collect(),
                 },
+                Request::Delete { .. } => Reply::Deleted,
             }
         }
         let addr = spawn_server(handler).await;

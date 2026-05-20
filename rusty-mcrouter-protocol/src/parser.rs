@@ -58,6 +58,7 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolErro
     match cmd {
         b"get" => parse_get_request(buf, eol_idx),
         b"set" => parse_set_request(buf, eol_idx, line_end),
+        b"delete" => parse_delete_request(buf, eol_idx),
         _ => {
             let _ = buf.split_to(total);
             Err(ProtocolError::Malformed("unknown command"))
@@ -182,6 +183,39 @@ fn parse_set_header(header: &[u8]) -> Result<SetHeader, ProtocolError> {
     })
 }
 
+fn parse_delete_request(
+    buf: &mut BytesMut,
+    eol_idx: usize,
+) -> Result<Option<Request>, ProtocolError> {
+    let mut line = buf.split_to(eol_idx + 1).freeze();
+    if line.ends_with(b"\r\n") {
+        line.truncate(line.len() - 2);
+    } else {
+        line.truncate(line.len() - 1);
+    }
+
+    let rest = match line.strip_prefix(b"delete ") {
+        Some(_) => line.slice(b"delete ".len()..),
+        None => return Err(ProtocolError::Malformed("missing arguments")),
+    };
+
+    let mut parts = rest.split(|&b| b == b' ').filter(|s| !s.is_empty());
+
+    let key = parts
+        .next()
+        .ok_or(ProtocolError::Malformed("delete requires <key>"))?;
+
+    if parts.next().is_some() {
+        return Err(ProtocolError::Malformed("delete: unexpected extra token"));
+    }
+
+    validate_key(key)?;
+
+    Ok(Some(Request::Delete {
+        key: rest.slice_ref(key),
+    }))
+}
+
 pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
     let Some((line_end, total)) = read_line(buf, 0) else {
         return Ok(None);
@@ -220,6 +254,7 @@ fn classify_first_line(line: &[u8]) -> FirstLine {
         b"EXISTS" => FirstLine::Simple(Reply::Exists),
         b"NOT_FOUND" => FirstLine::Simple(Reply::NotFound),
         b"ERROR" => FirstLine::Simple(Reply::Error),
+        b"DELETED" => FirstLine::Simple(Reply::Deleted),
         _ if line.starts_with(b"CLIENT_ERROR ") => FirstLine::ClientErrorMessage,
         _ if line.starts_with(b"SERVER_ERROR ") => FirstLine::ServerErrorMessage,
         _ => FirstLine::GetReply,
@@ -789,6 +824,7 @@ mod tests {
             (b"NOT_STORED\r\n", Reply::NotStored),
             (b"EXISTS\r\n", Reply::Exists),
             (b"NOT_FOUND\r\n", Reply::NotFound),
+            (b"DELETED\r\n", Reply::Deleted),
         ];
         cases.iter().for_each(|(input, expected)| {
             let mut buf = BytesMut::from(*input);
@@ -1115,6 +1151,89 @@ mod tests {
             flags: u32::MAX,
             exptime: -42,
             data: Bytes::from_static(b"hello \x00 world\r\n"),
+        };
+
+        let mut buf = BytesMut::new();
+        original.serialize_into(&mut buf);
+        let parsed = parse_request(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed, original);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_request_delete_basic() {
+        let cases: &[&[u8]] = &[b"delete foo\n", b"delete foo\r\n"];
+
+        cases.iter().for_each(|input| {
+            let mut buf = BytesMut::from(*input);
+            let req = parse_request(&mut buf).unwrap().unwrap();
+            assert_eq!(
+                req,
+                Request::Delete {
+                    key: Bytes::from_static(b"foo")
+                }
+            );
+            assert!(buf.is_empty());
+        });
+    }
+
+    #[test]
+    fn parse_request_rejects_delete_without_args() {
+        for input in [&b"delete\n"[..], &b"delete\r\n"[..]] {
+            let mut buf = BytesMut::from(input);
+            assert!(matches!(
+                parse_request(&mut buf),
+                Err(ProtocolError::Malformed("missing arguments"))
+            ));
+            assert!(buf.is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_request_rejects_delete_with_no_key() {
+        for input in [&b"delete \n"[..], &b"delete \r\n"[..], &b"delete   \r\n"[..]] {
+            let mut buf = BytesMut::from(input);
+            assert!(matches!(
+                parse_request(&mut buf),
+                Err(ProtocolError::Malformed("delete requires <key>"))
+            ));
+            assert!(buf.is_empty(), "frame consumed for {input:?}");
+        }
+    }
+
+    #[test]
+    fn parse_request_rejects_delete_with_extra_tokens() {
+        let cases: &[&[u8]] = &[
+            b"delete foo bar\r\n",
+            b"delete foo noreply\r\n",
+            b"delete foo 0\r\n",
+        ];
+        cases.iter().for_each(|input| {
+            let mut buf = BytesMut::from(*input);
+            assert!(
+                matches!(
+                    parse_request(&mut buf),
+                    Err(ProtocolError::Malformed("delete: unexpected extra token"))
+                ),
+                "expected extra-token error for {input:?}"
+            );
+            assert!(buf.is_empty(), "frame consumed for {input:?}");
+        });
+    }
+
+    #[test]
+    fn parse_request_propagates_delete_invalid_key() {
+        let mut buf = BytesMut::from(&b"delete \x01bad\n"[..]);
+        assert!(matches!(
+            parse_request(&mut buf),
+            Err(ProtocolError::InvalidKey)
+        ));
+    }
+
+    #[test]
+    fn parse_request_delete_round_trips_with_serializer() {
+        let original = Request::Delete {
+            key: Bytes::from_static(b"some-key-with-dashes"),
         };
 
         let mut buf = BytesMut::new();

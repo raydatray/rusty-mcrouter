@@ -16,6 +16,7 @@ pub enum Reply {
     NotStored,
     Exists,
     NotFound,
+    Deleted,
     // ERROR / CLIENT_ERROR / SERVER_ERROR are modeled as first-class replies
     // (not parser errors) so routes can propagate backend failures
     // semantically instead of dropping the connection on every hiccup.
@@ -45,6 +46,7 @@ impl Reply {
             Reply::NotStored => out.put_slice(b"NOT_STORED\r\n"),
             Reply::Exists => out.put_slice(b"EXISTS\r\n"),
             Reply::NotFound => out.put_slice(b"NOT_FOUND\r\n"),
+            Reply::Deleted => out.put_slice(b"DELETED\r\n"),
             Reply::Error => out.put_slice(b"ERROR\r\n"),
             Reply::ClientError(msg) => {
                 out.put_slice(b"CLIENT_ERROR ");
@@ -173,6 +175,7 @@ mod tests {
             (Reply::NotStored, b"NOT_STORED\r\n"),
             (Reply::Exists, b"EXISTS\r\n"),
             (Reply::NotFound, b"NOT_FOUND\r\n"),
+            (Reply::Deleted, b"DELETED\r\n"),
         ];
         cases.iter().for_each(|(reply, expected)| {
             assert_eq!(serialize(reply).as_ref(), *expected, "reply={reply:?}");
@@ -196,7 +199,10 @@ mod tests {
     #[test]
     fn server_error_includes_message() {
         let reply = Reply::ServerError(Bytes::from_static(b"out of memory"));
-        assert_eq!(serialize(&reply).as_ref(), b"SERVER_ERROR out of memory\r\n");
+        assert_eq!(
+            serialize(&reply).as_ref(),
+            b"SERVER_ERROR out of memory\r\n"
+        );
     }
 
     #[test]
@@ -204,5 +210,4 @@ mod tests {
         let reply = Reply::ClientError(Bytes::from_static(b""));
         assert_eq!(serialize(&reply).as_ref(), b"CLIENT_ERROR \r\n");
     }
-
 }
