@@ -52,6 +52,7 @@ fn classify_first_line(line: &[u8]) -> FirstLine {
         b"NOT_FOUND" => FirstLine::Simple(Reply::NotFound),
         b"ERROR" => FirstLine::Simple(Reply::Error),
         b"DELETED" => FirstLine::Simple(Reply::Deleted),
+        b"TOUCHED" => FirstLine::Simple(Reply::Touched),
         _ if line.starts_with(b"CLIENT_ERROR ") => FirstLine::ClientErrorMessage,
         _ if line.starts_with(b"SERVER_ERROR ") => FirstLine::ServerErrorMessage,
         _ if !line.is_empty() && line.iter().all(|b| b.is_ascii_digit()) => FirstLine::NumericLine,
@@ -326,6 +327,7 @@ mod tests {
             (b"EXISTS\r\n", Reply::Exists),
             (b"NOT_FOUND\r\n", Reply::NotFound),
             (b"DELETED\r\n", Reply::Deleted),
+            (b"TOUCHED\r\n", Reply::Touched),
         ];
         cases.iter().for_each(|(input, expected)| {
             let mut buf = BytesMut::from(*input);

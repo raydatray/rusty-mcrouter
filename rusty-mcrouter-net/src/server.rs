@@ -188,6 +188,7 @@ mod tests {
             Request::Get { .. } => Reply::Get { hits: vec![] },
             Request::Delete { .. } => Reply::Deleted,
             Request::Incr { .. } | Request::Decr { .. } => Reply::NotFound,
+            Request::Touch { .. } => Reply::Touched,
         }
     }
 
@@ -223,6 +224,7 @@ mod tests {
                 },
                 Request::Delete { .. } => Reply::Deleted,
                 Request::Incr { .. } | Request::Decr { .. } => Reply::NotFound,
+                Request::Touch { .. } => Reply::Touched,
             }
         }
         let addr = spawn_server(handler).await;
