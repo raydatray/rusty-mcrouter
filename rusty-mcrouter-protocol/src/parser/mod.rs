@@ -2,6 +2,7 @@ use bytes::BytesMut;
 
 use crate::{error::ProtocolError, request::Request};
 
+mod add;
 mod delete;
 mod get;
 mod reply;
@@ -28,6 +29,7 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolErro
     match cmd {
         b"get" => get::parse_request(buf, eol_idx),
         b"set" => set::parse_request(buf, eol_idx, line_end),
+        b"add" => add::parse_request(buf, eol_idx, line_end),
         b"delete" => delete::parse_request(buf, eol_idx),
         _ => {
             let _ = buf.split_to(total);

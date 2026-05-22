@@ -16,6 +16,12 @@ pub enum Request {
     Delete {
         key: Bytes,
     },
+    Add {
+        key: Bytes,
+        flags: u32,
+        exptime: i32,
+        data: Bytes,
+    },
 }
 
 impl Request {
@@ -50,6 +56,24 @@ impl Request {
             Request::Delete { key } => {
                 out.put_slice(b"delete ");
                 out.put_slice(key);
+                out.put_slice(b"\r\n");
+            }
+            Request::Add {
+                key,
+                flags,
+                exptime,
+                data,
+            } => {
+                out.put_slice(b"add ");
+                out.put_slice(key);
+                out.put_u8(b' ');
+                write_decimal(out, *flags as u64);
+                out.put_u8(b' ');
+                write_signed_decimal(out, *exptime as i64);
+                out.put_u8(b' ');
+                write_decimal(out, data.len() as u64);
+                out.put_slice(b"\r\n");
+                out.put_slice(data);
                 out.put_slice(b"\r\n");
             }
         }
@@ -165,5 +189,27 @@ mod tests {
             key: Bytes::from_static(b"foo"),
         };
         assert_eq!(serialize(&req).as_ref(), b"delete foo\r\n");
+    }
+
+    #[test]
+    fn add_serializes_to_canonical_wire_format() {
+        let req = Request::Add {
+            key: Bytes::from_static(b"foo"),
+            flags: 0,
+            exptime: 0,
+            data: Bytes::from_static(b"bar"),
+        };
+        assert_eq!(serialize(&req).as_ref(), b"add foo 0 0 3\r\nbar\r\n");
+    }
+
+    #[test]
+    fn add_serializes_flags_and_exptime() {
+        let req = Request::Add {
+            key: Bytes::from_static(b"k"),
+            flags: 42,
+            exptime: 3600,
+            data: Bytes::from_static(b"v"),
+        };
+        assert_eq!(serialize(&req).as_ref(), b"add k 42 3600 1\r\nv\r\n");
     }
 }
