@@ -2,7 +2,7 @@ use bytes::BytesMut;
 
 use crate::{error::ProtocolError, request::Request};
 
-use super::shared::{extract_command_args, parse_u64, validate_key};
+use super::shared::{extra_token_error, extract_command_args, parse_u64, validate_key};
 
 pub(super) fn parse_request(
     buf: &mut BytesMut,
@@ -18,11 +18,7 @@ pub(super) fn parse_request(
         .next()
         .ok_or(ProtocolError::Malformed("decr requires <key> <delta>"))?;
     if let Some(extra) = parts.next() {
-        return Err(if extra == b"noreply" {
-            ProtocolError::Malformed("noreply not yet supported")
-        } else {
-            ProtocolError::Malformed("decr: unexpected extra token")
-        });
+        return Err(extra_token_error(extra, "decr: unexpected extra token"));
     }
 
     validate_key(key)?;
