@@ -459,3 +459,43 @@ async fn decr_clamps_at_zero_on_underflow() {
     let resp = round_trip(fx.router_addr, b"decr decr_underflow_key 100\r\n").await;
     assert_eq!(resp, b"0\r\n");
 }
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn touch_missing_key_returns_not_found() {
+    let fx = fixture().await;
+    let resp = round_trip(fx.router_addr, b"touch touch_missing_key 60\r\n").await;
+    assert_eq!(resp, b"NOT_FOUND\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn touch_existing_key_returns_touched() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set touch_existing_key 0 0 5\r\nhello\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let resp = round_trip(fx.router_addr, b"touch touch_existing_key 60\r\n").await;
+    assert_eq!(resp, b"TOUCHED\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn touch_preserves_value_and_flags() {
+    let fx = fixture().await;
+    let stored = round_trip(
+        fx.router_addr,
+        b"set touch_preserves_key 42 0 5\r\nhello\r\n",
+    )
+    .await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let touched = round_trip(fx.router_addr, b"touch touch_preserves_key 3600\r\n").await;
+    assert_eq!(touched, b"TOUCHED\r\n");
+
+    let fetched = round_trip(fx.router_addr, b"get touch_preserves_key\r\n").await;
+    assert_eq!(
+        fetched,
+        b"VALUE touch_preserves_key 42 5\r\nhello\r\nEND\r\n"
+    );
+}

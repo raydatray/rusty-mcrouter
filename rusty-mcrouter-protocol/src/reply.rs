@@ -17,6 +17,7 @@ pub enum Reply {
     Exists,
     NotFound,
     Deleted,
+    Touched,
     Numeric(u64),
     // ERROR / CLIENT_ERROR / SERVER_ERROR are modeled as first-class replies
     // (not parser errors) so routes can propagate backend failures
@@ -48,6 +49,7 @@ impl Reply {
             Reply::Exists => out.put_slice(b"EXISTS\r\n"),
             Reply::NotFound => out.put_slice(b"NOT_FOUND\r\n"),
             Reply::Deleted => out.put_slice(b"DELETED\r\n"),
+            Reply::Touched => out.put_slice(b"TOUCHED\r\n"),
             Reply::Numeric(value) => {
                 write_decimal(out, *value);
                 out.put_slice(b"\r\n");
@@ -181,6 +183,7 @@ mod tests {
             (Reply::Exists, b"EXISTS\r\n"),
             (Reply::NotFound, b"NOT_FOUND\r\n"),
             (Reply::Deleted, b"DELETED\r\n"),
+            (Reply::Touched, b"TOUCHED\r\n"),
         ];
         cases.iter().for_each(|(reply, expected)| {
             assert_eq!(serialize(reply).as_ref(), *expected, "reply={reply:?}");
