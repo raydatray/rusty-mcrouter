@@ -15,7 +15,7 @@ impl Route for NullRoute {
             | Request::Append { .. }
             | Request::Prepend { .. } => Reply::Stored,
             Request::Delete { .. } => Reply::Deleted,
-            Request::Incr { .. } => Reply::NotFound,
+            Request::Incr { .. } | Request::Decr { .. } => Reply::NotFound,
         })
     }
 }
@@ -145,6 +145,19 @@ mod tests {
         let r = NullRoute;
         let reply = r
             .route(Request::Incr {
+                key: Bytes::from_static(b"k"),
+                delta: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply, Reply::NotFound);
+    }
+
+    #[tokio::test]
+    async fn returns_not_found_for_decr() {
+        let r = NullRoute;
+        let reply = r
+            .route(Request::Decr {
                 key: Bytes::from_static(b"k"),
                 delta: 1,
             })
