@@ -44,6 +44,10 @@ pub enum Request {
         key: Bytes,
         delta: u64,
     },
+    Decr {
+        key: Bytes,
+        delta: u64,
+    },
 }
 
 impl Request {
@@ -154,6 +158,13 @@ impl Request {
             }
             Request::Incr { key, delta } => {
                 out.put_slice(b"incr ");
+                out.put_slice(key);
+                out.put_u8(b' ');
+                write_decimal(out, *delta);
+                out.put_slice(b"\r\n");
+            }
+            Request::Decr { key, delta } => {
+                out.put_slice(b"decr ");
                 out.put_slice(key);
                 out.put_u8(b' ');
                 write_decimal(out, *delta);
@@ -345,5 +356,14 @@ mod tests {
             delta: u64::MAX,
         };
         assert_eq!(serialize(&req).as_ref(), b"incr k 18446744073709551615\r\n");
+    }
+
+    #[test]
+    fn decr_serializes_to_canonical_wire_format() {
+        let req = Request::Decr {
+            key: Bytes::from_static(b"foo"),
+            delta: 1,
+        };
+        assert_eq!(serialize(&req).as_ref(), b"decr foo 1\r\n");
     }
 }

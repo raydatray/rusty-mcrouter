@@ -429,3 +429,33 @@ async fn incr_by_delta_increments_value() {
     let fetched = round_trip(fx.router_addr, b"get incr_by_delta_key\r\n").await;
     assert_eq!(fetched, b"VALUE incr_by_delta_key 0 3\r\n105\r\nEND\r\n");
 }
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn decr_missing_key_returns_not_found() {
+    let fx = fixture().await;
+    let resp = round_trip(fx.router_addr, b"decr decr_missing_key 1\r\n").await;
+    assert_eq!(resp, b"NOT_FOUND\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn decr_existing_numeric_returns_new_value() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set decr_existing_key 0 0 2\r\n42\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let resp = round_trip(fx.router_addr, b"decr decr_existing_key 5\r\n").await;
+    assert_eq!(resp, b"37\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn decr_clamps_at_zero_on_underflow() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set decr_underflow_key 0 0 1\r\n5\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let resp = round_trip(fx.router_addr, b"decr decr_underflow_key 100\r\n").await;
+    assert_eq!(resp, b"0\r\n");
+}
