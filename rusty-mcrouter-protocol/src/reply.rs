@@ -17,6 +17,7 @@ pub enum Reply {
     Exists,
     NotFound,
     Deleted,
+    Numeric(u64),
     // ERROR / CLIENT_ERROR / SERVER_ERROR are modeled as first-class replies
     // (not parser errors) so routes can propagate backend failures
     // semantically instead of dropping the connection on every hiccup.
@@ -47,6 +48,10 @@ impl Reply {
             Reply::Exists => out.put_slice(b"EXISTS\r\n"),
             Reply::NotFound => out.put_slice(b"NOT_FOUND\r\n"),
             Reply::Deleted => out.put_slice(b"DELETED\r\n"),
+            Reply::Numeric(value) => {
+                write_decimal(out, *value);
+                out.put_slice(b"\r\n");
+            }
             Reply::Error => out.put_slice(b"ERROR\r\n"),
             Reply::ClientError(msg) => {
                 out.put_slice(b"CLIENT_ERROR ");
@@ -209,5 +214,22 @@ mod tests {
     fn error_messages_with_empty_body_still_emit_separator_space() {
         let reply = Reply::ClientError(Bytes::from_static(b""));
         assert_eq!(serialize(&reply).as_ref(), b"CLIENT_ERROR \r\n");
+    }
+
+    #[test]
+    fn numeric_serializes_to_value_line() {
+        let cases: &[(u64, &[u8])] = &[
+            (0, b"0\r\n"),
+            (1, b"1\r\n"),
+            (12345, b"12345\r\n"),
+            (u64::MAX, b"18446744073709551615\r\n"),
+        ];
+        cases.iter().for_each(|(value, expected)| {
+            assert_eq!(
+                serialize(&Reply::Numeric(*value)).as_ref(),
+                *expected,
+                "value={value}"
+            );
+        });
     }
 }
