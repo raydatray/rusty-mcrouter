@@ -34,6 +34,14 @@ pub(super) fn extract_command_args(
     }
 }
 
+pub(super) fn extra_token_error(extra: &[u8], fallback: &'static str) -> ProtocolError {
+    if extra == b"noreply" {
+        ProtocolError::Malformed("noreply not yet supported")
+    } else {
+        ProtocolError::Malformed(fallback)
+    }
+}
+
 pub(super) struct StorageRequest {
     pub key: Bytes,
     pub flags: u32,
@@ -110,11 +118,7 @@ fn parse_storage_header(
     let bytes_bytes = parts.next().ok_or(ProtocolError::Malformed(header_help))?;
 
     if let Some(extra) = parts.next() {
-        return Err(if extra == b"noreply" {
-            ProtocolError::Malformed("noreply not yet supported")
-        } else {
-            ProtocolError::Malformed(extra_token_msg)
-        });
+        return Err(extra_token_error(extra, extra_token_msg));
     }
 
     validate_key(key)?;
