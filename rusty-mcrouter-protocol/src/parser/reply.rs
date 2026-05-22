@@ -5,7 +5,7 @@ use crate::{
     reply::{Reply, Value},
 };
 
-use super::shared::{body_terminator_len, parse_u32, parse_usize, read_line};
+use super::shared::{body_terminator_len, parse_u32, parse_u64, parse_usize, read_line};
 
 pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
     let Some((line_end, total)) = read_line(buf, 0) else {
@@ -28,6 +28,11 @@ pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
             let msg = frozen.slice(b"SERVER_ERROR ".len()..line_end);
             Ok(Some(Reply::ServerError(msg)))
         }
+        FirstLine::NumericLine => {
+            let value = parse_u64(&buf[..line_end])?;
+            let _ = buf.split_to(total);
+            Ok(Some(Reply::Numeric(value)))
+        }
     }
 }
 
@@ -36,6 +41,7 @@ enum FirstLine {
     Simple(Reply),
     ClientErrorMessage,
     ServerErrorMessage,
+    NumericLine,
 }
 
 fn classify_first_line(line: &[u8]) -> FirstLine {
@@ -48,6 +54,7 @@ fn classify_first_line(line: &[u8]) -> FirstLine {
         b"DELETED" => FirstLine::Simple(Reply::Deleted),
         _ if line.starts_with(b"CLIENT_ERROR ") => FirstLine::ClientErrorMessage,
         _ if line.starts_with(b"SERVER_ERROR ") => FirstLine::ServerErrorMessage,
+        _ if !line.is_empty() && line.iter().all(|b| b.is_ascii_digit()) => FirstLine::NumericLine,
         _ => FirstLine::GetReply,
     }
 }
@@ -396,6 +403,54 @@ mod tests {
             result,
             Err(ProtocolError::Malformed("missing CRLF after body"))
         ));
+    }
+
+    #[test]
+    fn parse_reply_numeric_value() {
+        let cases: &[(&[u8], u64)] = &[
+            (b"0\r\n", 0),
+            (b"1\r\n", 1),
+            (b"12345\r\n", 12345),
+            (b"18446744073709551615\r\n", u64::MAX),
+        ];
+        cases.iter().for_each(|(input, expected)| {
+            let mut buf = BytesMut::from(*input);
+            assert_eq!(
+                parse_reply(&mut buf).unwrap().unwrap(),
+                Reply::Numeric(*expected),
+                "input={input:?}"
+            );
+            assert!(buf.is_empty(), "input fully consumed for {input:?}");
+        });
+    }
+
+    #[test]
+    fn parse_reply_numeric_accepts_lf_only_terminator() {
+        let mut buf = BytesMut::from(&b"42\n"[..]);
+        assert_eq!(parse_reply(&mut buf).unwrap().unwrap(), Reply::Numeric(42));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_numeric_rejects_overflow() {
+        let mut buf = BytesMut::from(&b"99999999999999999999999\r\n"[..]);
+        assert!(matches!(
+            parse_reply(&mut buf),
+            Err(ProtocolError::Malformed("invalid u64"))
+        ));
+    }
+
+    #[test]
+    fn parse_reply_numeric_round_trips_with_serializer() {
+        let values = [0u64, 1, 12345, u64::MAX];
+        values.iter().for_each(|v| {
+            let original = Reply::Numeric(*v);
+            let mut buf = BytesMut::new();
+            original.serialize_into(&mut buf);
+            let parsed = parse_reply(&mut buf).unwrap().unwrap();
+            assert_eq!(parsed, original);
+            assert!(buf.is_empty());
+        });
     }
 
     #[test]
