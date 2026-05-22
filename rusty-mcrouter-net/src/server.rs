@@ -183,7 +183,8 @@ mod tests {
             Request::Set { .. }
             | Request::Add { .. }
             | Request::Replace { .. }
-            | Request::Append { .. } => Reply::Stored,
+            | Request::Append { .. }
+            | Request::Prepend { .. } => Reply::Stored,
             Request::Get { .. } => Reply::Get { hits: vec![] },
             Request::Delete { .. } => Reply::Deleted,
         }
@@ -207,7 +208,8 @@ mod tests {
                 Request::Set { .. }
                 | Request::Add { .. }
                 | Request::Replace { .. }
-                | Request::Append { .. } => Reply::Stored,
+                | Request::Append { .. }
+                | Request::Prepend { .. } => Reply::Stored,
                 Request::Get { keys } => Reply::Get {
                     hits: keys
                         .into_iter()
