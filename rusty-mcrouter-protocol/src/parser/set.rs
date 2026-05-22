@@ -1,8 +1,8 @@
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 
 use crate::{error::ProtocolError, request::Request};
 
-use super::shared::{body_terminator_len, parse_i32, parse_u32, parse_usize, validate_key};
+use super::shared::{parse_storage_request, StorageRequest};
 
 const SET_HEADER_HELP: &str = "set requires <key> <flags> <exptime> <bytes>";
 
@@ -11,88 +11,28 @@ pub(super) fn parse_request(
     eol_idx: usize,
     line_text_end: usize,
 ) -> Result<Option<Request>, ProtocolError> {
-    // Header parse is pure over a slice; the wrapper handles buf mutation
-    // so we keep partial-frame reads idempotent.
-    let SetHeader {
+    let Some(StorageRequest {
         key,
         flags,
         exptime,
-        bytes_count,
-    } = match parse_set_header(&buf[..line_text_end]) {
-        Ok(h) => h,
-        Err(e) => {
-            let _ = buf.split_to(eol_idx + 1);
-            return Err(e);
-        }
+        data,
+    }) = parse_storage_request(
+        buf,
+        eol_idx,
+        line_text_end,
+        b"set ",
+        SET_HEADER_HELP,
+        "set: unexpected extra token in header",
+    )?
+    else {
+        return Ok(None);
     };
-
-    // Body framing mirrors VALUE block parsing: bytes_count payload, then a
-    // CRLF or LF that does NOT count toward bytes_count.
-    let data_start = eol_idx + 1;
-    let data_end = data_start
-        .checked_add(bytes_count)
-        .ok_or(ProtocolError::Malformed("body length overflow"))?;
-    let terminator_len = match body_terminator_len(buf, data_end) {
-        Ok(Some(len)) => len,
-        Ok(None) => return Ok(None),
-        Err(e) => {
-            let _ = buf.split_to(data_end + 1);
-            return Err(e);
-        }
-    };
-
-    let total = data_end + terminator_len;
-    let frozen = buf.split_to(total).freeze();
-    let data = frozen.slice(data_start..data_end);
     Ok(Some(Request::Set {
         key,
         flags,
         exptime,
         data,
     }))
-}
-
-struct SetHeader {
-    key: Bytes,
-    flags: u32,
-    exptime: i32,
-    bytes_count: usize,
-}
-
-fn parse_set_header(header: &[u8]) -> Result<SetHeader, ProtocolError> {
-    let after_cmd = header
-        .strip_prefix(b"set ")
-        .ok_or(ProtocolError::Malformed("missing arguments"))?;
-
-    let mut parts = after_cmd.split(|&b| b == b' ').filter(|s| !s.is_empty());
-    let key = parts
-        .next()
-        .ok_or(ProtocolError::Malformed(SET_HEADER_HELP))?;
-    let flags_bytes = parts
-        .next()
-        .ok_or(ProtocolError::Malformed(SET_HEADER_HELP))?;
-    let exptime_bytes = parts
-        .next()
-        .ok_or(ProtocolError::Malformed(SET_HEADER_HELP))?;
-    let bytes_bytes = parts
-        .next()
-        .ok_or(ProtocolError::Malformed(SET_HEADER_HELP))?;
-
-    if let Some(extra) = parts.next() {
-        return Err(if extra == b"noreply" {
-            ProtocolError::Malformed("noreply not yet supported")
-        } else {
-            ProtocolError::Malformed("set: unexpected extra token in header")
-        });
-    }
-
-    validate_key(key)?;
-    Ok(SetHeader {
-        key: Bytes::copy_from_slice(key),
-        flags: parse_u32(flags_bytes)?,
-        exptime: parse_i32(exptime_bytes)?,
-        bytes_count: parse_usize(bytes_bytes)?,
-    })
 }
 
 #[cfg(test)]
