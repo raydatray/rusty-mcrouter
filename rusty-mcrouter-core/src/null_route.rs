@@ -16,6 +16,7 @@ impl Route for NullRoute {
             | Request::Prepend { .. } => Reply::Stored,
             Request::Delete { .. } => Reply::Deleted,
             Request::Incr { .. } | Request::Decr { .. } => Reply::NotFound,
+            Request::Touch { .. } => Reply::Touched,
         })
     }
 }
@@ -164,5 +165,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply, Reply::NotFound);
+    }
+
+    #[tokio::test]
+    async fn returns_touched_for_touch() {
+        let r = NullRoute;
+        let reply = r
+            .route(Request::Touch {
+                key: Bytes::from_static(b"k"),
+                exptime: 60,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply, Reply::Touched);
     }
 }
