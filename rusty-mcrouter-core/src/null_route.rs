@@ -9,7 +9,10 @@ impl Route for NullRoute {
         Ok(match req {
             // todo - add the other dummy replies as more request types added
             Request::Get { .. } => Reply::Get { hits: vec![] },
-            Request::Set { .. } | Request::Add { .. } | Request::Replace { .. } => Reply::Stored,
+            Request::Set { .. }
+            | Request::Add { .. }
+            | Request::Replace { .. }
+            | Request::Append { .. } => Reply::Stored,
             Request::Delete { .. } => Reply::Deleted,
         })
     }
@@ -95,6 +98,21 @@ mod tests {
         let r = NullRoute;
         let reply = r
             .route(Request::Replace {
+                key: Bytes::from_static(b"k"),
+                flags: 0,
+                exptime: 0,
+                data: Bytes::from_static(b"v"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply, Reply::Stored);
+    }
+
+    #[tokio::test]
+    async fn returns_stored_for_append() {
+        let r = NullRoute;
+        let reply = r
+            .route(Request::Append {
                 key: Bytes::from_static(b"k"),
                 flags: 0,
                 exptime: 0,
