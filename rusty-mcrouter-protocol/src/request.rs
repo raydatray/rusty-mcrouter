@@ -22,6 +22,12 @@ pub enum Request {
         exptime: i32,
         data: Bytes,
     },
+    Replace {
+        key: Bytes,
+        flags: u32,
+        exptime: i32,
+        data: Bytes,
+    },
 }
 
 impl Request {
@@ -65,6 +71,24 @@ impl Request {
                 data,
             } => {
                 out.put_slice(b"add ");
+                out.put_slice(key);
+                out.put_u8(b' ');
+                write_decimal(out, *flags as u64);
+                out.put_u8(b' ');
+                write_signed_decimal(out, *exptime as i64);
+                out.put_u8(b' ');
+                write_decimal(out, data.len() as u64);
+                out.put_slice(b"\r\n");
+                out.put_slice(data);
+                out.put_slice(b"\r\n");
+            }
+            Request::Replace {
+                key,
+                flags,
+                exptime,
+                data,
+            } => {
+                out.put_slice(b"replace ");
                 out.put_slice(key);
                 out.put_u8(b' ');
                 write_decimal(out, *flags as u64);
@@ -211,5 +235,16 @@ mod tests {
             data: Bytes::from_static(b"v"),
         };
         assert_eq!(serialize(&req).as_ref(), b"add k 42 3600 1\r\nv\r\n");
+    }
+
+    #[test]
+    fn replace_serializes_to_canonical_wire_format() {
+        let req = Request::Replace {
+            key: Bytes::from_static(b"foo"),
+            flags: 0,
+            exptime: 0,
+            data: Bytes::from_static(b"bar"),
+        };
+        assert_eq!(serialize(&req).as_ref(), b"replace foo 0 0 3\r\nbar\r\n");
     }
 }
