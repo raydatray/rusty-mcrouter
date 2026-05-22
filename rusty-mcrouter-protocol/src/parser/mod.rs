@@ -8,7 +8,10 @@ use crate::{
 
 mod shared;
 
-use shared::{body_terminator_len, parse_i32, parse_u32, parse_usize, read_line, validate_key};
+use shared::{
+    body_terminator_len, extract_command_args, parse_i32, parse_u32, parse_usize, read_line,
+    validate_key,
+};
 
 // TODO: parser is stateless and re-parses headers on every partial-read call.
 // mcrouter's McServerAsciiParser holds in-progress state across calls. Make
@@ -44,17 +47,7 @@ fn command_name(header: &[u8]) -> &[u8] {
 }
 
 fn parse_get_request(buf: &mut BytesMut, eol_idx: usize) -> Result<Option<Request>, ProtocolError> {
-    let mut line = buf.split_to(eol_idx + 1).freeze();
-    if line.ends_with(b"\r\n") {
-        line.truncate(line.len() - 2);
-    } else {
-        line.truncate(line.len() - 1);
-    }
-
-    let rest = match line.strip_prefix(b"get ") {
-        Some(_) => line.slice(b"get ".len()..),
-        None => return Err(ProtocolError::Malformed("missing arguments")),
-    };
+    let rest = extract_command_args(buf, eol_idx, b"get ")?;
     parse_get(rest).map(Some)
 }
 
@@ -151,30 +144,16 @@ fn parse_delete_request(
     buf: &mut BytesMut,
     eol_idx: usize,
 ) -> Result<Option<Request>, ProtocolError> {
-    let mut line = buf.split_to(eol_idx + 1).freeze();
-    if line.ends_with(b"\r\n") {
-        line.truncate(line.len() - 2);
-    } else {
-        line.truncate(line.len() - 1);
-    }
-
-    let rest = match line.strip_prefix(b"delete ") {
-        Some(_) => line.slice(b"delete ".len()..),
-        None => return Err(ProtocolError::Malformed("missing arguments")),
-    };
+    let rest = extract_command_args(buf, eol_idx, b"delete ")?;
 
     let mut parts = rest.split(|&b| b == b' ').filter(|s| !s.is_empty());
-
     let key = parts
         .next()
         .ok_or(ProtocolError::Malformed("delete requires <key>"))?;
-
     if parts.next().is_some() {
         return Err(ProtocolError::Malformed("delete: unexpected extra token"));
     }
-
     validate_key(key)?;
-
     Ok(Some(Request::Delete {
         key: rest.slice_ref(key),
     }))
