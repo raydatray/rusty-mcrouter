@@ -187,7 +187,7 @@ mod tests {
             | Request::Prepend { .. } => Reply::Stored,
             Request::Get { .. } => Reply::Get { hits: vec![] },
             Request::Delete { .. } => Reply::Deleted,
-            Request::Incr { .. } => Reply::NotFound,
+            Request::Incr { .. } | Request::Decr { .. } => Reply::NotFound,
         }
     }
 
@@ -222,7 +222,7 @@ mod tests {
                         .collect(),
                 },
                 Request::Delete { .. } => Reply::Deleted,
-                Request::Incr { .. } => Reply::NotFound,
+                Request::Incr { .. } | Request::Decr { .. } => Reply::NotFound,
             }
         }
         let addr = spawn_server(handler).await;
