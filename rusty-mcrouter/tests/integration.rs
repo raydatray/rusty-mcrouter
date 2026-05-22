@@ -346,3 +346,53 @@ async fn append_keeps_original_flags_when_command_specifies_different_flags() {
         b"VALUE append_ignores_key 7 11\r\nhello world\r\nEND\r\n"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn prepend_to_missing_key_returns_not_stored() {
+    let fx = fixture().await;
+    let resp = round_trip(fx.router_addr, b"prepend prepend_missing_key 0 0 3\r\nbar\r\n").await;
+    assert_eq!(resp, b"NOT_STORED\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn prepend_extends_existing_value() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set prepend_extends_key 0 0 5\r\nworld\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let prepended = round_trip(
+        fx.router_addr,
+        b"prepend prepend_extends_key 0 0 6\r\nhello \r\n",
+    )
+    .await;
+    assert_eq!(prepended, b"STORED\r\n");
+
+    let fetched = round_trip(fx.router_addr, b"get prepend_extends_key\r\n").await;
+    assert_eq!(
+        fetched,
+        b"VALUE prepend_extends_key 0 11\r\nhello world\r\nEND\r\n"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn prepend_keeps_original_flags_when_command_specifies_different_flags() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set prepend_ignores_key 7 0 5\r\nworld\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let prepended = round_trip(
+        fx.router_addr,
+        b"prepend prepend_ignores_key 999 999 6\r\nhello \r\n",
+    )
+    .await;
+    assert_eq!(prepended, b"STORED\r\n");
+
+    let fetched = round_trip(fx.router_addr, b"get prepend_ignores_key\r\n").await;
+    assert_eq!(
+        fetched,
+        b"VALUE prepend_ignores_key 7 11\r\nhello world\r\nEND\r\n"
+    );
+}
