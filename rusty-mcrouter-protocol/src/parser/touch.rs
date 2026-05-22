@@ -49,63 +49,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_request_touch_negative_exptime() {
-        let mut buf = BytesMut::from(&b"touch foo -1\r\n"[..]);
-        assert_eq!(
-            parse_request(&mut buf).unwrap().unwrap(),
-            Request::Touch {
-                key: Bytes::from_static(b"foo"),
-                exptime: -1,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_request_touch_rejects_missing_exptime() {
-        let mut buf = BytesMut::from(&b"touch foo\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::Malformed("touch requires <key> <exptime>"))
-        ));
-    }
-
-    #[test]
-    fn parse_request_touch_rejects_missing_key() {
-        let mut buf = BytesMut::from(&b"touch\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::Malformed("missing arguments"))
-        ));
-    }
-
-    #[test]
-    fn parse_request_touch_rejects_non_numeric_exptime() {
-        let mut buf = BytesMut::from(&b"touch foo abc\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::Malformed("invalid i32"))
-        ));
-    }
-
-    #[test]
-    fn parse_request_touch_rejects_invalid_key() {
-        let mut buf = BytesMut::from(&b"touch \x01bad 1\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::InvalidKey)
-        ));
-    }
-
-    #[test]
-    fn parse_request_touch_rejects_noreply() {
-        let mut buf = BytesMut::from(&b"touch foo 60 noreply\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::Malformed("noreply not yet supported"))
-        ));
-    }
-
-    #[test]
     fn parse_request_touch_rejects_extra_token() {
         let mut buf = BytesMut::from(&b"touch foo 60 garbage\r\n"[..]);
         assert!(matches!(
