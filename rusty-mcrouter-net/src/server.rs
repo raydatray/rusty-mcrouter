@@ -180,7 +180,7 @@ mod tests {
 
     async fn ack_set_handler(req: Request) -> Reply {
         match req {
-            Request::Set { .. } | Request::Add { .. } => Reply::Stored,
+            Request::Set { .. } | Request::Add { .. } | Request::Replace { .. } => Reply::Stored,
             Request::Get { .. } => Reply::Get { hits: vec![] },
             Request::Delete { .. } => Reply::Deleted,
         }
@@ -201,7 +201,9 @@ mod tests {
     async fn server_handles_set_then_get_pipelined() {
         async fn handler(req: Request) -> Reply {
             match req {
-                Request::Set { .. } | Request::Add { .. } => Reply::Stored,
+                Request::Set { .. } | Request::Add { .. } | Request::Replace { .. } => {
+                    Reply::Stored
+                }
                 Request::Get { keys } => Reply::Get {
                     hits: keys
                         .into_iter()
