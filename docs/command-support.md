@@ -15,50 +15,56 @@ is checked out elsewhere.
 
 | Category | mcrouter | rusty (now) | rusty (planned) |
 |---|---|---|---|
-| Retrieval | `get` `gets` `gat` `gats` `metaget` | `get` | `get` `gets` `gat` `gats` |
-| Storage | `set` `add` `replace` `append` `prepend` `cas` | `set` | `set` `add` `replace` `append` `prepend` `cas` |
-| Deletion | `delete` | — | `delete` |
-| Counters | `incr` `decr` | — | `incr` `decr` |
-| TTL | `touch` | — | `touch` |
+| Retrieval | `get` `gets` `gat` `gats` `metaget` | `get` | `gets` `gat` `gats` |
+| Storage | `set` `add` `replace` `append` `prepend` `cas` | `set` `add` `replace` `append` `prepend` | `cas` |
+| Deletion | `delete` | `delete` | — |
+| Counters | `incr` `decr` | `incr` `decr` | — |
+| TTL | `touch` | `touch` | — |
 | Modifier | `noreply` | parser rejects | `noreply` (server-side) |
 | Router admin | `version` `quit` `stats` `flush_all` `shutdown` `exec` `flushre` `goaway` | — | `version` `quit` |
 | FB-specific | `lease-get` `lease-set` `flushre` `exec` `shutdown` `goaway` `metaget` | — | — |
 | Meta protocol | — | — | — |
 
-Target: **16 commands total (14 new) + `noreply` modifier**. Everything
-beyond that is explicitly out of scope, with reasons recorded below.
+**Status**: 10 of 16 target commands shipped (Tier 1 complete).
+Remaining: CAS family (4 commands, Tier 2), `noreply` modifier (Tier 3),
+and admin commands `version` / `quit` (Tier 4). Everything beyond that is
+explicitly out of scope, with reasons recorded below.
 
 ---
 
 ## Currently supported
 
-[`Request`](../rusty-mcrouter-protocol/src/request.rs) variants and
-[`Reply`](../rusty-mcrouter-protocol/src/reply.rs) variants today:
+All Tier 1 commands shipped. Per-command parser lives in
+[`parser/`](../rusty-mcrouter-protocol/src/parser/) — one file per command
+plus a `shared` module of common helpers (`parse_storage_request`,
+`extract_command_args`, `validate_key`, numeric parsers, `extra_token_error`).
 
-| Request | Wire format | Reply variants the parser already understands |
-|---|---|---|
-| `Get { keys }` | `get <key>+\r\n` | `Get { hits }` via `VALUE <key> <flags> <bytes>\r\n<data>\r\nEND\r\n` |
-| `Set { key, flags, exptime, data }` | `set <key> <flags> <exptime> <bytes>\r\n<data>\r\n` | `Stored` / `NotStored` / `Exists` / `NotFound` / `Error` / `ClientError(msg)` / `ServerError(msg)` |
+Implemented [`Request`](../rusty-mcrouter-protocol/src/request.rs) variants:
+`Get`, `Set`, `Add`, `Replace`, `Append`, `Prepend`, `Delete`, `Incr`,
+`Decr`, `Touch`.
 
-The reply parser already classifies the full set of single-line storage
-replies (`STORED` / `NOT_STORED` / `EXISTS` / `NOT_FOUND` / `ERROR` /
-`CLIENT_ERROR` / `SERVER_ERROR`) into the corresponding `Reply` variants —
-see [`classify_first_line`](../rusty-mcrouter-protocol/src/parser.rs).
-The `VALUE` parser also silently tolerates the extra `<cas_unique>` field
-on `gets` replies (see the comment at
-[`parser.rs:276`](../rusty-mcrouter-protocol/src/parser.rs)).
+Implemented [`Reply`](../rusty-mcrouter-protocol/src/reply.rs) variants:
+`Get { hits }`, `Stored`, `NotStored`, `Exists`, `NotFound`, `Deleted`,
+`Touched`, `Numeric(u64)`, `Error`, `ClientError(msg)`, `ServerError(msg)`.
 
-Several upcoming commands therefore ship reply-side handling almost for
-free — the gap is mostly on the request side (parse + serialize + route
-arm coverage) and on adding the few genuinely new reply variants
-(`Deleted`, `Touched`, `Numeric(u64)`, `Version(Bytes)`).
+The reply parser ([`parser/reply.rs`](../rusty-mcrouter-protocol/src/parser/reply.rs))
+classifies the full set of single-line storage/ack replies and detects
+all-digit numeric reply lines for `incr`/`decr`. It silently tolerates
+the optional `<cas_unique>` field on `VALUE` lines today; CAS becomes a
+first-class field on `Value` in Tier 2.
+
+Verified against a real memcached backend by 30 integration tests in
+[`tests/integration.rs`](../rusty-mcrouter/tests/integration.rs) (3 per
+new command + the original `get` / `set` coverage).
 
 ---
 
-## Tier 1 — Data plane, single-line or set-shape
+## Tier 1 — Data plane, single-line or set-shape (✓ all shipped)
 
 Eight commands. None invent a new wire-format pattern; each is either a copy
 of an existing shape with a different verb, or a single-line command/reply.
+Per-command implementation details below are kept as historical design notes
+documenting how each command was wired in.
 
 ### `delete`
 
@@ -260,38 +266,38 @@ and broadcasting them is a different kind of admin tool.
 
 ---
 
-## Side-by-side: mcrouter vs rusty-mcrouter (planned)
+## Side-by-side: mcrouter vs rusty-mcrouter
 
-Full enumeration. ✓ = supported; ✗ = explicitly not supported.
+Full enumeration. ✓ = supported; ⊘ = planned; ✗ = explicitly not supported.
 
-| Command | mcrouter | rusty (planned) | Notes |
+| Command | mcrouter | rusty | Notes |
 |---|---|---|---|
-| `get` | ✓ | ✓ (have) | |
-| `gets` | ✓ | ✓ | CAS token in reply |
-| `gat` | ✓ | ✓ | get + touch |
-| `gats` | ✓ | ✓ | gat + CAS |
+| `get` | ✓ | ✓ | |
+| `gets` | ✓ | ⊘ Tier 2 | CAS token in reply |
+| `gat` | ✓ | ⊘ Tier 2 | get + touch |
+| `gats` | ✓ | ⊘ Tier 2 | gat + CAS |
 | `metaget` | ✓ | ✗ | mcrouter-internal, near-zero usage |
-| `set` | ✓ | ✓ (have) | |
+| `set` | ✓ | ✓ | |
 | `add` | ✓ | ✓ | |
 | `replace` | ✓ | ✓ | |
 | `append` | ✓ | ✓ | |
 | `prepend` | ✓ | ✓ | |
-| `cas` | ✓ | ✓ | CAS token in request |
+| `cas` | ✓ | ⊘ Tier 2 | CAS token in request |
 | `delete` | ✓ | ✓ | |
 | `incr` | ✓ | ✓ | |
 | `decr` | ✓ | ✓ | |
 | `touch` | ✓ | ✓ | |
 | `lease-get` | ✓ | ✗ | Facebook extension |
 | `lease-set` | ✓ | ✗ | Facebook extension |
-| `version` | ✓ | ✓ | intercept at server |
-| `quit` | ✓ | ✓ | intercept at server |
+| `version` | ✓ | ⊘ Tier 4 | intercept at server |
+| `quit` | ✓ | ⊘ Tier 4 | intercept at server |
 | `flush_all` | ✓ | ✗ (deferred) | router-policy decision |
 | `stats` | ✓ | ✗ (deferred) | needs router-internal stats |
 | `shutdown` | ✓ | ✗ | mcrouter-specific |
 | `exec` / `admin` | ✓ | ✗ | mcrouter admin shell |
 | `flushre` | ✓ | ✗ | Facebook extension |
 | `goaway` | ✓ | ✗ | mcrouter graceful-shutdown |
-| `noreply` modifier | ✓ | ✓ | server-side suppress + strip on forward |
+| `noreply` modifier | ✓ | ⊘ Tier 3 | parser rejects today; will support via server-side suppress + strip on forward |
 | Meta protocol (`mg`/`ms`/`md`/`me`/`ma`) | ✗ | ✗ | not in mcrouter |
 | SASL auth | ✗ | ✗ | not in mcrouter |
 | UDP | ✗ | ✗ | not in mcrouter |
@@ -299,9 +305,10 @@ Full enumeration. ✓ = supported; ✗ = explicitly not supported.
 
 ---
 
-## Decisions to make before Tier 1
+## Tier 1 design decisions (resolved)
 
-These shape the diff and the public types; worth settling once.
+These shaped the diff and the public types. All decided during Tier 1
+implementation; the current code reflects the chosen path.
 
 ### 1. Storage variant factoring
 
@@ -317,9 +324,12 @@ Six storage commands (`Set` / `Add` / `Replace` / `Append` / `Prepend` /
   flags, exptime, data, cas_unique: Option<u64>, noreply: bool }`. Less
   duplication; every consumer matches on `op` instead of the outer variant.
 
-Recommendation: per-command variants. The current style is already that,
-and the duplication is regular enough that future shared logic can hang
-off a small `StorageOp` enum if needed.
+**Decided**: per-command variants. Shared parsing logic lives in
+[`parser/shared.rs::parse_storage_request`](../rusty-mcrouter-protocol/src/parser/shared.rs);
+shared serialization logic in
+[`request.rs::write_storage`](../rusty-mcrouter-protocol/src/request.rs).
+Each storage command's parser file is a thin wrapper (~15 lines) over the
+shared helper.
 
 ### 2. `get` / `gets` representation
 
@@ -328,7 +338,7 @@ vs `Request::Get { keys, with_cas: bool }`. Both are defensible. Separate
 variants match the rest of the codebase; the bool form is slightly
 smaller.
 
-Recommendation: separate variants for consistency with #1.
+**Decided**: separate variants. Pending Tier 2 implementation of `Gets`.
 
 ### 3. `noreply` placement
 
@@ -336,7 +346,10 @@ Per-variant `noreply: bool` field on each affected request. Cross-cutting
 wrappers (`Request::NoReply(Box<Request>)`) lose compile-time guarantees
 that the modifier only attaches to commands that accept it.
 
-Recommendation: per-variant field.
+**Decided**: per-variant field. Pending Tier 3 implementation. Today
+the parser rejects `noreply` uniformly via
+[`shared::extra_token_error`](../rusty-mcrouter-protocol/src/parser/shared.rs) —
+a single grep target for the future upgrade.
 
 ### 4. `noreply` forward policy
 
@@ -344,27 +357,57 @@ Strip on forward (option 1 above) or pass through (option 2). Strip is
 what mcrouter does and preserves error visibility on the router. Pass-through
 needs `Client::send` to grow a no-reply path.
 
-Recommendation: strip on forward.
+**Decided**: strip on forward. Pending Tier 3 implementation.
 
 ---
 
 ## Recommended order
 
-1. **`delete` first** — smallest new command, exercises the full stack
-   (parser variant + serializer variant + `Request::Delete` + `Reply::Deleted` +
-   `NullRoute` arm + integration test). Template for the rest of Tier 1.
-2. **Storage family** — `add`, `replace`, `append`, `prepend`. Decide #1
-   above when implementing the first of these; refactor `set` to the new
-   shape at the same time.
-3. **Counters and touch** — `incr`, `decr`, `touch`. Three small, similar
-   single-line shapes.
-4. **Tier 1 done**. Pause and reassess whether routing work
-   (`HashRoute`, prefix routing, named_handles resolution) is the right
-   next step before committing to Tier 2.
-5. **CAS family** — `gets`, `cas`, `gat`, `gats` as one feature (the CAS
-   token threads through both request and reply types simultaneously).
+1. ✓ **`delete` first** — shipped. Template established for the rest of Tier 1.
+2. ✓ **Storage family** — `add`, `replace`, `append`, `prepend` shipped.
+   `parse_storage_request` extracted from `set.rs` into `shared.rs` during
+   `add`'s implementation; `set.rs` refactored to use the shared helper.
+3. ✓ **Counters and touch** — `incr`, `decr`, `touch` shipped.
+   `Reply::Numeric(u64)` variant added; reply parser learned to classify
+   all-digit lines.
+4. ✓ **Tier 1 done**. Reassessment point.
+5. **CAS family** — `gets`, `cas`, `gat`, `gats` as one feature. Adds
+   `cas_unique: Option<u64>` to `Value`; activates `Reply::Exists` on the
+   wire (currently a dead variant). Pending.
 6. **`noreply`** — server-side parse + reply suppression, strip-on-forward
-   policy on the client side.
-7. **`version` and `quit`** when convenient — trivial, no real ordering
-   constraint.
-8. **`flush_all` and `stats`** if and when a use case appears.
+   policy on the client side. Pending.
+7. **`version` and `quit`** when convenient — trivial intercepts at the
+   server layer. Pending.
+8. **`flush_all` and `stats`** if and when a use case appears. Deferred.
+
+---
+
+## Implementation notes
+
+Some refactors during Tier 1 worth recording for future commands:
+
+- **`parser/` directory structure**: each command has its own file
+  (`add.rs`, `delete.rs`, etc.) with a `pub(super) fn parse_request` plus a
+  `#[cfg(test)] mod tests` containing 3 verb-specific tests. Shared helpers
+  in `parser/shared.rs`. Request parsing is dispatched from `parser/mod.rs`
+  on the command-name prefix; reply parsing lives in `parser/reply.rs`.
+- **`parse_storage_request`** (in `shared.rs`): handles the full
+  `<cmd> <key> <flags> <exptime> <bytes>\r\n<data>\r\n` shape including
+  body framing, partial-frame detection, and consume-on-error semantics.
+  Callers parameterize verb, header-help message, and extra-token message.
+- **`write_storage`** (in `request.rs`): the serializer-side counterpart.
+  All 5 storage `Request` variants delegate to it.
+- **`extra_token_error`** (in `shared.rs`): single canonical site for the
+  noreply-vs-other-token decision. Used by `delete`, `incr`, `decr`,
+  `touch`, and `parse_storage_request` (which covers all 5 storage
+  commands). Single grep target when Tier 3 noreply lands.
+- **Per-mirror test slimming**: storage mirrors (`add`/`replace`/`append`/
+  `prepend`) and `decr` each have only 3 tests covering: basic parse,
+  verb-specific error message, and serializer round-trip. Comprehensive
+  edge-case coverage of the shared parsing logic lives in `set.rs`
+  (storage shape) and `incr.rs` (counter shape).
+- **`NullRoute` policy**: blackhole that acknowledges write-like commands
+  (`Set`/`Add`/`Replace`/`Append`/`Prepend` → `Stored`, `Delete` →
+  `Deleted`, `Touch` → `Touched`) and misses reads/counters (`Get` →
+  empty, `Incr`/`Decr` → `NotFound`). Counters miss because faking a
+  numeric value would be worse than admitting no item exists.
