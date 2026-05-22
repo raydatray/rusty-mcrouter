@@ -7,11 +7,11 @@ use crate::{
 };
 
 mod delete;
+mod get;
 mod shared;
 
 use shared::{
-    body_terminator_len, extract_command_args, parse_i32, parse_u32, parse_usize, read_line,
-    validate_key,
+    body_terminator_len, parse_i32, parse_u32, parse_usize, read_line, validate_key,
 };
 
 // TODO: parser is stateless and re-parses headers on every partial-read call.
@@ -29,7 +29,7 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolErro
     let cmd = command_name(&buf[..line_end]);
 
     match cmd {
-        b"get" => parse_get_request(buf, eol_idx),
+        b"get" => get::parse_request(buf, eol_idx),
         b"set" => parse_set_request(buf, eol_idx, line_end),
         b"delete" => delete::parse_request(buf, eol_idx),
         _ => {
@@ -45,11 +45,6 @@ fn command_name(header: &[u8]) -> &[u8] {
         .position(|&b| b == b' ')
         .unwrap_or(header.len());
     &header[..end]
-}
-
-fn parse_get_request(buf: &mut BytesMut, eol_idx: usize) -> Result<Option<Request>, ProtocolError> {
-    let rest = extract_command_args(buf, eol_idx, b"get ")?;
-    parse_get(rest).map(Some)
 }
 
 fn parse_set_request(
@@ -265,20 +260,6 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
     }
 }
 
-fn parse_get(rest: Bytes) -> Result<Request, ProtocolError> {
-    let keys = rest
-        .split(|&b| b == b' ')
-        .filter(|seg| !seg.is_empty())
-        .map(|seg| validate_key(seg).map(|()| rest.slice_ref(seg)))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if keys.is_empty() {
-        return Err(ProtocolError::Malformed("get requires at least one key"));
-    }
-
-    Ok(Request::Get { keys })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,34 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_request_rejects_get_without_args() {
-        for input in [&b"get\n"[..], &b"get\r\n"[..]] {
-            let mut buf = BytesMut::from(input);
-            assert!(matches!(
-                parse_request(&mut buf),
-                Err(ProtocolError::Malformed("missing arguments"))
-            ));
-            assert!(buf.is_empty());
-        }
-    }
-
-    #[test]
-    fn parse_request_get_multiple_keys() {
-        let mut buf = BytesMut::from(&b"get foo bar baz\r\n"[..]);
-        let Request::Get { keys } = parse_request(&mut buf).unwrap().unwrap() else {
-            panic!("expected Request::Get");
-        };
-        assert_eq!(
-            keys,
-            vec![
-                Bytes::from_static(b"foo"),
-                Bytes::from_static(b"bar"),
-                Bytes::from_static(b"baz"),
-            ]
-        );
-    }
-
-    #[test]
     fn parse_request_rejects_uppercase_command() {
         // Commands are case-sensitive per the memcached text protocol.
         let mut buf = BytesMut::from(&b"GET foo\n"[..]);
@@ -399,84 +352,6 @@ mod tests {
         assert!(matches!(
             parse_request(&mut buf),
             Err(ProtocolError::Malformed("unknown command"))
-        ));
-    }
-
-    #[test]
-    fn parse_request_propagates_get_invalid_key() {
-        let mut buf = BytesMut::from(&b"get \x01bad\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::InvalidKey)
-        ));
-    }
-
-    #[test]
-    fn parse_get_basic() {
-        let single = parse_get(Bytes::from_static(b"foo")).unwrap();
-        assert_eq!(
-            single,
-            Request::Get {
-                keys: vec![Bytes::from_static(b"foo")]
-            }
-        );
-
-        let Request::Get { keys } = parse_get(Bytes::from_static(b"foo bar baz")).unwrap() else {
-            panic!("expected Request::Get");
-        };
-        assert_eq!(
-            keys,
-            vec![
-                Bytes::from_static(b"foo"),
-                Bytes::from_static(b"bar"),
-                Bytes::from_static(b"baz"),
-            ]
-        );
-    }
-    #[test]
-    fn parse_get_whitespace() {
-        let cases: &[&[u8]] = &[
-            b"foo bar",
-            b"foo  bar",
-            b"  foo bar",
-            b"foo bar  ",
-            b"  foo   bar  ",
-        ];
-
-        cases.iter().for_each(|input| {
-            let Request::Get { keys } = parse_get(Bytes::copy_from_slice(input)).unwrap() else {
-                panic!("expected Request::Get");
-            };
-            assert_eq!(keys.len(), 2);
-            assert_eq!(keys[0].as_ref(), b"foo");
-            assert_eq!(keys[1].as_ref(), b"bar");
-        });
-    }
-    #[test]
-    fn parse_get_rejects_empty() {
-        assert!(matches!(
-            parse_get(Bytes::new()),
-            Err(ProtocolError::Malformed(_))
-        ));
-
-        assert!(matches!(
-            parse_get(Bytes::from_static(b"   ")),
-            Err(ProtocolError::Malformed(_))
-        ));
-    }
-    #[test]
-    fn parse_get_rejects_invalid_keys() {
-        // validate_key errors should bubble through the iterator's collect.
-        assert!(matches!(
-            parse_get(Bytes::from_static(b"foo \x01bar")),
-            Err(ProtocolError::InvalidKey)
-        ));
-
-        let mut huge = b"foo ".to_vec();
-        huge.extend(std::iter::repeat_n(b'x', 251));
-        assert!(matches!(
-            parse_get(Bytes::from(huge)),
-            Err(ProtocolError::KeyTooLong(251))
         ));
     }
 
