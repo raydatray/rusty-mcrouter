@@ -2,7 +2,7 @@ use bytes::BytesMut;
 
 use crate::{error::ProtocolError, request::Request};
 
-use super::shared::{extract_command_args, validate_key};
+use super::shared::{extra_token_error, extract_command_args, validate_key};
 
 pub(super) fn parse_request(
     buf: &mut BytesMut,
@@ -14,8 +14,8 @@ pub(super) fn parse_request(
     let key = parts
         .next()
         .ok_or(ProtocolError::Malformed("delete requires <key>"))?;
-    if parts.next().is_some() {
-        return Err(ProtocolError::Malformed("delete: unexpected extra token"));
+    if let Some(extra) = parts.next() {
+        return Err(extra_token_error(extra, "delete: unexpected extra token"));
     }
     validate_key(key)?;
     Ok(Some(Request::Delete {
@@ -72,11 +72,7 @@ mod tests {
 
     #[test]
     fn parse_request_rejects_delete_with_extra_tokens() {
-        let cases: &[&[u8]] = &[
-            b"delete foo bar\r\n",
-            b"delete foo noreply\r\n",
-            b"delete foo 0\r\n",
-        ];
+        let cases: &[&[u8]] = &[b"delete foo bar\r\n", b"delete foo 0\r\n"];
         cases.iter().for_each(|input| {
             let mut buf = BytesMut::from(*input);
             assert!(
@@ -88,6 +84,15 @@ mod tests {
             );
             assert!(buf.is_empty(), "frame consumed for {input:?}");
         });
+    }
+
+    #[test]
+    fn parse_request_rejects_delete_with_noreply() {
+        let mut buf = BytesMut::from(&b"delete foo noreply\r\n"[..]);
+        assert!(matches!(
+            parse_request(&mut buf),
+            Err(ProtocolError::Malformed("noreply not yet supported"))
+        ));
     }
 
     #[test]
