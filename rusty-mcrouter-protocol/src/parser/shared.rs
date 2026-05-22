@@ -34,6 +34,98 @@ pub(super) fn extract_command_args(
     }
 }
 
+pub(super) struct StorageRequest {
+    pub key: Bytes,
+    pub flags: u32,
+    pub exptime: i32,
+    pub data: Bytes,
+}
+
+pub(super) fn parse_storage_request(
+    buf: &mut BytesMut,
+    eol_idx: usize,
+    line_text_end: usize,
+    command_with_space: &[u8],
+    header_help: &'static str,
+    extra_token_msg: &'static str,
+) -> Result<Option<StorageRequest>, ProtocolError> {
+    let header = match parse_storage_header(
+        &buf[..line_text_end],
+        command_with_space,
+        header_help,
+        extra_token_msg,
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = buf.split_to(eol_idx + 1);
+            return Err(e);
+        }
+    };
+
+    let data_start = eol_idx + 1;
+    let data_end = data_start
+        .checked_add(header.bytes_count)
+        .ok_or(ProtocolError::Malformed("body length overflow"))?;
+    let terminator_len = match body_terminator_len(buf, data_end) {
+        Ok(Some(len)) => len,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            let _ = buf.split_to(data_end + 1);
+            return Err(e);
+        }
+    };
+
+    let total = data_end + terminator_len;
+    let frozen = buf.split_to(total).freeze();
+    let data = frozen.slice(data_start..data_end);
+    Ok(Some(StorageRequest {
+        key: header.key,
+        flags: header.flags,
+        exptime: header.exptime,
+        data,
+    }))
+}
+
+struct StorageHeader {
+    key: Bytes,
+    flags: u32,
+    exptime: i32,
+    bytes_count: usize,
+}
+
+fn parse_storage_header(
+    header: &[u8],
+    command_with_space: &[u8],
+    header_help: &'static str,
+    extra_token_msg: &'static str,
+) -> Result<StorageHeader, ProtocolError> {
+    let after_cmd = header
+        .strip_prefix(command_with_space)
+        .ok_or(ProtocolError::Malformed("missing arguments"))?;
+
+    let mut parts = after_cmd.split(|&b| b == b' ').filter(|s| !s.is_empty());
+    let key = parts.next().ok_or(ProtocolError::Malformed(header_help))?;
+    let flags_bytes = parts.next().ok_or(ProtocolError::Malformed(header_help))?;
+    let exptime_bytes = parts.next().ok_or(ProtocolError::Malformed(header_help))?;
+    let bytes_bytes = parts.next().ok_or(ProtocolError::Malformed(header_help))?;
+
+    if let Some(extra) = parts.next() {
+        return Err(if extra == b"noreply" {
+            ProtocolError::Malformed("noreply not yet supported")
+        } else {
+            ProtocolError::Malformed(extra_token_msg)
+        });
+    }
+
+    validate_key(key)?;
+    Ok(StorageHeader {
+        key: Bytes::copy_from_slice(key),
+        flags: parse_u32(flags_bytes)?,
+        exptime: parse_i32(exptime_bytes)?,
+        bytes_count: parse_usize(bytes_bytes)?,
+    })
+}
+
 pub(super) fn body_terminator_len(
     buf: &[u8],
     data_end: usize,

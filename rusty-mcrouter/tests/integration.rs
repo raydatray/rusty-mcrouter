@@ -218,3 +218,33 @@ async fn set_delete_get_round_trip() {
     let fetched = round_trip(fx.router_addr, b"get set_delete_get_key\r\n").await;
     assert_eq!(fetched, b"END\r\n");
 }
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn add_new_key_returns_stored() {
+    let fx = fixture().await;
+    let resp = round_trip(fx.router_addr, b"add add_new_key 0 0 5\r\nhello\r\n").await;
+    assert_eq!(resp, b"STORED\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn add_existing_key_returns_not_stored() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set add_existing_key 0 0 5\r\nfirst\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let resp = round_trip(fx.router_addr, b"add add_existing_key 0 0 6\r\nsecond\r\n").await;
+    assert_eq!(resp, b"NOT_STORED\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn add_then_get_round_trip() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"add add_then_get_key 7 0 5\r\nworld\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let fetched = round_trip(fx.router_addr, b"get add_then_get_key\r\n").await;
+    assert_eq!(fetched, b"VALUE add_then_get_key 7 5\r\nworld\r\nEND\r\n");
+}
