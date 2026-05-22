@@ -40,6 +40,10 @@ pub enum Request {
         exptime: i32,
         data: Bytes,
     },
+    Incr {
+        key: Bytes,
+        delta: u64,
+    },
 }
 
 impl Request {
@@ -146,6 +150,13 @@ impl Request {
                 write_decimal(out, data.len() as u64);
                 out.put_slice(b"\r\n");
                 out.put_slice(data);
+                out.put_slice(b"\r\n");
+            }
+            Request::Incr { key, delta } => {
+                out.put_slice(b"incr ");
+                out.put_slice(key);
+                out.put_u8(b' ');
+                write_decimal(out, *delta);
                 out.put_slice(b"\r\n");
             }
         }
@@ -316,5 +327,23 @@ mod tests {
             data: Bytes::from_static(b"bar"),
         };
         assert_eq!(serialize(&req).as_ref(), b"prepend foo 0 0 3\r\nbar\r\n");
+    }
+
+    #[test]
+    fn incr_serializes_to_canonical_wire_format() {
+        let req = Request::Incr {
+            key: Bytes::from_static(b"foo"),
+            delta: 1,
+        };
+        assert_eq!(serialize(&req).as_ref(), b"incr foo 1\r\n");
+    }
+
+    #[test]
+    fn incr_serializes_max_delta() {
+        let req = Request::Incr {
+            key: Bytes::from_static(b"k"),
+            delta: u64::MAX,
+        };
+        assert_eq!(serialize(&req).as_ref(), b"incr k 18446744073709551615\r\n");
     }
 }

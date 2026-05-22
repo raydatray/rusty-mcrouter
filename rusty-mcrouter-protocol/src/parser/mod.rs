@@ -6,6 +6,7 @@ mod add;
 mod append;
 mod delete;
 mod get;
+mod incr;
 mod prepend;
 mod replace;
 mod reply;
@@ -36,6 +37,7 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolErro
         b"replace" => replace::parse_request(buf, eol_idx, line_end),
         b"append" => append::parse_request(buf, eol_idx, line_end),
         b"prepend" => prepend::parse_request(buf, eol_idx, line_end),
+        b"incr" => incr::parse_request(buf, eol_idx),
         b"delete" => delete::parse_request(buf, eol_idx),
         _ => {
             let _ = buf.split_to(total);
