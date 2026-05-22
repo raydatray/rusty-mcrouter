@@ -48,6 +48,10 @@ pub enum Request {
         key: Bytes,
         delta: u64,
     },
+    Touch {
+        key: Bytes,
+        exptime: i32,
+    },
 }
 
 impl Request {
@@ -168,6 +172,13 @@ impl Request {
                 out.put_slice(key);
                 out.put_u8(b' ');
                 write_decimal(out, *delta);
+                out.put_slice(b"\r\n");
+            }
+            Request::Touch { key, exptime } => {
+                out.put_slice(b"touch ");
+                out.put_slice(key);
+                out.put_u8(b' ');
+                write_signed_decimal(out, *exptime as i64);
                 out.put_slice(b"\r\n");
             }
         }
@@ -365,5 +376,23 @@ mod tests {
             delta: 1,
         };
         assert_eq!(serialize(&req).as_ref(), b"decr foo 1\r\n");
+    }
+
+    #[test]
+    fn touch_serializes_to_canonical_wire_format() {
+        let req = Request::Touch {
+            key: Bytes::from_static(b"foo"),
+            exptime: 3600,
+        };
+        assert_eq!(serialize(&req).as_ref(), b"touch foo 3600\r\n");
+    }
+
+    #[test]
+    fn touch_serializes_negative_exptime() {
+        let req = Request::Touch {
+            key: Bytes::from_static(b"k"),
+            exptime: -1,
+        };
+        assert_eq!(serialize(&req).as_ref(), b"touch k -1\r\n");
     }
 }
