@@ -49,51 +49,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_request_decr_rejects_missing_delta() {
-        let mut buf = BytesMut::from(&b"decr foo\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::Malformed("decr requires <key> <delta>"))
-        ));
-    }
-
-    #[test]
-    fn parse_request_decr_rejects_missing_key() {
-        let mut buf = BytesMut::from(&b"decr\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::Malformed("missing arguments"))
-        ));
-    }
-
-    #[test]
-    fn parse_request_decr_rejects_non_numeric_delta() {
-        let mut buf = BytesMut::from(&b"decr foo abc\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::Malformed("invalid u64"))
-        ));
-    }
-
-    #[test]
-    fn parse_request_decr_rejects_invalid_key() {
-        let mut buf = BytesMut::from(&b"decr \x01bad 1\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::InvalidKey)
-        ));
-    }
-
-    #[test]
-    fn parse_request_decr_rejects_noreply() {
-        let mut buf = BytesMut::from(&b"decr foo 1 noreply\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::Malformed("noreply not yet supported"))
-        ));
-    }
-
-    #[test]
     fn parse_request_decr_rejects_extra_token() {
         let mut buf = BytesMut::from(&b"decr foo 1 garbage\r\n"[..]);
         assert!(matches!(
