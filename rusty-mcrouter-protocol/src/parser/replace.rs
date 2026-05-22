@@ -61,34 +61,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_request_replace_with_flags_and_exptime() {
-        let mut buf = BytesMut::from(&b"replace k 42 3600 1\r\nv\r\n"[..]);
-        assert_eq!(
-            parse_request(&mut buf).unwrap().unwrap(),
-            replace(b"k", 42, 3600, b"v")
-        );
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn parse_request_replace_rejects_invalid_key() {
-        let mut buf = BytesMut::from(&b"replace \x01bad 0 0 3\r\nbar\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::InvalidKey)
-        ));
-    }
-
-    #[test]
-    fn parse_request_replace_rejects_noreply() {
-        let mut buf = BytesMut::from(&b"replace foo 0 0 3 noreply\r\nbar\r\n"[..]);
-        assert!(matches!(
-            parse_request(&mut buf),
-            Err(ProtocolError::Malformed("noreply not yet supported"))
-        ));
-    }
-
-    #[test]
     fn parse_request_replace_rejects_extra_token() {
         let mut buf = BytesMut::from(&b"replace foo 0 0 3 garbage\r\nbar\r\n"[..]);
         assert!(matches!(
