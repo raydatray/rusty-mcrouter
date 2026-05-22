@@ -2,7 +2,7 @@ use bytes::BytesMut;
 
 use crate::{error::ProtocolError, request::Request};
 
-use super::shared::{extract_command_args, parse_i32, validate_key};
+use super::shared::{extra_token_error, extract_command_args, parse_i32, validate_key};
 
 pub(super) fn parse_request(
     buf: &mut BytesMut,
@@ -18,11 +18,7 @@ pub(super) fn parse_request(
         .next()
         .ok_or(ProtocolError::Malformed("touch requires <key> <exptime>"))?;
     if let Some(extra) = parts.next() {
-        return Err(if extra == b"noreply" {
-            ProtocolError::Malformed("noreply not yet supported")
-        } else {
-            ProtocolError::Malformed("touch: unexpected extra token")
-        });
+        return Err(extra_token_error(extra, "touch: unexpected extra token"));
     }
 
     validate_key(key)?;
