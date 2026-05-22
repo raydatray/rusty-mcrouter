@@ -70,94 +70,34 @@ impl Request {
                 flags,
                 exptime,
                 data,
-            } => {
-                out.put_slice(b"set ");
-                out.put_slice(key);
-                out.put_u8(b' ');
-                write_decimal(out, *flags as u64);
-                out.put_u8(b' ');
-                write_signed_decimal(out, *exptime as i64);
-                out.put_u8(b' ');
-                write_decimal(out, data.len() as u64);
-                out.put_slice(b"\r\n");
-                out.put_slice(data);
-                out.put_slice(b"\r\n");
-            }
-            Request::Delete { key } => {
-                out.put_slice(b"delete ");
-                out.put_slice(key);
-                out.put_slice(b"\r\n");
-            }
+            } => write_storage(out, b"set", key, *flags, *exptime, data),
             Request::Add {
                 key,
                 flags,
                 exptime,
                 data,
-            } => {
-                out.put_slice(b"add ");
-                out.put_slice(key);
-                out.put_u8(b' ');
-                write_decimal(out, *flags as u64);
-                out.put_u8(b' ');
-                write_signed_decimal(out, *exptime as i64);
-                out.put_u8(b' ');
-                write_decimal(out, data.len() as u64);
-                out.put_slice(b"\r\n");
-                out.put_slice(data);
-                out.put_slice(b"\r\n");
-            }
+            } => write_storage(out, b"add", key, *flags, *exptime, data),
             Request::Replace {
                 key,
                 flags,
                 exptime,
                 data,
-            } => {
-                out.put_slice(b"replace ");
-                out.put_slice(key);
-                out.put_u8(b' ');
-                write_decimal(out, *flags as u64);
-                out.put_u8(b' ');
-                write_signed_decimal(out, *exptime as i64);
-                out.put_u8(b' ');
-                write_decimal(out, data.len() as u64);
-                out.put_slice(b"\r\n");
-                out.put_slice(data);
-                out.put_slice(b"\r\n");
-            }
+            } => write_storage(out, b"replace", key, *flags, *exptime, data),
             Request::Append {
                 key,
                 flags,
                 exptime,
                 data,
-            } => {
-                out.put_slice(b"append ");
-                out.put_slice(key);
-                out.put_u8(b' ');
-                write_decimal(out, *flags as u64);
-                out.put_u8(b' ');
-                write_signed_decimal(out, *exptime as i64);
-                out.put_u8(b' ');
-                write_decimal(out, data.len() as u64);
-                out.put_slice(b"\r\n");
-                out.put_slice(data);
-                out.put_slice(b"\r\n");
-            }
+            } => write_storage(out, b"append", key, *flags, *exptime, data),
             Request::Prepend {
                 key,
                 flags,
                 exptime,
                 data,
-            } => {
-                out.put_slice(b"prepend ");
+            } => write_storage(out, b"prepend", key, *flags, *exptime, data),
+            Request::Delete { key } => {
+                out.put_slice(b"delete ");
                 out.put_slice(key);
-                out.put_u8(b' ');
-                write_decimal(out, *flags as u64);
-                out.put_u8(b' ');
-                write_signed_decimal(out, *exptime as i64);
-                out.put_u8(b' ');
-                write_decimal(out, data.len() as u64);
-                out.put_slice(b"\r\n");
-                out.put_slice(data);
                 out.put_slice(b"\r\n");
             }
             Request::Incr { key, delta } => {
@@ -183,6 +123,28 @@ impl Request {
             }
         }
     }
+}
+
+fn write_storage(
+    out: &mut BytesMut,
+    verb: &[u8],
+    key: &Bytes,
+    flags: u32,
+    exptime: i32,
+    data: &Bytes,
+) {
+    out.put_slice(verb);
+    out.put_u8(b' ');
+    out.put_slice(key);
+    out.put_u8(b' ');
+    write_decimal(out, flags as u64);
+    out.put_u8(b' ');
+    write_signed_decimal(out, exptime as i64);
+    out.put_u8(b' ');
+    write_decimal(out, data.len() as u64);
+    out.put_slice(b"\r\n");
+    out.put_slice(data);
+    out.put_slice(b"\r\n");
 }
 
 #[cfg(test)]
