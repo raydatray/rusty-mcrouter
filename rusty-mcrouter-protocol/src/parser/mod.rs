@@ -13,6 +13,7 @@ mod replace;
 mod reply;
 mod set;
 mod shared;
+mod touch;
 
 pub use reply::parse_reply;
 
@@ -40,6 +41,7 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolErro
         b"prepend" => prepend::parse_request(buf, eol_idx, line_end),
         b"incr" => incr::parse_request(buf, eol_idx),
         b"decr" => decr::parse_request(buf, eol_idx),
+        b"touch" => touch::parse_request(buf, eol_idx),
         b"delete" => delete::parse_request(buf, eol_idx),
         _ => {
             let _ = buf.split_to(total);
