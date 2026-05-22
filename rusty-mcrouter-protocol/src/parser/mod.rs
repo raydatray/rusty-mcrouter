@@ -4,6 +4,7 @@ use crate::{error::ProtocolError, request::Request};
 
 mod add;
 mod append;
+mod decr;
 mod delete;
 mod get;
 mod incr;
@@ -38,6 +39,7 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolErro
         b"append" => append::parse_request(buf, eol_idx, line_end),
         b"prepend" => prepend::parse_request(buf, eol_idx, line_end),
         b"incr" => incr::parse_request(buf, eol_idx),
+        b"decr" => decr::parse_request(buf, eol_idx),
         b"delete" => delete::parse_request(buf, eol_idx),
         _ => {
             let _ = buf.split_to(total);
