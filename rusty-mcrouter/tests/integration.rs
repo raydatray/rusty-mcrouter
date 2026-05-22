@@ -396,3 +396,36 @@ async fn prepend_keeps_original_flags_when_command_specifies_different_flags() {
         b"VALUE prepend_ignores_key 7 11\r\nhello world\r\nEND\r\n"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn incr_missing_key_returns_not_found() {
+    let fx = fixture().await;
+    let resp = round_trip(fx.router_addr, b"incr incr_missing_key 1\r\n").await;
+    assert_eq!(resp, b"NOT_FOUND\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn incr_existing_numeric_returns_new_value() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set incr_existing_key 0 0 2\r\n42\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let resp = round_trip(fx.router_addr, b"incr incr_existing_key 1\r\n").await;
+    assert_eq!(resp, b"43\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+async fn incr_by_delta_increments_value() {
+    let fx = fixture().await;
+    let stored = round_trip(fx.router_addr, b"set incr_by_delta_key 0 0 1\r\n5\r\n").await;
+    assert_eq!(stored, b"STORED\r\n");
+
+    let resp = round_trip(fx.router_addr, b"incr incr_by_delta_key 100\r\n").await;
+    assert_eq!(resp, b"105\r\n");
+
+    let fetched = round_trip(fx.router_addr, b"get incr_by_delta_key\r\n").await;
+    assert_eq!(fetched, b"VALUE incr_by_delta_key 0 3\r\n105\r\nEND\r\n");
+}

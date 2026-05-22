@@ -188,6 +188,13 @@ pub(super) fn parse_usize(s: &[u8]) -> Result<usize, ProtocolError> {
         .ok_or(ProtocolError::Malformed("invalid usize"))
 }
 
+pub(super) fn parse_u64(s: &[u8]) -> Result<u64, ProtocolError> {
+    from_utf8(s)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or(ProtocolError::Malformed("invalid u64"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
