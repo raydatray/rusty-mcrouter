@@ -4,7 +4,7 @@ use serde::de::{self, Deserializer};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::error::ConfigError;
+use crate::ConfigError;
 use crate::{pool::PoolConfig, route::RouteHandleConfig};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -42,7 +42,7 @@ struct ConfigDocumentRaw {
 }
 
 impl ConfigDocument {
-    pub(crate) fn from_value(value: Value) -> Result<Self, ConfigError> {
+    pub(crate) fn from_value(value: Value) -> crate::Result<Self> {
         let raw = serde_json::from_value::<ConfigDocumentRaw>(value)?;
 
         let route = match (raw.route, raw.routes) {
