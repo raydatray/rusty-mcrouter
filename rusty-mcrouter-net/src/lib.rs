@@ -18,3 +18,5 @@ pub enum NetError {
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
 }
+
+type Result<T> = std::result::Result<T, NetError>;

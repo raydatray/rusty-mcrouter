@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 
-use crate::NetError;
+use crate::Result;
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
 
@@ -40,7 +40,7 @@ impl Server {
     }
 }
 
-async fn serve_session<F, Fut>(mut stream: TcpStream, handler: Arc<F>) -> Result<(), NetError>
+async fn serve_session<F, Fut>(mut stream: TcpStream, handler: Arc<F>) -> Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync,
     Fut: Future<Output = Reply> + Send,
