@@ -3,7 +3,7 @@ use rusty_mcrouter_protocol::{parse_reply, Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
-use crate::NetError;
+use crate::{NetError, Result};
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
 
@@ -21,7 +21,7 @@ impl Client {
         })
     }
 
-    pub async fn send(&mut self, req: &Request) -> Result<Reply, NetError> {
+    pub async fn send(&mut self, req: &Request) -> Result<Reply> {
         let mut send_buf = BytesMut::new();
         req.serialize_into(&mut send_buf);
         self.stream.write_all(&send_buf).await?;
