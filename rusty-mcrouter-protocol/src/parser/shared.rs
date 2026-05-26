@@ -2,7 +2,7 @@ use std::str::from_utf8;
 
 use bytes::{Bytes, BytesMut};
 
-use crate::error::ProtocolError;
+use crate::{ProtocolError, Result};
 
 const MAX_KEY_LEN: usize = 250;
 
@@ -20,7 +20,7 @@ pub(super) fn extract_command_args(
     buf: &mut BytesMut,
     eol_idx: usize,
     command_with_space: &[u8],
-) -> Result<Bytes, ProtocolError> {
+) -> Result<Bytes> {
     let mut line = buf.split_to(eol_idx + 1).freeze();
     if line.ends_with(b"\r\n") {
         line.truncate(line.len() - 2);
@@ -56,7 +56,7 @@ pub(super) fn parse_storage_request(
     command_with_space: &[u8],
     header_help: &'static str,
     extra_token_msg: &'static str,
-) -> Result<Option<StorageRequest>, ProtocolError> {
+) -> Result<Option<StorageRequest>> {
     let header = match parse_storage_header(
         &buf[..line_text_end],
         command_with_space,
@@ -106,7 +106,7 @@ fn parse_storage_header(
     command_with_space: &[u8],
     header_help: &'static str,
     extra_token_msg: &'static str,
-) -> Result<StorageHeader, ProtocolError> {
+) -> Result<StorageHeader> {
     let after_cmd = header
         .strip_prefix(command_with_space)
         .ok_or(ProtocolError::Malformed("missing arguments"))?;
@@ -133,7 +133,7 @@ fn parse_storage_header(
 pub(super) fn body_terminator_len(
     buf: &[u8],
     data_end: usize,
-) -> Result<Option<usize>, ProtocolError> {
+) -> Result<Option<usize>> {
     if buf.len() <= data_end {
         return Ok(None);
     }
@@ -152,7 +152,7 @@ pub(super) fn body_terminator_len(
     }
 }
 
-pub(super) fn validate_key(key: &[u8]) -> Result<(), ProtocolError> {
+pub(super) fn validate_key(key: &[u8]) -> Result<()> {
     if key.is_empty() {
         return Err(ProtocolError::InvalidKey);
     }
@@ -171,28 +171,28 @@ pub(super) fn validate_key(key: &[u8]) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-pub(super) fn parse_u32(s: &[u8]) -> Result<u32, ProtocolError> {
+pub(super) fn parse_u32(s: &[u8]) -> Result<u32> {
     from_utf8(s)
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .ok_or(ProtocolError::Malformed("invalid u32"))
 }
 
-pub(super) fn parse_i32(s: &[u8]) -> Result<i32, ProtocolError> {
+pub(super) fn parse_i32(s: &[u8]) -> Result<i32> {
     from_utf8(s)
         .ok()
         .and_then(|s| s.parse::<i32>().ok())
         .ok_or(ProtocolError::Malformed("invalid i32"))
 }
 
-pub(super) fn parse_usize(s: &[u8]) -> Result<usize, ProtocolError> {
+pub(super) fn parse_usize(s: &[u8]) -> Result<usize> {
     from_utf8(s)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .ok_or(ProtocolError::Malformed("invalid usize"))
 }
 
-pub(super) fn parse_u64(s: &[u8]) -> Result<u64, ProtocolError> {
+pub(super) fn parse_u64(s: &[u8]) -> Result<u64> {
     from_utf8(s)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())

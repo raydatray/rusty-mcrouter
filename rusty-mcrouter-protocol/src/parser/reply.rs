@@ -1,13 +1,13 @@
 use bytes::BytesMut;
 
 use crate::{
-    error::ProtocolError,
     reply::{Reply, Value},
+    ProtocolError, Result,
 };
 
 use super::shared::{body_terminator_len, parse_u32, parse_u64, parse_usize, read_line};
 
-pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
+pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>> {
     let Some((line_end, total)) = read_line(buf, 0) else {
         return Ok(None);
     };
@@ -68,7 +68,7 @@ struct ValueOffsets {
     data_end: usize,
 }
 
-fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>, ProtocolError> {
+fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>> {
     let mut cursor = 0;
     let mut blocks: Vec<ValueOffsets> = Vec::new();
 
@@ -144,13 +144,13 @@ mod tests {
     use bytes::{Bytes, BytesMut};
 
     use crate::{
-        error::ProtocolError,
         reply::{Reply, Value},
+        ProtocolError, Result,
     };
 
     use super::parse_reply;
 
-    fn pr(bytes: &[u8]) -> (Result<Option<Reply>, ProtocolError>, BytesMut) {
+    fn pr(bytes: &[u8]) -> (Result<Option<Reply>>, BytesMut) {
         let mut buf = BytesMut::from(bytes);
         let result = parse_reply(&mut buf);
         (result, buf)

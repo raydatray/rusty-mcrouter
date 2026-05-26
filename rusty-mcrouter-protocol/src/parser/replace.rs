@@ -1,6 +1,6 @@
 use bytes::BytesMut;
 
-use crate::{error::ProtocolError, request::Request};
+use crate::{request::Request, Result};
 
 use super::shared::{parse_storage_request, StorageRequest};
 
@@ -10,7 +10,7 @@ pub(super) fn parse_request(
     buf: &mut BytesMut,
     eol_idx: usize,
     line_text_end: usize,
-) -> Result<Option<Request>, ProtocolError> {
+) -> Result<Option<Request>> {
     let Some(StorageRequest {
         key,
         flags,
@@ -39,7 +39,7 @@ pub(super) fn parse_request(
 mod tests {
     use bytes::{Bytes, BytesMut};
 
-    use crate::{error::ProtocolError, parser::parse_request, request::Request};
+    use crate::{parser::parse_request, request::Request, ProtocolError};
 
     fn replace(key: &'static [u8], flags: u32, exptime: i32, data: &'static [u8]) -> Request {
         Request::Replace {
