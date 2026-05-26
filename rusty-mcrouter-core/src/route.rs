@@ -10,8 +10,10 @@ pub enum RouteError {
     Backend(#[from] NetError),
 }
 
+pub type Result<T> = std::result::Result<T, RouteError>;
+
 pub trait Route: Send + Sync + 'static {
-    fn route(&self, req: Request) -> impl Future<Output = Result<Reply, RouteError>> + Send;
+    fn route(&self, req: Request) -> impl Future<Output = Result<Reply>> + Send;
 
     fn into_dyn(self) -> Arc<dyn DynRoute>
     where
@@ -28,7 +30,7 @@ pub trait Route: Send + Sync + 'static {
     }
 }
 
-pub type RouteFuture<'a> = Pin<Box<dyn Future<Output = Result<Reply, RouteError>> + Send + 'a>>;
+pub type RouteFuture<'a> = Pin<Box<dyn Future<Output = Result<Reply>> + Send + 'a>>;
 
 pub trait DynRoute: Send + Sync + 'static {
     fn route_dyn<'a>(&'a self, req: Request) -> RouteFuture<'a>;

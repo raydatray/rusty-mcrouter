@@ -42,7 +42,9 @@ pub enum BuildError {
     UnresolvedReference { name: String },
 }
 
-pub async fn build_route(config: &ConfigDocument) -> Result<Arc<dyn DynRoute>, BuildError> {
+type Result<T> = std::result::Result<T, BuildError>;
+
+pub async fn build_route(config: &ConfigDocument) -> Result<Arc<dyn DynRoute>> {
     let entry = match &config.route {
         RouteEntry::Single(handle) => handle,
         RouteEntry::Prefixed(_) => return Err(BuildError::PrefixRoutingNotImplemented),
@@ -68,7 +70,7 @@ impl<'a> RouteBuilder<'a> {
     async fn build_handle(
         &mut self,
         handle: &RouteHandleConfig,
-    ) -> Result<Arc<dyn DynRoute>, BuildError> {
+    ) -> Result<Arc<dyn DynRoute>> {
         match handle {
             RouteHandleConfig::NullRoute => Ok(NullRoute.into_dyn()),
 
@@ -106,7 +108,7 @@ impl<'a> RouteBuilder<'a> {
         }
     }
 
-    async fn get_or_build_pool(&mut self, pool_name: &str) -> Result<Arc<PoolRoute>, BuildError> {
+    async fn get_or_build_pool(&mut self, pool_name: &str) -> Result<Arc<PoolRoute>> {
         if let Some(cached) = self.pool_cache.get(pool_name) {
             return Ok(Arc::clone(cached));
         }
