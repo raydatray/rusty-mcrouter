@@ -1,13 +1,13 @@
 use bytes::BytesMut;
 
-use crate::{error::ProtocolError, request::Request};
+use crate::{request::Request, ProtocolError, Result};
 
 use super::shared::{extra_token_error, extract_command_args, validate_key};
 
 pub(super) fn parse_request(
     buf: &mut BytesMut,
     eol_idx: usize,
-) -> Result<Option<Request>, ProtocolError> {
+) -> Result<Option<Request>> {
     let rest = extract_command_args(buf, eol_idx, b"delete ")?;
 
     let mut parts = rest.split(|&b| b == b' ').filter(|s| !s.is_empty());
@@ -27,7 +27,7 @@ pub(super) fn parse_request(
 mod tests {
     use bytes::{Bytes, BytesMut};
 
-    use crate::{error::ProtocolError, parser::parse_request, request::Request};
+    use crate::{parser::parse_request, request::Request, ProtocolError};
 
     #[test]
     fn parse_request_delete_basic() {
