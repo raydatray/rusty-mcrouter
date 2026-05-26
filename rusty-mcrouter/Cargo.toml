@@ -15,7 +15,7 @@ rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
 rusty-mcrouter-core = { path = "../rusty-mcrouter-core" }
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "net"] }
 
 [dev-dependencies]
 testcontainers = "0.21"
