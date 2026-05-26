@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use rusty_mcrouter_protocol::{Reply, Request};
 
-use crate::route::{Route, RouteError};
+use crate::route::{Result, Route};
 
 pub struct ErrorRoute {
     message: Option<Bytes>,
@@ -16,7 +16,7 @@ impl ErrorRoute {
 }
 
 impl Route for ErrorRoute {
-    async fn route(&self, _req: Request) -> Result<Reply, RouteError> {
+    async fn route(&self, _req: Request) -> Result<Reply> {
         Ok(match &self.message {
             Some(m) => Reply::ServerError(m.clone()),
             None => Reply::Error,

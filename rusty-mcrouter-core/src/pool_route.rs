@@ -5,7 +5,7 @@ use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::{
     destination_route::DestinationRoute,
-    route::{Route, RouteError},
+    route::{Result, Route},
 };
 
 pub struct PoolRoute {
@@ -24,7 +24,7 @@ impl PoolRoute {
 }
 
 impl Route for PoolRoute {
-    async fn route(&self, req: Request) -> Result<Reply, RouteError> {
+    async fn route(&self, req: Request) -> Result<Reply> {
         // todo - hash, this is a random func
         self.children[random_range(0..self.children.len())]
             .route(req)

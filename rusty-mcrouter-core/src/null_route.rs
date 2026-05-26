@@ -1,11 +1,11 @@
 use rusty_mcrouter_protocol::{Reply, Request};
 
-use crate::route::{Route, RouteError};
+use crate::route::{Result, Route};
 
 pub struct NullRoute;
 
 impl Route for NullRoute {
-    async fn route(&self, req: Request) -> Result<Reply, RouteError> {
+    async fn route(&self, req: Request) -> Result<Reply> {
         Ok(match req {
             // todo - add the other dummy replies as more request types added
             Request::Get { .. } => Reply::Get { hits: vec![] },
