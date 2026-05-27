@@ -20,6 +20,9 @@ pub enum NetError {
 
     #[error("no addresses found")]
     NoAddresses,
+
+    #[error("worker closed: {worker}")]
+    WorkerClosed { worker: usize },
 }
 
 type Result<T> = std::result::Result<T, NetError>;
