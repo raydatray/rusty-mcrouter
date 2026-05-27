@@ -21,6 +21,22 @@ pub enum NetError {
 
     #[error("worker closed: {worker}")]
     WorkerClosed { worker: usize },
+
+    #[error("backend client closed")]
+    ClientClosed,
+}
+
+// todo - revisit this error type because fucking std::io::Error is not clone
+impl Clone for NetError {
+    fn clone(&self) -> Self {
+        match self {
+            NetError::Io(e) => NetError::Io(std::io::Error::new(e.kind(), e.to_string())),
+            NetError::Protocol(p) => NetError::Protocol(p.clone()),
+            NetError::NoAddresses => NetError::NoAddresses,
+            NetError::WorkerClosed { worker } => NetError::WorkerClosed { worker: *worker },
+            NetError::ClientClosed => NetError::ClientClosed,
+        }
+    }
 }
 
 type Result<T> = std::result::Result<T, NetError>;

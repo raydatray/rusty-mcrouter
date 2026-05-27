@@ -9,7 +9,7 @@ pub use crate::request::Request;
 
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum ProtocolError {
     #[error("malformed protocol: {0}")]
     Malformed(&'static str),
