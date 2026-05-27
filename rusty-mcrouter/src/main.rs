@@ -78,6 +78,7 @@ fn main() -> anyhow::Result<()> {
 
     let config = Arc::new(parse_file(&args.config)?);
 
+    // todo - threading, this is only socket handoff; add per-proxy message queues so requests enter a proxy actor like mcrouter
     let (work_txs, work_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
         .map(|_| mpsc::channel::<std::net::TcpStream>(WORK_CHANNEL_CAPACITY))
         .unzip();
