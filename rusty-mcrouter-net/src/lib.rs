@@ -7,6 +7,7 @@ mod server;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use crate::client::{Client, ClientConfig};
 pub use crate::server::{serve_worker, Server};
 
 #[derive(Debug, Error)]
