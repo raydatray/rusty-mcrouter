@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, rc::Rc};
 
 use rusty_mcrouter_config::{ConfigDocument, RouteEntry, RouteHandleConfig};
 use rusty_mcrouter_net::Client;
@@ -42,7 +42,9 @@ pub enum BuildError {
     UnresolvedReference { name: String },
 }
 
-pub async fn build_route(config: &ConfigDocument) -> Result<Arc<dyn DynRoute>, BuildError> {
+type Result<T> = std::result::Result<T, BuildError>;
+
+pub async fn build_route(config: &ConfigDocument) -> Result<Rc<dyn DynRoute>> {
     let entry = match &config.route {
         RouteEntry::Single(handle) => handle,
         RouteEntry::Prefixed(_) => return Err(BuildError::PrefixRoutingNotImplemented),
@@ -54,7 +56,7 @@ pub async fn build_route(config: &ConfigDocument) -> Result<Arc<dyn DynRoute>, B
 
 struct RouteBuilder<'a> {
     config: &'a ConfigDocument,
-    pool_cache: BTreeMap<String, Arc<PoolRoute>>,
+    pool_cache: BTreeMap<String, Rc<PoolRoute>>,
 }
 
 impl<'a> RouteBuilder<'a> {
@@ -65,10 +67,7 @@ impl<'a> RouteBuilder<'a> {
         }
     }
 
-    async fn build_handle(
-        &mut self,
-        handle: &RouteHandleConfig,
-    ) -> Result<Arc<dyn DynRoute>, BuildError> {
+    async fn build_handle(&mut self, handle: &RouteHandleConfig) -> Result<Rc<dyn DynRoute>> {
         match handle {
             RouteHandleConfig::NullRoute => Ok(NullRoute.into_dyn()),
 
@@ -77,7 +76,7 @@ impl<'a> RouteBuilder<'a> {
             }
 
             RouteHandleConfig::PoolRoute { pool } => {
-                Ok(self.get_or_build_pool(pool).await?.arc_into_dyn())
+                Ok(self.get_or_build_pool(pool).await?.rc_into_dyn())
             }
 
             RouteHandleConfig::Reference(name) => match name.as_str() {
@@ -93,7 +92,7 @@ impl<'a> RouteBuilder<'a> {
                     if args.len() != 1 {
                         return Err(BuildError::PoolRouteShorthandArity { got: args.len() });
                     }
-                    Ok(self.get_or_build_pool(&args[0]).await?.arc_into_dyn())
+                    Ok(self.get_or_build_pool(&args[0]).await?.rc_into_dyn())
                 }
                 other => Err(BuildError::RouteTypeNotImplemented {
                     kind: other.to_string(),
@@ -106,9 +105,9 @@ impl<'a> RouteBuilder<'a> {
         }
     }
 
-    async fn get_or_build_pool(&mut self, pool_name: &str) -> Result<Arc<PoolRoute>, BuildError> {
+    async fn get_or_build_pool(&mut self, pool_name: &str) -> Result<Rc<PoolRoute>> {
         if let Some(cached) = self.pool_cache.get(pool_name) {
-            return Ok(Arc::clone(cached));
+            return Ok(Rc::clone(cached));
         }
 
         let pool_config =
@@ -130,16 +129,16 @@ impl<'a> RouteBuilder<'a> {
                     source,
                 }
             })?;
-            destinations.push(Arc::new(DestinationRoute::new(client)));
+            destinations.push(Rc::new(DestinationRoute::new(client)));
         }
 
         let pool = PoolRoute::new(destinations).ok_or_else(|| BuildError::EmptyPool {
             name: pool_name.to_string(),
         })?;
 
-        let pool = Arc::new(pool);
+        let pool = Rc::new(pool);
         self.pool_cache
-            .insert(pool_name.to_string(), Arc::clone(&pool));
+            .insert(pool_name.to_string(), Rc::clone(&pool));
 
         Ok(pool)
     }
@@ -306,8 +305,8 @@ mod tests {
         let p1 = builder.get_or_build_pool("P").await.unwrap();
         let p2 = builder.get_or_build_pool("P").await.unwrap();
         assert!(
-            Arc::ptr_eq(&p1, &p2),
-            "second call should return the cached Arc"
+            Rc::ptr_eq(&p1, &p2),
+            "second call should return the cached Rc"
         );
     }
 }

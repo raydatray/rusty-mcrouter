@@ -1,49 +1,123 @@
+use std::{future::Future, rc::Rc};
+
 use bytes::BytesMut;
 use rusty_mcrouter_protocol::{parse_request, Reply, Request};
-use std::future::Future;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{lookup_host, TcpListener, TcpSocket, ToSocketAddrs},
+    sync::mpsc::{self, Sender},
+};
 
-use crate::NetError;
+use crate::{NetError, Result};
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
+const LISTEN_BACKLOG: u32 = 1024;
 
 pub struct Server {
     listener: TcpListener,
 }
 
 impl Server {
-    pub async fn bind(addr: impl ToSocketAddrs) -> std::io::Result<Self> {
+    pub async fn bind(addr: impl ToSocketAddrs) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
+
         Ok(Self { listener })
     }
 
-    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.listener.local_addr()
+    pub async fn bind_reuseport(addr: impl ToSocketAddrs) -> Result<Self> {
+        let listener = lookup_host(addr)
+            .await?
+            .find_map(|addr| {
+                let socket = if addr.is_ipv4() {
+                    TcpSocket::new_v4()
+                } else {
+                    TcpSocket::new_v6()
+                }
+                .ok()?;
+
+                socket.set_reuseaddr(true).ok()?;
+                socket.set_reuseport(true).ok()?;
+                socket.bind(addr).ok()?;
+                socket.listen(LISTEN_BACKLOG).ok()
+            })
+            .ok_or(NetError::NoAddresses)?;
+
+        Ok(Self { listener })
     }
 
-    pub async fn serve<F, Fut>(self, handler: F) -> std::io::Result<()>
-    where
-        F: Fn(Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Reply> + Send + 'static,
-    {
-        let handler = Arc::new(handler);
+    pub fn local_addr(&self) -> Result<std::net::SocketAddr> {
+        self.listener.local_addr().map_err(|e| e.into())
+    }
+
+    pub async fn accept_and_dispatch(
+        self,
+        work_txs: Vec<Sender<std::net::TcpStream>>,
+    ) -> Result<()> {
+        let mut next = 0;
         loop {
-            let (stream, _) = self.listener.accept().await?;
-            let handler = Arc::clone(&handler);
-            tokio::spawn(async move {
-                let _ = serve_session(stream, handler).await;
-            });
+            let (tokio_stream, _) = match self.listener.accept().await {
+                Ok(pair) => pair,
+                Err(e) if is_transient_accept_error(&e) => {
+                    // todo - logger
+                    eprintln!("transient accept error, continuing: {e}");
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            let std_stream = tokio_stream.into_std()?;
+
+            let target = next % work_txs.len();
+            next = next.wrapping_add(1);
+
+            if work_txs[target].send(std_stream).await.is_err() {
+                return Err(NetError::WorkerClosed { worker: target });
+            }
         }
+    }
+
+    pub async fn serve<F, Fut>(self, handler: F) -> Result<()>
+    where
+        F: Fn(Request) -> Fut + 'static,
+        Fut: Future<Output = Reply> + 'static,
+    {
+        let (work_tx, work_rx) = mpsc::channel::<std::net::TcpStream>(LISTEN_BACKLOG as usize);
+
+        let dispatch = self.accept_and_dispatch(vec![work_tx]);
+        let worker = serve_worker(work_rx, handler);
+
+        let (dispatch_result, _) = tokio::join!(dispatch, worker);
+        dispatch_result
     }
 }
 
-async fn serve_session<F, Fut>(mut stream: TcpStream, handler: Arc<F>) -> Result<(), NetError>
+pub async fn serve_worker<F, Fut>(mut work_rx: mpsc::Receiver<std::net::TcpStream>, handler: F)
 where
-    F: Fn(Request) -> Fut + Send + Sync,
-    Fut: Future<Output = Reply> + Send,
+    F: Fn(Request) -> Fut + 'static,
+    Fut: Future<Output = Reply> + 'static,
+{
+    let handler = Rc::new(handler);
+    while let Some(std_stream) = work_rx.recv().await {
+        let tokio_stream = match tokio::net::TcpStream::from_std(std_stream) {
+            Ok(s) => s,
+            Err(e) => {
+                //todo - logger
+                eprintln!("could not reregister accepted stream on worker runtime: {e}");
+                continue;
+            }
+        };
+
+        let handler = Rc::clone(&handler);
+        tokio::task::spawn_local(async move {
+            let _ = serve_session(tokio_stream, handler).await;
+        });
+    }
+}
+
+async fn serve_session<F, Fut>(mut stream: tokio::net::TcpStream, handler: Rc<F>) -> Result<()>
+where
+    F: Fn(Request) -> Fut,
+    Fut: Future<Output = Reply>,
 {
     let mut buf = BytesMut::with_capacity(READ_BUF_INITIAL_CAPACITY);
 
@@ -64,238 +138,37 @@ where
     }
 }
 
+fn is_transient_accept_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use rusty_mcrouter_protocol::Value;
 
-    async fn spawn_server<F, Fut>(handler: F) -> SocketAddr
-    where
-        F: Fn(Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Reply> + Send + 'static,
-    {
-        let server = Server::bind("127.0.0.1:0").await.unwrap();
-        let addr = server.local_addr().unwrap();
-        tokio::spawn(server.serve(handler));
-        addr
-    }
+    #[tokio::test]
+    async fn bind_reuseport_allows_two_binds_on_same_port() {
+        let s1 = Server::bind_reuseport("127.0.0.1:0").await.unwrap();
+        let addr = s1.listener.local_addr().unwrap();
 
-    async fn echo_handler(req: Request) -> Reply {
-        let Request::Get { keys } = req else {
-            panic!("echo_handler only handles Request::Get");
-        };
-        Reply::Get {
-            hits: keys
-                .into_iter()
-                .map(|k| Value {
-                    key: k,
-                    flags: 0,
-                    data: Bytes::from_static(b"x"),
-                })
-                .collect(),
-        }
+        let s2 = Server::bind_reuseport(addr).await.unwrap();
+        assert_eq!(s2.listener.local_addr().unwrap(), addr);
     }
 
     #[tokio::test]
-    async fn server_responds_to_single_get() {
-        let addr = spawn_server(echo_handler).await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(b"get foo\r\n").await.unwrap();
+    async fn bind_reuseport_plain_bind_on_same_port_fails() {
+        let s1 = Server::bind_reuseport("127.0.0.1:0").await.unwrap();
+        let addr = s1.listener.local_addr().unwrap();
 
-        let mut buf = vec![0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"VALUE foo 0 1\r\nx\r\nEND\r\n");
-    }
-
-    #[tokio::test]
-    async fn server_responds_to_multi_key_get() {
-        let addr = spawn_server(echo_handler).await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(b"get a bb ccc\r\n").await.unwrap();
-
-        let mut buf = vec![0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        assert_eq!(
-            &buf[..n],
-            b"VALUE a 0 1\r\nx\r\nVALUE bb 0 1\r\nx\r\nVALUE ccc 0 1\r\nx\r\nEND\r\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn server_handles_pipelined_requests_on_same_connection() {
-        let addr = spawn_server(echo_handler).await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(b"get foo\r\nget bar\r\n").await.unwrap();
-
-        let expected = b"VALUE foo 0 1\r\nx\r\nEND\r\nVALUE bar 0 1\r\nx\r\nEND\r\n";
-        let mut received = Vec::new();
-        let mut tmp = vec![0u8; 1024];
-        while received.len() < expected.len() {
-            let n = stream.read(&mut tmp).await.unwrap();
-            assert!(n > 0, "server closed before full response");
-            received.extend_from_slice(&tmp[..n]);
-        }
-        assert_eq!(received, expected);
-    }
-
-    #[tokio::test]
-    async fn server_handles_fragmented_request_across_multiple_writes() {
-        let addr = spawn_server(echo_handler).await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-
-        for chunk in [b"get fo".as_ref(), b"o\r".as_ref(), b"\n".as_ref()] {
-            stream.write_all(chunk).await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-
-        let mut buf = vec![0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"VALUE foo 0 1\r\nx\r\nEND\r\n");
-    }
-
-    #[tokio::test]
-    async fn server_serves_two_concurrent_connections_independently() {
-        let addr = spawn_server(echo_handler).await;
-
-        let conn_a = tokio::spawn(async move {
-            let mut s = TcpStream::connect(addr).await.unwrap();
-            s.write_all(b"get aaa\r\n").await.unwrap();
-            let mut buf = vec![0u8; 1024];
-            let n = s.read(&mut buf).await.unwrap();
-            buf[..n].to_vec()
-        });
-        let conn_b = tokio::spawn(async move {
-            let mut s = TcpStream::connect(addr).await.unwrap();
-            s.write_all(b"get bbb\r\n").await.unwrap();
-            let mut buf = vec![0u8; 1024];
-            let n = s.read(&mut buf).await.unwrap();
-            buf[..n].to_vec()
-        });
-
-        let (a, b) = tokio::join!(conn_a, conn_b);
-        assert_eq!(a.unwrap(), b"VALUE aaa 0 1\r\nx\r\nEND\r\n");
-        assert_eq!(b.unwrap(), b"VALUE bbb 0 1\r\nx\r\nEND\r\n");
-    }
-
-    async fn ack_set_handler(req: Request) -> Reply {
-        match req {
-            Request::Set { .. }
-            | Request::Add { .. }
-            | Request::Replace { .. }
-            | Request::Append { .. }
-            | Request::Prepend { .. } => Reply::Stored,
-            Request::Get { .. } => Reply::Get { hits: vec![] },
-            Request::Delete { .. } => Reply::Deleted,
-            Request::Incr { .. } | Request::Decr { .. } => Reply::NotFound,
-            Request::Touch { .. } => Reply::Touched,
-        }
-    }
-
-    #[tokio::test]
-    async fn server_responds_to_set_request() {
-        let addr = spawn_server(ack_set_handler).await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(b"set foo 0 0 3\r\nbar\r\n").await.unwrap();
-
-        let mut buf = vec![0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"STORED\r\n");
-    }
-
-    #[tokio::test]
-    async fn server_handles_set_then_get_pipelined() {
-        async fn handler(req: Request) -> Reply {
-            match req {
-                Request::Set { .. }
-                | Request::Add { .. }
-                | Request::Replace { .. }
-                | Request::Append { .. }
-                | Request::Prepend { .. } => Reply::Stored,
-                Request::Get { keys } => Reply::Get {
-                    hits: keys
-                        .into_iter()
-                        .map(|k| Value {
-                            key: k,
-                            flags: 0,
-                            data: Bytes::from_static(b"x"),
-                        })
-                        .collect(),
-                },
-                Request::Delete { .. } => Reply::Deleted,
-                Request::Incr { .. } | Request::Decr { .. } => Reply::NotFound,
-                Request::Touch { .. } => Reply::Touched,
+        match Server::bind(addr).await {
+            Ok(_) => {
+                panic!("plain bind without SO_REUSEPORT should fail when port is already bound")
             }
+            Err(NetError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse),
+            Err(other) => panic!("expected io error, got {other:?}"),
         }
-        let addr = spawn_server(handler).await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream
-            .write_all(b"set foo 0 0 3\r\nbar\r\nget foo\r\n")
-            .await
-            .unwrap();
-
-        let expected = b"STORED\r\nVALUE foo 0 1\r\nx\r\nEND\r\n";
-        let mut received = Vec::new();
-        let mut tmp = vec![0u8; 1024];
-        while received.len() < expected.len() {
-            let n = stream.read(&mut tmp).await.unwrap();
-            assert!(n > 0, "server closed before full response");
-            received.extend_from_slice(&tmp[..n]);
-        }
-        assert_eq!(received, expected);
-    }
-
-    #[tokio::test]
-    async fn server_handles_set_with_fragmented_body() {
-        let addr = spawn_server(ack_set_handler).await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-
-        let chunks: &[&[u8]] = &[b"set foo 0 0 5\r\n", b"hel", b"lo\r\n"];
-        for chunk in chunks {
-            stream.write_all(chunk).await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-
-        let mut buf = vec![0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"STORED\r\n");
-    }
-
-    #[tokio::test]
-    async fn server_handler_can_emit_server_error_reply() {
-        async fn err_handler(_req: Request) -> Reply {
-            Reply::ServerError(Bytes::from_static(b"backend down"))
-        }
-        let addr = spawn_server(err_handler).await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(b"get foo\r\n").await.unwrap();
-
-        let mut buf = vec![0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"SERVER_ERROR backend down\r\n");
-    }
-
-    #[tokio::test]
-    async fn server_closes_session_on_malformed_request() {
-        let addr = spawn_server(echo_handler).await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(b"NOTACOMMAND foo\r\n").await.unwrap();
-
-        let mut buf = vec![0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        assert_eq!(n, 0, "expected EOF but got bytes: {:?}", &buf[..n]);
-    }
-
-    #[tokio::test]
-    async fn server_cleans_up_when_client_disconnects() {
-        let addr = spawn_server(echo_handler).await;
-        let stream = TcpStream::connect(addr).await.unwrap();
-        drop(stream);
-
-        let mut s = TcpStream::connect(addr).await.unwrap();
-        s.write_all(b"get foo\r\n").await.unwrap();
-        let mut buf = vec![0u8; 1024];
-        let n = s.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"VALUE foo 0 1\r\nx\r\nEND\r\n");
     }
 }

@@ -8,7 +8,7 @@ mod server;
 pub mod testing;
 
 pub use crate::client::Client;
-pub use crate::server::Server;
+pub use crate::server::{serve_worker, Server};
 
 #[derive(Debug, Error)]
 pub enum NetError {
@@ -17,4 +17,12 @@ pub enum NetError {
 
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
+
+    #[error("no addresses found")]
+    NoAddresses,
+
+    #[error("worker closed: {worker}")]
+    WorkerClosed { worker: usize },
 }
+
+type Result<T> = std::result::Result<T, NetError>;

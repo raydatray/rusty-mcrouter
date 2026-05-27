@@ -1,6 +1,6 @@
 use bytes::BytesMut;
 
-use crate::{error::ProtocolError, request::Request};
+use crate::{request::Request, ProtocolError, Result};
 
 mod add;
 mod append;
@@ -24,7 +24,7 @@ use shared::read_line;
 // this stateful via a RequestParser struct holding ParseState — low priority,
 // costs ~µs + 1 small alloc per partial read on multi-fragment set bodies.
 
-pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>, ProtocolError> {
+pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>> {
     let Some((line_end, total)) = read_line(buf, 0) else {
         return Ok(None);
     };

@@ -1,20 +1,20 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use rand::random_range;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::{
     destination_route::DestinationRoute,
-    route::{Route, RouteError},
+    route::{Result, Route},
 };
 
 pub struct PoolRoute {
     // todo - clients, not destination routes
-    children: Vec<Arc<DestinationRoute>>,
+    children: Vec<Rc<DestinationRoute>>,
 }
 
 impl PoolRoute {
-    pub fn new(children: Vec<Arc<DestinationRoute>>) -> Option<Self> {
+    pub fn new(children: Vec<Rc<DestinationRoute>>) -> Option<Self> {
         if children.is_empty() {
             return None;
         }
@@ -24,7 +24,7 @@ impl PoolRoute {
 }
 
 impl Route for PoolRoute {
-    async fn route(&self, req: Request) -> Result<Reply, RouteError> {
+    async fn route(&self, req: Request) -> Result<Reply> {
         // todo - hash, this is a random func
         self.children[random_range(0..self.children.len())]
             .route(req)
@@ -34,13 +34,13 @@ impl Route for PoolRoute {
 
 #[cfg(test)]
 mod tests {
-    use crate::route::DynRoute;
-
     use super::*;
+    use crate::route::DynRoute;
     use bytes::Bytes;
     use rusty_mcrouter_net::Client;
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -77,7 +77,7 @@ mod tests {
     async fn pool_of_one(reply: &'static [u8]) -> (PoolRoute, Arc<AtomicUsize>) {
         let (addr, count) = counting_mock_backend(reply).await;
         let client = Client::connect(addr).await.unwrap();
-        let dr = Arc::new(DestinationRoute::new(client));
+        let dr = Rc::new(DestinationRoute::new(client));
         let pool = PoolRoute::new(vec![dr]).expect("non-empty");
         (pool, count)
     }
@@ -102,8 +102,8 @@ mod tests {
         let c1 = Client::connect(addr1).await.unwrap();
         let c2 = Client::connect(addr2).await.unwrap();
         let pool = PoolRoute::new(vec![
-            Arc::new(DestinationRoute::new(c1)),
-            Arc::new(DestinationRoute::new(c2)),
+            Rc::new(DestinationRoute::new(c1)),
+            Rc::new(DestinationRoute::new(c2)),
         ])
         .expect("non-empty");
 
@@ -124,17 +124,5 @@ mod tests {
         let route: Arc<dyn DynRoute> = Arc::new(pool);
         let reply = route.route_dyn(req_get(&[b"foo"])).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
-    }
-
-    #[tokio::test]
-    async fn pool_route_can_be_shared_across_tasks_via_arc() {
-        let (pool, count) = pool_of_one(b"END\r\n").await;
-        let pool = Arc::new(pool);
-
-        let p = Arc::clone(&pool);
-        let h = tokio::spawn(async move { p.route(req_get(&[b"foo"])).await });
-        let _ = h.await.unwrap().unwrap();
-
-        assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 }

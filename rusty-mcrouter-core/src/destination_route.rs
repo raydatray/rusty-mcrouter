@@ -2,7 +2,7 @@ use rusty_mcrouter_net::Client;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::Mutex;
 
-use crate::route::{Route, RouteError};
+use crate::route::{Result, Route, RouteError};
 
 pub struct DestinationRoute {
     client: Mutex<Client>,
@@ -17,7 +17,7 @@ impl DestinationRoute {
 }
 
 impl Route for DestinationRoute {
-    async fn route(&self, req: Request) -> Result<Reply, RouteError> {
+    async fn route(&self, req: Request) -> Result<Reply> {
         let mut client = self.client.lock().await;
 
         client.send(&req).await.map_err(RouteError::from)
