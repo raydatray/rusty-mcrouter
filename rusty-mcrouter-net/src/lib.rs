@@ -1,6 +1,7 @@
 use rusty_mcrouter_protocol::ProtocolError;
 use thiserror::Error;
 
+mod client;
 mod server;
 
 #[cfg(any(test, feature = "testing"))]
