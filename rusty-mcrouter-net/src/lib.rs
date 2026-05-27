@@ -17,6 +17,9 @@ pub enum NetError {
 
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
+
+    #[error("no addresses found")]
+    NoAddresses,
 }
 
 type Result<T> = std::result::Result<T, NetError>;
