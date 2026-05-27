@@ -15,7 +15,7 @@ testing = []
 bytes.workspace = true
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "io-util"] }
+tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
