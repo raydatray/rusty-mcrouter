@@ -67,6 +67,7 @@ impl Server {
 
             let std_stream = tokio_stream.into_std()?;
 
+            // todo - thread modes, accepted sockets are round-robin today; per-request affinity belongs behind a proxy message queue
             let target = next % work_txs.len();
             next = next.wrapping_add(1);
 
@@ -108,6 +109,7 @@ where
         };
 
         let handler = Rc::clone(&handler);
+        // todo - proxy queue, connection tasks should submit parsed requests to a chosen proxy instead of owning routing directly
         tokio::task::spawn_local(async move {
             let _ = serve_session(tokio_stream, handler).await;
         });
@@ -125,6 +127,7 @@ where
         // Drain any complete frames already buffered before reading more.
         // A single read can contain multiple pipelined requests.
         while let Some(req) = parse_request(&mut buf)? {
+            // todo - fibers, spawn route work per request and preserve write ordering instead of awaiting each route inline
             let reply = (*handler)(req).await;
             let mut out = BytesMut::new();
             reply.serialize_into(&mut out);

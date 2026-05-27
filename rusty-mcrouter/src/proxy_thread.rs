@@ -34,6 +34,7 @@ pub fn proxy_thread_main(
         .enable_time()
         .build()?;
 
+    // todo - fibers, this LocalSet is our FiberManager analogue; route work should be scheduled through a proxy queue, not direct session calls
     let local = LocalSet::new();
 
     local.block_on(&rt, async move {
@@ -75,6 +76,7 @@ pub fn proxy_thread_main(
         let _ = ready_tx.send(Ok(bound_addr));
         drop(ready_tx);
 
+        // todo - proxy queue, replace this direct route closure with ProxyMessage::Request handling on this proxy thread
         let handler = move |req| {
             let route = Rc::clone(&route);
             async move {
@@ -86,6 +88,7 @@ pub fn proxy_thread_main(
 
         match role {
             ProxyThreadRole::ListenerAndWorker { server, work_txs } => {
+                // todo - thread modes, serve_worker should choose SameThread/FixedRemote/AffinitizedRemote before enqueueing requests
                 tokio::select! {
                     result = server.accept_and_dispatch(work_txs) => result?,
                     _ = serve_worker(work_rx, handler) => {
