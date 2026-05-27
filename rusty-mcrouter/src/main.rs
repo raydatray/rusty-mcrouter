@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use std::path::PathBuf;
-
+mod proxy_thread;
 #[derive(Parser)]
 struct Args {
     #[arg(
