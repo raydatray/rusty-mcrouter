@@ -45,6 +45,10 @@ impl Server {
         Ok(Self { listener })
     }
 
+    pub fn local_addr(&self) -> Result<std::net::SocketAddr> {
+        self.listener.local_addr().map_err(|e| e.into())
+    }
+
     pub async fn accept_and_dispatch(
         self,
         work_txs: Vec<Sender<std::net::TcpStream>>,
