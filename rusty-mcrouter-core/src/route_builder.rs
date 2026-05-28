@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, rc::Rc};
 
 use rusty_mcrouter_config::{ConfigDocument, RouteEntry, RouteHandleConfig};
-use rusty_mcrouter_net::Client;
+use rusty_mcrouter_net::{Client, NetError};
 use thiserror::Error;
 
 use crate::{
@@ -25,7 +25,7 @@ pub enum BuildError {
         pool: String,
         server: String,
         #[source]
-        source: std::io::Error,
+        source: NetError,
     },
 
     #[error("`PoolRoute|...` shorthand requires exactly 1 arg, got {got}")]

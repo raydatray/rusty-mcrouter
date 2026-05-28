@@ -1,33 +1,28 @@
 use rusty_mcrouter_net::Client;
 use rusty_mcrouter_protocol::{Reply, Request};
-use tokio::sync::Mutex;
 
 use crate::route::{Result, Route, RouteError};
 
 pub struct DestinationRoute {
-    client: Mutex<Client>,
+    client: Client,
 }
 
 impl DestinationRoute {
     pub fn new(client: Client) -> Self {
-        Self {
-            client: Mutex::new(client),
-        }
+        Self { client }
     }
 }
 
 impl Route for DestinationRoute {
     async fn route(&self, req: Request) -> Result<Reply> {
-        let mut client = self.client.lock().await;
-
-        client.send(&req).await.map_err(RouteError::from)
+        self.client.send(req).await.map_err(RouteError::from)
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use rusty_mcrouter_net::testing::mock_backend;
+    use rusty_mcrouter_net::testing::{mock_backend, pipelining_mock_backend};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -127,5 +122,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.unwrap(), Reply::Get { hits: vec![] });
+    }
+
+    #[tokio::test]
+    async fn destination_route_serves_concurrent_requests_without_locking() {
+        let addr = pipelining_mock_backend(b"END\r\n", 2).await;
+        let client = Client::connect(addr).await.unwrap();
+        let route = Arc::new(DestinationRoute::new(client));
+
+        let r1 = {
+            let route = Arc::clone(&route);
+            tokio::spawn(async move { route.route(req_get(&[b"a"])).await })
+        };
+        let r2 = {
+            let route = Arc::clone(&route);
+            tokio::spawn(async move { route.route(req_get(&[b"b"])).await })
+        };
+
+        let (a, b) = tokio::join!(r1, r2);
+        assert_eq!(a.unwrap().unwrap(), Reply::Get { hits: vec![] });
+        assert_eq!(b.unwrap().unwrap(), Reply::Get { hits: vec![] });
     }
 }
