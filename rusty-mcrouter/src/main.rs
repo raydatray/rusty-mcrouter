@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+mod proxy;
 mod proxy_thread;
 
 const WORK_CHANNEL_CAPACITY: usize = 1024;
