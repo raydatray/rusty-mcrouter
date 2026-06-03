@@ -9,9 +9,13 @@ use std::{
     sync::Arc,
 };
 mod proxy;
-mod proxy_thread;
+
+use crate::proxy::{
+    ListenerConfig, ProxyHandle, ProxyMessage, ProxySet, ProxyThreadConfig, ThreadMode,
+};
 
 const WORK_CHANNEL_CAPACITY: usize = 1024;
+const PROXY_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Parser)]
 struct Args {
@@ -79,40 +83,60 @@ fn main() -> anyhow::Result<()> {
 
     let config = Arc::new(parse_file(&args.config)?);
 
-    // todo - threading, this is only socket handoff; add per-proxy message queues so requests enter a proxy actor like mcrouter
     let (work_txs, work_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
         .map(|_| mpsc::channel::<std::net::TcpStream>(WORK_CHANNEL_CAPACITY))
         .unzip();
+
+    let (proxy_txs, proxy_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
+        .map(|_| mpsc::channel::<ProxyMessage>(PROXY_CHANNEL_CAPACITY))
+        .unzip();
+    let proxies = ProxySet::new(
+        proxy_txs
+            .iter()
+            .enumerate()
+            .map(|(id, tx)| ProxyHandle::new(id, tx.clone()))
+            .collect(),
+    );
 
     let use_reuseport = num_listening_sockets > 1;
     let mut handles = Vec::with_capacity(args.num_proxies);
     let mut bound_addr: Option<SocketAddr> = None;
     let mut work_rxs_iter = work_rxs.into_iter();
+    let mut proxy_rxs_iter = proxy_rxs.into_iter();
 
     for proxy_id in 0..args.num_proxies {
         let has_listener = proxy_id < num_listening_sockets;
         let work_rx = work_rxs_iter.next().expect("one work_rx per proxy thread");
-        let listener_txs = if has_listener {
-            Some(work_txs.clone())
+        let proxy_rx = proxy_rxs_iter
+            .next()
+            .expect("one proxy_rx per proxy thread");
+        let listener_config = if has_listener {
+            Some(ListenerConfig {
+                listen_addr,
+                use_reuseport,
+                listener_txs: work_txs.clone(),
+            })
         } else {
             None
+        };
+
+        let cfg = ProxyThreadConfig {
+            proxy_id,
+            config: Arc::clone(&config),
+            work_rx,
+            proxy_rx,
+            proxies: proxies.clone(),
+            thread_mode: ThreadMode::SameThread,
+            listener_config,
         };
 
         let (ready_tx, ready_rx) =
             std::sync::mpsc::sync_channel::<anyhow::Result<Option<SocketAddr>>>(1);
 
-        let config = Arc::clone(&config);
         let handle = std::thread::Builder::new()
             .name(format!("proxy-{proxy_id}"))
             .spawn(move || {
-                if let Err(e) = proxy_thread::proxy_thread_main(
-                    listen_addr,
-                    use_reuseport,
-                    config,
-                    listener_txs,
-                    work_rx,
-                    ready_tx,
-                ) {
+                if let Err(e) = proxy::proxy_thread_main(cfg, ready_tx) {
                     eprintln!("proxy-{proxy_id} terminated: {e}");
                     std::process::exit(1);
                 }
@@ -131,9 +155,12 @@ fn main() -> anyhow::Result<()> {
         handles.push(handle);
     }
 
-    // Drop our copy of the work_txs Vec. Each listener thread already holds its own
-    // clone, so the channels stay open until all listeners terminate.
+    // drop main's sender copies
+    // - each thread keeps its own clones (work_txs inside listener_config, proxy senders inside the ProxySet)
+    // - the queues stay open until the threads terminate
     drop(work_txs);
+    drop(proxy_txs);
+    drop(proxies);
 
     let addr =
         bound_addr.ok_or_else(|| anyhow::anyhow!("no proxy thread reported a bound address"))?;
