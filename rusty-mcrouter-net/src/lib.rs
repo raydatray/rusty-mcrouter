@@ -8,7 +8,7 @@ mod server;
 pub mod testing;
 
 pub use crate::client::{Client, ClientConfig};
-pub use crate::server::{serve_worker, Server};
+pub use crate::server::Server;
 
 #[derive(Debug, Error)]
 pub enum NetError {
