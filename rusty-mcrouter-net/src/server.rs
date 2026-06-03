@@ -1,16 +1,10 @@
-use std::{future::Future, rc::Rc};
-
-use bytes::BytesMut;
-use rusty_mcrouter_protocol::{parse_request, Reply, Request};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     net::{lookup_host, TcpListener, TcpSocket, ToSocketAddrs},
-    sync::mpsc::{self, Sender},
+    sync::mpsc::Sender,
 };
 
 use crate::{NetError, Result};
 
-const READ_BUF_INITIAL_CAPACITY: usize = 4096;
 const LISTEN_BACKLOG: u32 = 1024;
 
 pub struct Server {
@@ -74,69 +68,6 @@ impl Server {
             if work_txs[target].send(std_stream).await.is_err() {
                 return Err(NetError::WorkerClosed { worker: target });
             }
-        }
-    }
-
-    pub async fn serve<F, Fut>(self, handler: F) -> Result<()>
-    where
-        F: Fn(Request) -> Fut + 'static,
-        Fut: Future<Output = Reply> + 'static,
-    {
-        let (work_tx, work_rx) = mpsc::channel::<std::net::TcpStream>(LISTEN_BACKLOG as usize);
-
-        let dispatch = self.accept_and_dispatch(vec![work_tx]);
-        let worker = serve_worker(work_rx, handler);
-
-        let (dispatch_result, _) = tokio::join!(dispatch, worker);
-        dispatch_result
-    }
-}
-
-pub async fn serve_worker<F, Fut>(mut work_rx: mpsc::Receiver<std::net::TcpStream>, handler: F)
-where
-    F: Fn(Request) -> Fut + 'static,
-    Fut: Future<Output = Reply> + 'static,
-{
-    let handler = Rc::new(handler);
-    while let Some(std_stream) = work_rx.recv().await {
-        let tokio_stream = match tokio::net::TcpStream::from_std(std_stream) {
-            Ok(s) => s,
-            Err(e) => {
-                //todo - logger
-                eprintln!("could not reregister accepted stream on worker runtime: {e}");
-                continue;
-            }
-        };
-
-        let handler = Rc::clone(&handler);
-        // todo - proxy queue, connection tasks should submit parsed requests to a chosen proxy instead of owning routing directly
-        tokio::task::spawn_local(async move {
-            let _ = serve_session(tokio_stream, handler).await;
-        });
-    }
-}
-
-async fn serve_session<F, Fut>(mut stream: tokio::net::TcpStream, handler: Rc<F>) -> Result<()>
-where
-    F: Fn(Request) -> Fut,
-    Fut: Future<Output = Reply>,
-{
-    let mut buf = BytesMut::with_capacity(READ_BUF_INITIAL_CAPACITY);
-
-    loop {
-        // Drain any complete frames already buffered before reading more.
-        // A single read can contain multiple pipelined requests.
-        while let Some(req) = parse_request(&mut buf)? {
-            // todo - fibers, spawn route work per request and preserve write ordering instead of awaiting each route inline
-            let reply = (*handler)(req).await;
-            let mut out = BytesMut::new();
-            reply.serialize_into(&mut out);
-            stream.write_all(&out).await?;
-        }
-
-        let n = stream.read_buf(&mut buf).await?;
-        if n == 0 {
-            return Ok(());
         }
     }
 }
