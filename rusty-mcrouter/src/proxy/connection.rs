@@ -29,6 +29,7 @@ pub struct Connection {
     mode: ThreadMode,
     // pipeline state
     buf: BytesMut,
+    write_buf: BytesMut,
     pending: BTreeMap<usize, Reply>,
     next_seq: usize,
     next_write: usize,
@@ -57,6 +58,7 @@ impl Connection {
             proxies,
             mode,
             buf: BytesMut::with_capacity(READ_BUF_INITIAL_CAPACITY),
+            write_buf: BytesMut::new(),
             pending: BTreeMap::new(),
             next_seq: 0,
             next_write: 0,
@@ -91,6 +93,9 @@ impl Connection {
                     match maybe_completed {
                         Some((seq, reply)) => {
                             self.pending.insert(seq, reply);
+                            while let Ok((seq, reply)) = self.completed_rx.try_recv() {
+                                self.pending.insert(seq, reply);
+                            }
                         }
                         None => return Ok(()),
                     }
@@ -134,12 +139,14 @@ impl Connection {
 
     /// flush replies that are ready in request order, advancing `next_write`.
     async fn flush_ready(&mut self) -> Result<(), NetError> {
+        self.write_buf.clear();
         while let Some(reply) = self.pending.remove(&self.next_write) {
-            let mut out = BytesMut::new();
-            reply.serialize_into(&mut out);
-            self.writer.write_all(&out).await?;
+            reply.serialize_into(&mut self.write_buf);
             self.next_write = self.next_write.wrapping_add(1);
             self.in_flight = self.in_flight.saturating_sub(1);
+        }
+        if !self.write_buf.is_empty() {
+            self.writer.write_all(&self.write_buf).await?;
         }
         Ok(())
     }

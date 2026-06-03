@@ -48,7 +48,7 @@ impl ClientConnection {
                 maybe_cmd = self.rx.recv() => {
                     match maybe_cmd {
                         Some(cmd) => {
-                            if let Err(err) = self.write_one(cmd).await {
+                            if let Err(err) = self.write_batch(cmd).await {
                                 self.fail_all_pending(err);
                                 return;
                             }
@@ -82,12 +82,21 @@ impl ClientConnection {
         }
     }
 
-    // todo - make this a writev where we can write out multiple commands with one syscall
-    async fn write_one(&mut self, cmd: ClientCommand) -> Result<()> {
+    // Coalesce the triggering command plus any other commands already queued in
+    // the channel into one buffer and a single write syscall, preserving order so
+    // FIFO reply matching still holds. (Tier 2: vectored/zero-copy via IoSlice.)
+    async fn write_batch(&mut self, first: ClientCommand) -> Result<()> {
         self.write_buf.clear();
-        cmd.request.serialize_into(&mut self.write_buf);
+        first.request.serialize_into(&mut self.write_buf);
+        self.pending.push_back(first.reply_tx);
+
+        // drain whatever else is already waiting, into the same write
+        while let Ok(cmd) = self.rx.try_recv() {
+            cmd.request.serialize_into(&mut self.write_buf);
+            self.pending.push_back(cmd.reply_tx);
+        }
+
         self.writer.write_all(&self.write_buf).await?;
-        self.pending.push_back(cmd.reply_tx);
         Ok(())
     }
 
