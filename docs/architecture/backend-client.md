@@ -7,8 +7,8 @@ as-built description of the current tree.
 > As-built — describes what the code does now, not a plan.
 > Mirrors [`../mcrouter/backend-client.md`](../mcrouter/backend-client.md) (the
 > model we track; the "why" and the mcrouter targets live there).
-> Related: [`../design/threading-model.md`](../design/threading-model.md) — the
-> proxy layer that *calls* this client.
+> Sibling: [`./threading-model.md`](./threading-model.md) — the proxy layer that
+> *calls* this client (the `Proxy` actor mirrored below is now as-built there).
 > Citations are by file + symbol, relative to the repo root.
 
 ---
@@ -98,8 +98,8 @@ pub(crate) struct ClientCommand {
 }
 ```
 
-This is the exact mirror of the proxy actor in
-[`../design/threading-model.md`](../design/threading-model.md): `Client` is to
+This is the exact mirror of the proxy actor (now as-built — see
+[`./threading-model.md`](./threading-model.md)): `Client` is to
 `ClientConnection` what `ProxyHandle` is to `Proxy`.
 
 ---
