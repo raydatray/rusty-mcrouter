@@ -1,6 +1,6 @@
 # rusty-mcrouter threading model (design)
 
-> Status: **Planned**
+> Status: **Done (2026-06-03)**
 > Mirrors: [`../mcrouter/threading-model.md`](../mcrouter/threading-model.md) — how mcrouter does it
 > Implemented in: `../architecture/threading-model.md` (once built; current state lives in [`../architecture/overview.md`](../architecture/overview.md) for now)
 > Related: [`../mcrouter/backend-client.md`](../mcrouter/backend-client.md) (the backend client this sits above — already implemented), and the queue-backpressure design (currently [`../message-queue-backpressure.md`](../message-queue-backpressure.md), planned home `./message-queue.md`)
