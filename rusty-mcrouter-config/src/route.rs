@@ -10,6 +10,7 @@ pub enum RouteHandleConfig {
     },
     PoolRoute {
         pool: String,
+        hash: HashConfig,
     },
     NullRoute,
     ErrorRoute {
@@ -21,6 +22,19 @@ pub enum RouteHandleConfig {
         kind: String,
         fields: Map<String, Value>,
     },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum HashFunc {
+    #[default]
+    Ch3,
+    Crc32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HashConfig {
+    pub func: HashFunc,
+    pub salt: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for RouteHandleConfig {
@@ -91,9 +105,42 @@ fn parse_object_form(mut map: Map<String, Value>) -> Result<RouteHandleConfig, S
                 }
                 None => return Err("PoolRoute missing required field `pool`".to_string()),
             };
-            Ok(RouteHandleConfig::PoolRoute { pool })
+            let hash = parse_hash(&mut map)?;
+            Ok(RouteHandleConfig::PoolRoute { pool, hash })
         }
         _ => Ok(RouteHandleConfig::Unknown { kind, fields: map }),
+    }
+}
+
+fn parse_hash(map: &mut Map<String, Value>) -> Result<HashConfig, String> {
+    match map.remove("hash") {
+        Some(Value::String(name)) => Ok(HashConfig {
+            func: parse_hash_func(&name)?,
+            salt: None,
+        }),
+        Some(Value::Object(mut obj)) => {
+            let func = match obj.remove("hash_func") {
+                None => HashFunc::default(),
+                Some(Value::String(name)) => parse_hash_func(&name)?,
+                Some(other) => return Err(format!("`hash_func` must be a string, got {}", other)),
+            };
+            let salt = match obj.remove("salt") {
+                None => None,
+                Some(Value::String(s)) => Some(s),
+                Some(other) => return Err(format!("`salt` must be a string, got {}", other)),
+            };
+            Ok(HashConfig { func, salt })
+        }
+        Some(other) => Err(format!("`hash` must be a string or object, got {}", other)),
+        None => Ok(HashConfig::default()),
+    }
+}
+
+fn parse_hash_func(name: &str) -> Result<HashFunc, String> {
+    match name {
+        "Ch3" => Ok(HashFunc::Ch3),
+        "Crc32" => Ok(HashFunc::Crc32),
+        other => Err(format!("unknown hash_func `{}`", other)),
     }
 }
 
@@ -140,21 +187,104 @@ mod tests {
     }
 
     #[test]
-    fn object_form_pool_route() {
+    fn object_form_pool_route_defaults_hash_to_ch3() {
         let r = parse(r#"{ "type": "PoolRoute", "pool": "foo" }"#);
-        assert_eq!(r, RouteHandleConfig::PoolRoute { pool: "foo".into() });
+        assert_eq!(
+            r,
+            RouteHandleConfig::PoolRoute {
+                pool: "foo".into(),
+                hash: HashConfig::default()
+            }
+        );
     }
 
     #[test]
     fn object_form_pool_route_with_object_pool_name() {
         let r = parse(r#"{ "type": "PoolRoute", "pool": { "name": "foo", "servers": [] } }"#);
-        assert_eq!(r, RouteHandleConfig::PoolRoute { pool: "foo".into() });
+        assert_eq!(
+            r,
+            RouteHandleConfig::PoolRoute {
+                pool: "foo".into(),
+                hash: HashConfig::default()
+            }
+        );
     }
 
     #[test]
-    fn object_form_pool_route_silently_drops_extras() {
+    fn object_form_pool_route_drops_extras_but_keeps_pool_and_hash() {
         let r = parse(r#"{ "type": "PoolRoute", "pool": "foo", "asynclog": "log_a" }"#);
-        assert_eq!(r, RouteHandleConfig::PoolRoute { pool: "foo".into() });
+        assert_eq!(
+            r,
+            RouteHandleConfig::PoolRoute {
+                pool: "foo".into(),
+                hash: HashConfig::default()
+            }
+        );
+    }
+
+    #[test]
+    fn pool_route_hash_string_form() {
+        let r = parse(r#"{ "type": "PoolRoute", "pool": "A", "hash": "Crc32" }"#);
+        assert_eq!(
+            r,
+            RouteHandleConfig::PoolRoute {
+                pool: "A".into(),
+                hash: HashConfig {
+                    func: HashFunc::Crc32,
+                    salt: None
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn pool_route_hash_object_form_with_salt() {
+        let r = parse(
+            r#"{ "type": "PoolRoute", "pool": "A", "hash": { "hash_func": "Crc32", "salt": "x" } }"#,
+        );
+        assert_eq!(
+            r,
+            RouteHandleConfig::PoolRoute {
+                pool: "A".into(),
+                hash: HashConfig {
+                    func: HashFunc::Crc32,
+                    salt: Some("x".into())
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn pool_route_hash_object_omitted_func_defaults_to_ch3() {
+        let r = parse(r#"{ "type": "PoolRoute", "pool": "A", "hash": { "salt": "x" } }"#);
+        assert_eq!(
+            r,
+            RouteHandleConfig::PoolRoute {
+                pool: "A".into(),
+                hash: HashConfig {
+                    func: HashFunc::Ch3,
+                    salt: Some("x".into())
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn pool_route_unknown_hash_func_is_error() {
+        let err = serde_json::from_str::<RouteHandleConfig>(
+            r#"{ "type": "PoolRoute", "pool": "A", "hash": "Nope" }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Nope"), "got: {err}");
+    }
+
+    #[test]
+    fn pool_route_non_string_hash_func_is_error() {
+        let err = serde_json::from_str::<RouteHandleConfig>(
+            r#"{ "type": "PoolRoute", "pool": "A", "hash": { "hash_func": 123 } }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("hash_func"), "got: {err}");
     }
 
     #[test]
