@@ -5,6 +5,8 @@ mod null_route;
 mod pool_route;
 mod route;
 mod route_builder;
+mod selection_route;
+mod selector;
 
 pub use crate::destination_route::DestinationRoute;
 pub use crate::error_route::ErrorRoute;
