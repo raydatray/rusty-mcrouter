@@ -1,5 +1,5 @@
 use rusty_mcrouter_config::{
-    parse_file, ConfigDocument, ConfigError, RouteEntry, RouteHandleConfig,
+    parse_file, ConfigDocument, ConfigError, HashConfig, RouteEntry, RouteHandleConfig,
 };
 use std::path::PathBuf;
 
@@ -76,7 +76,10 @@ fn named_handles_object_form_resolves_keys() {
     assert!(doc.named_handles.contains_key("null"));
     assert_eq!(
         doc.named_handles["route:A"],
-        RouteHandleConfig::PoolRoute { pool: "A".into() }
+        RouteHandleConfig::PoolRoute {
+            pool: "A".into(),
+            hash: HashConfig::default()
+        }
     );
 }
 
@@ -86,7 +89,10 @@ fn named_handles_list_form_lifts_name_field() {
     assert_eq!(doc.named_handles.len(), 4);
     assert_eq!(
         doc.named_handles["route:A"],
-        RouteHandleConfig::PoolRoute { pool: "A".into() }
+        RouteHandleConfig::PoolRoute {
+            pool: "A".into(),
+            hash: HashConfig::default()
+        }
     );
 
     let RouteHandleConfig::Unknown { kind, .. } = &doc.named_handles["route:all"] else {
