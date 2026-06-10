@@ -123,6 +123,12 @@ impl<'a> RouteBuilder<'a> {
                     name: pool_name.to_string(),
                 })?;
 
+        if pool_config.servers.is_empty() {
+            return Err(BuildError::EmptyPool {
+                name: pool_name.to_string(),
+            });
+        }
+
         let mut destinations = Vec::with_capacity(pool_config.servers.len());
 
         for server in &pool_config.servers {
