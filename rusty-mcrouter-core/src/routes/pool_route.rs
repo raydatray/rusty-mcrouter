@@ -2,12 +2,10 @@ use std::rc::Rc;
 
 use rusty_mcrouter_protocol::{Reply, Request};
 
-use crate::{
-    destination_route::DestinationRoute,
-    route::{Result, Route},
-    selection_route::SelectionRoute,
-    selectors::Selector,
-    DynRoute,
+use crate::selectors::Selector;
+
+use super::{
+    destination_route::DestinationRoute, selection_route::SelectionRoute, DynRoute, Result, Route,
 };
 
 pub struct PoolRoute {

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use rusty_mcrouter_protocol::{Reply, Request};
 
-use crate::route::{Result, Route};
+use super::{Result, Route};
 
 pub struct ErrorRoute {
     message: Option<Bytes>,

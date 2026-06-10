@@ -1,7 +1,7 @@
 use rusty_mcrouter_net::Client;
 use rusty_mcrouter_protocol::{Reply, Request};
 
-use crate::route::{Result, Route, RouteError};
+use super::{Result, Route, RouteError};
 
 pub struct DestinationRoute {
     client: Client,
@@ -18,6 +18,7 @@ impl Route for DestinationRoute {
         self.client.send(req).await.map_err(RouteError::from)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
