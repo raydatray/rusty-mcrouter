@@ -1,15 +1,19 @@
 use std::{collections::BTreeMap, rc::Rc};
 
-use rusty_mcrouter_config::{ConfigDocument, RouteEntry, RouteHandleConfig};
+use rusty_mcrouter_config::{ConfigDocument, HashConfig, HashFunc, RouteEntry, RouteHandleConfig};
 use rusty_mcrouter_net::{Client, NetError};
 use thiserror::Error;
 
 use crate::{
+    ch3::Ch3,
+    crc32::Crc32,
     destination_route::DestinationRoute,
     error_route::ErrorRoute,
     null_route::NullRoute,
     pool_route::PoolRoute,
     route::{DynRoute, Route},
+    salted::Salted,
+    selector::Selector,
 };
 
 #[derive(Debug, Error)]
@@ -56,7 +60,7 @@ pub async fn build_route(config: &ConfigDocument) -> Result<Rc<dyn DynRoute>> {
 
 struct RouteBuilder<'a> {
     config: &'a ConfigDocument,
-    pool_cache: BTreeMap<String, Rc<PoolRoute>>,
+    pool_cache: BTreeMap<String, Vec<Rc<DestinationRoute>>>,
 }
 
 impl<'a> RouteBuilder<'a> {
@@ -75,8 +79,9 @@ impl<'a> RouteBuilder<'a> {
                 Ok(ErrorRoute::new(message.clone()).into_dyn())
             }
 
-            RouteHandleConfig::PoolRoute { pool } => {
-                Ok(self.get_or_build_pool(pool).await?.rc_into_dyn())
+            RouteHandleConfig::PoolRoute { pool, hash } => {
+                let destinations = self.get_or_build_destinations(pool).await?;
+                build_pool_handle(pool, hash, destinations)
             }
 
             RouteHandleConfig::Reference(name) => match name.as_str() {
@@ -92,7 +97,8 @@ impl<'a> RouteBuilder<'a> {
                     if args.len() != 1 {
                         return Err(BuildError::PoolRouteShorthandArity { got: args.len() });
                     }
-                    Ok(self.get_or_build_pool(&args[0]).await?.rc_into_dyn())
+                    let destinations = self.get_or_build_destinations(&args[0]).await?;
+                    build_pool_handle(&args[0], &HashConfig::default(), destinations)
                 }
                 other => Err(BuildError::RouteTypeNotImplemented {
                     kind: other.to_string(),
@@ -105,9 +111,12 @@ impl<'a> RouteBuilder<'a> {
         }
     }
 
-    async fn get_or_build_pool(&mut self, pool_name: &str) -> Result<Rc<PoolRoute>> {
+    async fn get_or_build_destinations(
+        &mut self,
+        pool_name: &str,
+    ) -> Result<Vec<Rc<DestinationRoute>>> {
         if let Some(cached) = self.pool_cache.get(pool_name) {
-            return Ok(Rc::clone(cached));
+            return Ok(cached.clone());
         }
 
         let pool_config =
@@ -132,16 +141,34 @@ impl<'a> RouteBuilder<'a> {
             destinations.push(Rc::new(DestinationRoute::new(client)));
         }
 
-        let pool = PoolRoute::new(destinations).ok_or_else(|| BuildError::EmptyPool {
-            name: pool_name.to_string(),
-        })?;
-
-        let pool = Rc::new(pool);
         self.pool_cache
-            .insert(pool_name.to_string(), Rc::clone(&pool));
+            .insert(pool_name.to_string(), destinations.clone());
 
-        Ok(pool)
+        Ok(destinations)
     }
+}
+
+fn build_pool_handle(
+    pool_name: &str,
+    hash: &HashConfig,
+    destinations: Vec<Rc<DestinationRoute>>,
+) -> Result<Rc<dyn DynRoute>> {
+    let selector = build_selector(hash, destinations.len())?;
+    let route = PoolRoute::new(pool_name, destinations, selector);
+
+    Ok(route.into_dyn())
+}
+
+fn build_selector(hash: &HashConfig, n: usize) -> Result<Box<dyn Selector>> {
+    let base: Box<dyn Selector> = match hash.func {
+        HashFunc::Ch3 => Box::new(Ch3::new(n)),
+        HashFunc::Crc32 => Box::new(Crc32::new(n)),
+    };
+
+    Ok(match &hash.salt {
+        Some(salt) => Box::new(Salted::new(base, salt.clone().into_bytes())),
+        None => base,
+    })
 }
 
 #[cfg(test)]
@@ -296,17 +323,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_referenced_twice_is_built_once_and_shared() {
+    async fn pool_referenced_twice_shares_destinations() {
         let addr = mock_backend(b"END\r\n").await;
         let json =
             format!(r#"{{"pools": {{"P": {{"servers": ["{addr}"]}}}}, "route": "PoolRoute|P"}}"#);
         let cfg = parse(&json).unwrap();
         let mut builder = RouteBuilder::new(&cfg);
-        let p1 = builder.get_or_build_pool("P").await.unwrap();
-        let p2 = builder.get_or_build_pool("P").await.unwrap();
+        let d1 = builder.get_or_build_destinations("P").await.unwrap();
+        let d2 = builder.get_or_build_destinations("P").await.unwrap();
         assert!(
-            Rc::ptr_eq(&p1, &p2),
-            "second call should return the cached Rc"
+            Rc::ptr_eq(&d1[0], &d2[0]),
+            "destinations should be shared across references"
         );
     }
 }
