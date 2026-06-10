@@ -6,7 +6,7 @@ use crate::{
     destination_route::DestinationRoute,
     route::{Result, Route},
     selection_route::SelectionRoute,
-    selector::Selector,
+    selectors::Selector,
     DynRoute,
 };
 
