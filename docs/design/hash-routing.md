@@ -1,8 +1,8 @@
 # rusty-mcrouter selection routing (design)
 
-> Status: **Planned**
+> Status: **Implemented** (2026-06-10)
 > Mirrors: [`../mcrouter/hash-routing.md`](../mcrouter/hash-routing.md) — how mcrouter does it (`SelectionRoute<HashSelector<Func>>`, `Ch3`/`furc_hash`)
-> Implemented in: `../architecture/hash-routing.md` (once built)
+> Implemented in: [`../architecture/hash-routing.md`](../architecture/hash-routing.md) — as-built (incl. where it diverged)
 > Related: [`./multiget.md`](./multiget.md) — **independent** of this (neither blocks the other): multigets are split into single-key gets at the request layer *before* routing, so a selection route normally hashes one key; until that lands, routing hashes a get's first key as an interim. And [`./threading-model.md`](./threading-model.md) — thread *affinity* hashing is a **different** hash (which proxy thread) and is orthogonal to this (which backend). Don't conflate them.
 
 Replace `PoolRoute`'s random backend selection with a **pluggable selection
