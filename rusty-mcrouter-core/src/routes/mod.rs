@@ -1,3 +1,14 @@
+mod destination_route;
+mod error_route;
+mod null_route;
+mod pool_route;
+mod selection_route;
+
+pub use destination_route::DestinationRoute;
+pub use error_route::ErrorRoute;
+pub use null_route::NullRoute;
+pub use pool_route::PoolRoute;
+
 use std::{future::Future, pin::Pin, rc::Rc};
 
 use rusty_mcrouter_net::NetError;

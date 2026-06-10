@@ -2,7 +2,9 @@ use std::rc::Rc;
 
 use rusty_mcrouter_protocol::{Reply, Request};
 
-use crate::{route::Result, selectors::Selector, DynRoute, Route};
+use crate::selectors::Selector;
+
+use super::{DynRoute, Result, Route};
 
 pub struct SelectionRoute {
     children: Vec<Rc<dyn DynRoute>>,
