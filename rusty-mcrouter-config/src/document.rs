@@ -155,6 +155,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::route::HashConfig;
+
     use super::*;
 
     fn parse(json: &str) -> ConfigDocument {
@@ -205,7 +207,10 @@ mod tests {
         assert_eq!(doc.named_handles.len(), 2);
         assert_eq!(
             doc.named_handles["route:A"],
-            RouteHandleConfig::PoolRoute { pool: "A".into() }
+            RouteHandleConfig::PoolRoute {
+                pool: "A".into(),
+                hash: HashConfig::default()
+            }
         );
         assert!(matches!(
             doc.named_handles["route:B"],
@@ -227,7 +232,10 @@ mod tests {
         assert_eq!(doc.named_handles.len(), 2);
         assert_eq!(
             doc.named_handles["route:A"],
-            RouteHandleConfig::PoolRoute { pool: "A".into() }
+            RouteHandleConfig::PoolRoute {
+                pool: "A".into(),
+                hash: HashConfig::default()
+            }
         );
         assert_eq!(doc.named_handles["n"], RouteHandleConfig::NullRoute);
     }
