@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     routes::{DestinationRoute, DynRoute, ErrorRoute, NullRoute, PoolRoute, Route},
-    selectors::{Ch3, Crc32, Salted, Selector},
+    selectors::{Ch3, Crc32, Salted, Selector, SelectorBuildError},
 };
 
 #[derive(Debug, Error)]
@@ -37,6 +37,9 @@ pub enum BuildError {
 
     #[error("unresolved reference `{name}`: not a known route type, and named_handles resolution is not implemented")]
     UnresolvedReference { name: String },
+
+    #[error(transparent)]
+    Selector(#[from] SelectorBuildError),
 }
 
 type Result<T> = std::result::Result<T, BuildError>;
@@ -154,7 +157,7 @@ fn build_pool_handle(
 
 fn build_selector(hash: &HashConfig, n: usize) -> Result<Box<dyn Selector>> {
     let base: Box<dyn Selector> = match hash.func {
-        HashFunc::Ch3 => Box::new(Ch3::new(n)),
+        HashFunc::Ch3 => Box::new(Ch3::new(n)?),
         HashFunc::Crc32 => Box::new(Crc32::new(n)),
     };
 
