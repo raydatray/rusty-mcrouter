@@ -7,6 +7,7 @@ mod null_route;
 mod pool_route;
 mod route;
 mod route_builder;
+mod salted;
 mod selection_route;
 mod selector;
 
