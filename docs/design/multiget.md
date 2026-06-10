@@ -1,0 +1,460 @@
+# rusty-mcrouter multiget (design)
+
+> Status: **Planned**
+> Mirrors: [`../mcrouter/multiget.md`](../mcrouter/multiget.md) — how mcrouter does it (parser split + `MultiOpParent`)
+> Implemented in: `../architecture/multiget.md` (once built)
+> Related: [`./hash-routing.md`](./hash-routing.md) — independent and complementary, **not** a dependency: making the routed `Request::Get` single-key is where `PoolRoute`'s per-key hash lands cleanly. Either can land first; this supersedes that doc's "multi-key get problem" section.
+
+Make the **routed** get single-key *by type*, split a wire multi-key `get` into
+independent single-key gets **before** routing, then reassemble the sub-replies
+into one client reply. Read the [mcrouter reference](../mcrouter/multiget.md)
+first — this doc assumes it and only describes our side.
+
+---
+
+## tl;dr
+
+- A wire `get k1 k2 k3` must not route as one unit: `k1`,`k2`,`k3` may hash to
+  different backends, so a single route yields false misses. mcrouter handles
+  this by having **no multi-key request type at all** — its `McGetRequest` holds
+  exactly one key (`Memcache.idl`), and the parser splits the wire command into
+  single-key requests.
+- We do the same at the **type level**: change the routed request to
+  **`Request::Get { key: Bytes }`** (single-key). The route graph, route handles,
+  and backend `Client` then *cannot represent* a multi-key get — the invariant is
+  compiler-enforced, not a convention.
+- The wire's multi-key-ness lives only at the **parse boundary**, in a small
+  result type:
+
+  ```rust
+  enum Parsed {
+      One(Request),          // common path incl. single-key get — no Vec, no state
+      MultiGet(Vec<Bytes>),  // rare; the Vec is only built when 2+ keys are present
+  }
+  ```
+
+- The **connection** turns a `Parsed::MultiGet` into one output `seq`, fans out
+  **N single-key `Request::Get { key }`** through the normal per-request path (so
+  hashing/failover/thread-modes apply per key), and **reassembles** the N replies
+  into one `Reply::Get` (concatenated hits) or the **first error**.
+- The parser stays **stateless**: a `get` is a single line, so it decides
+  single-vs-multi in one call — no cross-call state and no multi-op sentinels in
+  the protocol crate. (A future stateful parser is forward-compatible; see
+  [below](#forward-compatibility-stateless-now-stateful-later).)
+- **Efficiency bonus:** the common single-key get is `Parsed::One(Get{key})` with
+  **zero `Vec`** — today's `Get { keys: Vec<Bytes> }` pays a heap allocation per
+  get even for one key.
+
+---
+
+## goal
+
+A pipelined multiget routes each key to the backend that key hashes to, and the
+client receives exactly one well-formed reply (`VALUE` blocks for hits, in
+request-key order, then `END`) — or the first error if a sub-get failed. The
+routed request type is single-key, so no code below the connection layer can even
+*express* a multi-key get, and the common single-key path allocates nothing extra.
+
+## why, and how it relates to hash-routing
+
+The split belongs **above routing**, not inside `PoolRoute`. An earlier
+hash-routing draft put it there — the wrong layer: it only fires when a multiget
+hits a `PoolRoute` directly, and it would have to be re-implemented in every
+handle that forwards a `Get` (`NullRoute`, a future `FailoverRoute`, …). mcrouter
+splits **once**, above all routing, because its request type is single-key; we
+adopt that invariant (`Request::Get { key }`) and split once at the connection.
+
+This is **independent of [hash-routing](./hash-routing.md)** — neither blocks the
+other. They just meet cleanly: with the routed `Get` single-key, `PoolRoute`
+hashes the one key with no special-casing. If hashing lands first, it hashes the
+first key of `Get{keys}` as an interim (correct for the common single-key get),
+and adapting it to the single-key type once this lands is trivial.
+
+---
+
+## scope / non-goals
+
+In scope:
+
+- making the routed `Request::Get` single-key (`key: Bytes`)
+- a `Parsed` parse-boundary type (`One` / `MultiGet`) so the wire's multi-key get
+  is expressed without a `Vec` on the common path
+- a connection-layer "multiget parent" that fans out N single-key gets and merges
+  the replies into one `Reply::Get` (or first error) for one `seq`
+- preserving request-key order in the merged `VALUE`s
+- keeping `in_flight`/`seq`/`flush_ready` accounting unchanged (a multiget = one
+  output slot)
+
+Out of scope / deferred:
+
+- **a stateful parser** — not needed for any of this (a `get` is one line). It's a
+  worthwhile *future* foundation for other reasons (large values, backpressure,
+  the binary/meta protocol); deferred and forward-compatible. See
+  [below](#forward-compatibility-stateless-now-stateful-later).
+- **re-batching same-destination keys** into one backend multi-key get. mcrouter
+  doesn't either (it pipelines single-key gets to the backend); it complicates
+  FIFO reply matching in our `ClientConnection` for little gain. See
+  [open questions](#open-questions--decisions).
+- **`gat`/`gats`** multi-key splitting — same shape, but we don't have those
+  commands yet; `Parsed`/the parent should be written so adding them is trivial.
+- Caret/binary protocol — rusty is ASCII-only.
+
+---
+
+## starting point (current rusty)
+
+Today the parser returns `Option<Request>` and `Request::Get` is multi-key
+(`rusty-mcrouter-protocol/src/request.rs`):
+
+```rust
+pub enum Request {
+    Get { keys: Vec<Bytes> },          // multi-key — every get allocates a Vec
+    Set { key: Bytes, .. }, ..         // others already single-key
+}
+```
+
+`get.rs` builds the keys with `rest.slice_ref(seg)` — the key *bytes* are
+zero-copy views into the read buffer, so nothing copies key data; the waste is the
+**`Vec` container itself**, allocated on *every* get including the common
+single-key case.
+
+The connection (`rusty-mcrouter/src/proxy/connection.rs`) drains and dispatches
+one frame → one `seq` → one `Reply`:
+
+```rust
+fn drain_input(&mut self) -> Result<(), NetError> {
+    while let Some(req) = parse_request(&mut self.buf)? {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        self.in_flight = self.in_flight.saturating_add(1);
+        self.submit(seq, req);                 // one frame → one seq → one Reply
+    }
+    Ok(())
+}
+```
+
+`flush_ready` reassembles client order from `pending: BTreeMap<seq, Reply>` keyed
+by `next_write`. Relevant facts we build on:
+
+- `Reply::Get { hits: Vec<Value> }` serializes as `VALUE …` per hit then a single
+  `END` (`reply.rs`) — so a merged `Reply::Get` is byte-identical to what one
+  backend would return for the whole multiget.
+- One frame currently maps to one `seq`; `in_flight` counts frames, not keys. We
+  keep that: a multiget is **one** output slot.
+
+---
+
+## the shape: single-key routed request + a `Parsed` boundary
+
+mcrouter has no multi-key request type — `McGetRequest` is one key, and the parser
+splits the wire command. We adopt the same invariant, but because a `get` is a
+single line we don't need a stateful streaming parser to do it: the parser reads
+the whole line, sees every key at once, and returns either a single-key request or
+(rarely) the key list.
+
+```rust
+// protocol: the ROUTED request is single-key
+pub enum Request {
+    Get { key: Bytes },
+    Set { key: Bytes, .. }, ..
+}
+
+// protocol: the wire's multi-key get is expressed only here, at the boundary
+pub enum Parsed {
+    One(Request),
+    MultiGet(Vec<Bytes>),
+}
+
+pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Parsed>>;
+```
+
+`get.rs` special-cases arity so the common path never builds a `Vec`:
+
+- parse the first key; if **no** further key token follows → `Parsed::One(Request::Get { key })` (zero allocation, no state)
+- only if a second key is present → collect all into `Parsed::MultiGet(keys)`
+
+Everything that isn't a 2+-key get is `Parsed::One(...)`. The serializer simplifies
+too: `Request::Get` now writes `get <key>\r\n` (one key).
+
+> Why not the parser emit single-key gets directly (mcrouter-literal)? That needs
+> the parser to return *multiple* values across calls — i.e. statefulness + a
+> multi-op sentinel — pushing reply-grouping into the protocol crate. `Parsed`
+> keeps the grouping explicit in **one** return value and the parser stateless.
+> See [where the split lives](#where-the-split-lives).
+
+The invariant this establishes: **a multi-key get is unrepresentable below the
+connection.** Route handles take `Request::Get { key }`; there is no `Vec` to
+mishandle. This replaces the "document-it-and-`debug_assert`" convention the
+earlier draft proposed.
+
+---
+
+## where the split lives
+
+mcrouter splits in the **ASCII parser** because its request type is single-key, so
+the bytes→request boundary is the only place a wire multiget can become requests —
+and it then needs `MultiOpParent` at the *session* to reassemble. The split point
+and the reassembly point are different layers, bridged by a `multiOpEnd` sentinel.
+
+rusty keeps the split and the reassembly **co-located at the connection**:
+
+- the parser only *classifies* (`One` vs `MultiGet`) — it does not fan out;
+- the connection *fans out* `MultiGet` into N single-key routes and *reassembles*
+  — and it's the layer that owns the `seq`/reorder/`completed_tx` machinery
+  reassembly needs anyway.
+
+So grouping is never destroyed-then-rebuilt; it lives in one value (`MultiGet`)
+and one layer (the connection). The protocol crate stays a pure, stateless
+`bytes → Parsed`.
+
+---
+
+## target design
+
+### 1. drain + dispatch on `Parsed`
+
+```rust
+fn drain_input(&mut self) -> Result<(), NetError> {
+    while let Some(parsed) = parse_request(&mut self.buf)? {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        self.in_flight = self.in_flight.saturating_add(1);
+        match parsed {
+            Parsed::One(req)       => self.submit_single(seq, req),
+            Parsed::MultiGet(keys) => self.submit_multiget(seq, keys),
+        }
+    }
+    Ok(())
+}
+```
+
+`submit_single` is today's `submit` body, refactored onto a `route_one` helper.
+The common case (single-key get + every other command) takes this path with **no
+parent and no `Vec`**.
+
+### 2. `route_one`: the per-request routing path, reused
+
+```rust
+fn route_one(&self, req: Request) -> impl Future<Output = Reply> {
+    let handle = self.proxies.choose(self.mode, self.current_id, &req);
+    let same_thread = handle.id() == self.current_id;
+    let route = Rc::clone(&self.local_route);
+    async move {
+        if same_thread {
+            route.route_dyn(req).await
+                .unwrap_or_else(|_| Reply::ServerError(Bytes::from_static(b"backend unavailable")))
+        } else {
+            handle.send_request(req).await
+        }
+    }
+}
+```
+
+Each sub-key routes exactly like a normal single-key get, so consistent hashing,
+future failover, and the thread modes apply per key for free.
+
+### 3. the multiget parent: fan out, collect, merge
+
+One output `seq`, N internal sub-routes, dependency-free collection via an
+internal mpsc (mirroring the existing `completed_tx`/`completed_rx` pattern — no
+new crate, works on the `!Send` `LocalSet`):
+
+```rust
+fn submit_multiget(&self, seq: usize, keys: Vec<Bytes>) {
+    let n = keys.len();
+    let (sub_tx, mut sub_rx) = mpsc::channel::<(usize, Reply)>(n);
+
+    // fan out: one single-key route task per key, tagged with its position
+    for (i, key) in keys.into_iter().enumerate() {
+        let fut = self.route_one(Request::Get { key });   // single-key by type
+        let sub_tx = sub_tx.clone();
+        tokio::task::spawn_local(async move {
+            let _ = sub_tx.send((i, fut.await)).await;
+        });
+    }
+    drop(sub_tx);
+
+    // parent: collect all N, merge in key order, emit one reply for `seq`
+    let completed_tx = self.completed_tx.clone();
+    tokio::task::spawn_local(async move {
+        let mut slots: Vec<Option<Reply>> = (0..n).map(|_| None).collect();
+        while let Some((i, reply)) = sub_rx.recv().await {
+            slots[i] = Some(reply);
+        }
+        let merged = merge_multiget(slots);
+        let _ = completed_tx.send((seq, merged)).await;
+    });
+}
+```
+
+`in_flight` still counts the multiget as **one** (incremented once in
+`drain_input`), and `flush_ready` sees one `(seq, merged)` — so the reorder buffer
+and ordered writeback are completely unchanged.
+
+```mermaid
+flowchart TB
+  DI["drain_input: Parsed::MultiGet([k1,k2,k3]), one seq"] --> SM["submit_multiget(seq, [k1,k2,k3])"]
+  SM -->|"route_one(Get{k1})"| T1["sub task 1"]
+  SM -->|"route_one(Get{k2})"| T2["sub task 2"]
+  SM -->|"route_one(Get{k3})"| T3["sub task 3"]
+  T1 --> RG["route graph (single-key Request) → hashed backends"]
+  T2 --> RG
+  T3 --> RG
+  T1 -->|"(0, reply)"| PAR["parent: collect N, merge"]
+  T2 -->|"(1, reply)"| PAR
+  T3 -->|"(2, reply)"| PAR
+  PAR -->|"(seq, Reply::Get{merged} | first error)"| CR["completed_tx → flush_ready"]
+```
+
+### 4. merge: concatenate hits, first error wins
+
+```rust
+fn merge_multiget(slots: Vec<Option<Reply>>) -> Reply {
+    let mut hits = Vec::new();
+    for reply in slots {
+        match reply.expect("every sub-slot is filled before merge") {
+            Reply::Get { hits: h } => hits.extend(h),  // hit(s) or miss (empty)
+            other => return other,                      // first error wins (key order)
+        }
+    }
+    Reply::Get { hits }
+}
+```
+
+- **Hits** concatenate in **request-key order** (`slots` indexed by position), so
+  `VALUE` lines match mcrouter's order.
+- **Misses** are `Reply::Get { hits: vec![] }` — absorbed, exactly as mcrouter
+  absorbs them.
+- **First error** (any non-`Get` reply) in key order short-circuits, mirroring
+  `MultiOpParent`'s first-error-wins. (We scan in key order for determinism rather
+  than first-to-complete — a defensible refinement over mcrouter's first-seen.)
+
+### 5. concurrency
+
+Sub-routes run **concurrently** (each `spawn_local`'d), matching mcrouter's
+independent dispatch and exploiting the backend `Client`'s pipelining — N keys to
+the same backend pipeline onto its one socket; keys to different backends proceed
+in parallel. The parent waits for **all** N before replying (a multiget reply is
+all-or-first-error), so there's no partial flush. A **serial** variant is simpler
+but serializes N round-trips; not worth it given the infra already supports
+concurrency.
+
+---
+
+## forward compatibility: stateless now, stateful later
+
+This design keeps the parser stateless, but does **not** block making it stateful
+later (the right foundation for large-value streaming, per-connection memory
+backpressure, and the binary/meta protocol — its own future effort). When that
+happens:
+
+- `Request::Get { key }` (single-key, type-enforced) is **unchanged** — it's
+  independent of how the parser is structured.
+- Reassembly stays at the connection — mcrouter reassembles at the *session* even
+  *with* its stateful parser, so this is the steady-state shape regardless.
+- Only the parse→connection boundary changes: `Parsed::MultiGet(Vec)` becomes
+  "emit N single-key gets incrementally + a group marker," an internal refactor
+  that never touches the route tree or the merge logic.
+
+So choosing stateless now is not a corner we have to back out of.
+
+---
+
+## how this maps to mcrouter
+
+| mcrouter | rusty |
+|---|---|
+| `McGetRequest` holds one key (`Memcache.idl`) | `Request::Get { key: Bytes }` (single-key by type) |
+| `McServerAsciiParser::consumeGetLike` emits per-key requests | parser returns `Parsed::One` / `Parsed::MultiGet`; connection fans out |
+| `MultiOpParent` (+ block/end contexts) coordinates | the parent `spawn_local` task + internal `sub_rx` |
+| each subreq routed independently | `route_one(Request::Get { key })` per key |
+| per-subreq `VALUE`; parent suppresses sub-`END`, emits one `END` via the block/end gate | merge `hits` into one structured `Reply::Get` (atomic `VALUE* + END`) |
+| first non-FOUND/NOT_FOUND reply wins | `merge_multiget` returns first non-`Get` reply (key order) |
+| reorder by request id in `McServerSession` | existing `pending`/`next_write` reorder buffer (unchanged) |
+| split is ASCII-only | rusty is ASCII-only; same |
+
+---
+
+## testing
+
+- **No `Vec` on the common path.** A single-key `get k` parses to
+  `Parsed::One(Request::Get { key })` and takes `submit_single` — never builds a
+  key `Vec` or a parent. (Guards the efficiency win and against a regression that
+  routes 1-key gets through the multiget path.)
+- **Spans backends.** With a 2+ backend pool and consistent hashing, `get k1 k2`
+  where the keys hash to different backends returns both hits (no false miss).
+  Counting mock backends (as in `pool_route.rs`) assert each backend saw only its
+  key.
+- **Order.** `VALUE` lines come back in request-key order regardless of which
+  sub-route completes first (drive with a slow + fast mock backend).
+- **Misses absorbed.** Mixed hit/miss → only the hits + single `END`; all-miss →
+  just `END`.
+- **First error wins.** If a key's backend errors, the whole reply is that error;
+  assert it's the first in key order when several error.
+- **Duplicates.** `get k k` → two sub-gets → two `VALUE`s on a hit (no dedupe,
+  matching mcrouter).
+- **Accounting.** `in_flight`/`seq` ordering holds when multigets and single
+  requests pipeline together (a multiget occupies exactly one slot).
+
+---
+
+## implementation order
+
+1. **Protocol: single-key `Request::Get` + `Parsed`.** Change `Request::Get` to
+   `{ key: Bytes }`; add `enum Parsed { One(Request), MultiGet(Vec<Bytes>) }`;
+   make `parse_request` return `Option<Parsed>`, with `get.rs` emitting
+   `Parsed::One` for one key (no `Vec`) and `Parsed::MultiGet` for 2+. Update the
+   `Get` serializer and every route handle / test that constructs a multi-key get
+   (they all become single-key). Pure protocol+routing churn, no multiget behavior
+   yet — `lsp_diagnostics`/tests green.
+2. **Connection: dispatch `Parsed` + the parent.** `drain_input` matches
+   `One`/`MultiGet`; add `route_one` + `submit_single` (refactor) and
+   `submit_multiget` + `merge_multiget`. Verifiable against `NullRoute` (every
+   sub-get is a miss → single `END`) and a multi-backend mock pool.
+3. **Relationship to hash-routing.** Independent — either can land first; they
+   meet at `PoolRoute` (single-key get → hash one key).
+   [`./hash-routing.md`](./hash-routing.md) defers the split to this doc.
+4. **Docs.** Write `../architecture/multiget.md` (as-built) and flip this to
+   Implemented.
+
+---
+
+## open questions / decisions
+
+- **Re-batch same-destination keys?** Could group sub-keys by hashed backend and
+  send one multi-key get per backend (fewer backend commands). mcrouter doesn't,
+  and it complicates `ClientConnection`'s FIFO reply matching. Lean: **no** —
+  pipeline single-key gets, revisit only if profiling says so.
+- **`Parsed` shape.** A dedicated `enum Parsed { One, MultiGet }` vs. folding the
+  rare multi case into `Request` itself. Lean: dedicated `Parsed` — keeps
+  `Request` uniformly single-key (the whole point) and the multi-key concept at
+  the boundary only.
+- **Error precedence: first-by-key vs first-to-complete.** We pick first-by-key
+  (deterministic); mcrouter latches first-seen. Either is defensible; confirm no
+  test depends on completion order.
+- **Bound on N / huge multigets.** `get k1 … k10000` spawns N tasks + an N-slot
+  channel. Cap/chunk fan-out? Lean: fine for now (bounded by max request line
+  length); a cap pairs naturally with connection backpressure later.
+- **Parent failure isolation.** If a sub-route task panics, its `sub_tx` drops and
+  the parent's `recv` loop ends with an unfilled slot. Treat a dropped sub as a
+  `ServerError` (reply-drop safety used elsewhere) instead of letting `merge`'s
+  `expect` panic. Tighten before shipping.
+
+---
+
+## done when
+
+- The routed `Request::Get` is single-key (`key: Bytes`); a multi-key get is
+  **unrepresentable** below the connection (compiler-enforced).
+- `parse_request` returns `Parsed`; a single-key get is `Parsed::One` with **no
+  `Vec` allocated**; only 2+-key gets build a `MultiGet` vector.
+- A multi-key `get` routes each key to its hashed backend and returns one reply:
+  `VALUE`s in request-key order then `END`, or the first error.
+- `in_flight`/`seq`/`flush_ready` accounting is unchanged; multigets and single
+  requests pipeline together correctly.
+- Tests cover the no-`Vec` common path, spanning backends, ordering, miss
+  absorption, first-error-wins, and duplicates.
+- The parser is unchanged in statefulness (a future stateful parser is noted as
+  forward-compatible).
+- `lsp_diagnostics`/clippy clean; `hash-routing.md` relies on this;
+  `../architecture/multiget.md` written and this doc flipped to Implemented.

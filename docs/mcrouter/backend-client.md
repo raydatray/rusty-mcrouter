@@ -7,7 +7,7 @@ when it forwards a request to a real server.
 
 > Source pinned to `facebook/mcrouter` @ `42aa391189c7`. Citations are by symbol
 > and file path (relative to the repo root). Reference-only — no rusty-mcrouter
-> content. See `../design/backend-client.md` for what we copy and
+> content. See `../design/backend-client-read-write-parallelism.md` for what we copy and
 > `../architecture/backend-client.md` for what we built. For the proxy/fiber
 > machinery that *calls* this client, see [`threading-model.md`](./threading-model.md).
 
