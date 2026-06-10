@@ -50,7 +50,7 @@ fn routing_key(req: &Request) -> Result<&[u8]> {
         // panicking.
         Request::Get { keys } => keys.first().map(|k| &k[..]).ok_or(RouteError::EmptyGet)?,
     };
-    Ok(key)
+    Ok(hash_stop(key))
 }
 
 /// mcrouter excludes everything from the `|#|` "hash stop" onward from the
@@ -92,5 +92,33 @@ mod tests {
     fn routing_key_empty_get_is_error() {
         let req = Request::Get { keys: vec![] };
         assert!(matches!(routing_key(&req), Err(RouteError::EmptyGet)));
+    }
+
+    #[test]
+    fn routing_key_cuts_at_hash_stop() {
+        let req = Request::Delete {
+            key: Bytes::from_static(b"user:1|#|debuginfo"),
+        };
+        assert_eq!(routing_key(&req).unwrap(), b"user:1");
+    }
+
+    #[test]
+    fn routing_key_hash_stop_makes_suffix_irrelevant() {
+        // key and key|#|suffix must produce the same routing key
+        let plain = Request::Get {
+            keys: vec![Bytes::from_static(b"user:1")],
+        };
+        let suffixed = Request::Get {
+            keys: vec![Bytes::from_static(b"user:1|#|x")],
+        };
+        assert_eq!(routing_key(&plain).unwrap(), routing_key(&suffixed).unwrap());
+    }
+
+    #[test]
+    fn hash_stop_handles_marker_edges() {
+        assert_eq!(hash_stop(b"abc"), b"abc"); // no marker
+        assert_eq!(hash_stop(b"a|#|b"), b"a"); // marker mid
+        assert_eq!(hash_stop(b"|#|b"), b""); // marker at start -> empty prefix
+        assert_eq!(hash_stop(b"a|#|"), b"a"); // marker at end
     }
 }
