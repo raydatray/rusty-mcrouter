@@ -1,4 +1,5 @@
 mod ch3;
+mod crc32;
 mod destination_route;
 mod error_route;
 mod furc;
