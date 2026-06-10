@@ -5,11 +5,7 @@ use rusty_mcrouter_net::{Client, NetError};
 use thiserror::Error;
 
 use crate::{
-    destination_route::DestinationRoute,
-    error_route::ErrorRoute,
-    null_route::NullRoute,
-    pool_route::PoolRoute,
-    route::{DynRoute, Route},
+    routes::{DestinationRoute, DynRoute, ErrorRoute, NullRoute, PoolRoute, Route},
     selectors::{Ch3, Crc32, Salted, Selector},
 };
 
