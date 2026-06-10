@@ -4,7 +4,7 @@ use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::selectors::Selector;
 
-use super::{DynRoute, Result, Route};
+use super::{DynRoute, Result, Route, RouteError};
 
 pub struct SelectionRoute {
     children: Vec<Rc<dyn DynRoute>>,
@@ -19,14 +19,22 @@ impl SelectionRoute {
 
 impl Route for SelectionRoute {
     async fn route(&self, req: Request) -> Result<Reply> {
-        let idx = self.selector.select(routing_key(&req));
+        let idx = self.selector.select(routing_key(&req)?);
 
-        self.children[idx].route_dyn(req).await
+        // defensive bounds check: Ch3/Crc32 are bound to `n` and cannot exceed it,
+        // but the trait-object seam can't prove that, so a buggy selector must
+        // surface a route error instead of panicking the task.
+        let child = self.children.get(idx).ok_or(RouteError::SelectorOutOfRange {
+            idx,
+            len: self.children.len(),
+        })?;
+
+        child.route_dyn(req).await
     }
 }
 
-fn routing_key(req: &Request) -> &[u8] {
-    match req {
+fn routing_key(req: &Request) -> Result<&[u8]> {
+    let key = match req {
         Request::Set { key, .. }
         | Request::Delete { key }
         | Request::Add { key, .. }
@@ -37,10 +45,12 @@ fn routing_key(req: &Request) -> &[u8] {
         | Request::Decr { key, .. }
         | Request::Touch { key, .. } => &key[..],
         // hash-routing and multiget are independent (see docs/design/multiget.md):
-        // until the routed Get is single-key - just take the single key.
-        // this should never be emnpty so it wont explode
-        Request::Get { keys } => &keys[0],
-    }
+        // until the routed Get is single-key, hash its first key as the sanctioned
+        // interim; an empty get has no routing key, so surface an error rather than
+        // panicking.
+        Request::Get { keys } => keys.first().map(|k| &k[..]).ok_or(RouteError::EmptyGet)?,
+    };
+    Ok(key)
 }
 
 /// mcrouter excludes everything from the `|#|` "hash stop" onward from the
@@ -54,5 +64,33 @@ fn hash_stop(key: &[u8]) -> &[u8] {
     {
         Some(pos) => &key[..pos],
         None => key,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn routing_key_extracts_single_key() {
+        let req = Request::Delete {
+            key: Bytes::from_static(b"user:1"),
+        };
+        assert_eq!(routing_key(&req).unwrap(), b"user:1");
+    }
+
+    #[test]
+    fn routing_key_uses_first_key_of_multi_get_interim() {
+        let req = Request::Get {
+            keys: vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+        };
+        assert_eq!(routing_key(&req).unwrap(), b"a");
+    }
+
+    #[test]
+    fn routing_key_empty_get_is_error() {
+        let req = Request::Get { keys: vec![] };
+        assert!(matches!(routing_key(&req), Err(RouteError::EmptyGet)));
     }
 }
