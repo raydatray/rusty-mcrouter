@@ -1,4 +1,4 @@
-use crate::selector::Selector;
+use super::Selector;
 
 pub struct Salted {
     inner: Box<dyn Selector>,
@@ -29,7 +29,7 @@ impl Selector for Salted {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ch3::Ch3;
+    use crate::selectors::Ch3;
 
     fn boxed_ch3(n: usize) -> Box<dyn Selector> {
         Box::new(Ch3::new(n))

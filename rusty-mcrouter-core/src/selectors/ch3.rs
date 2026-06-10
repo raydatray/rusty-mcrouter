@@ -1,4 +1,4 @@
-use crate::{furc::furc_hash, selector::Selector};
+use super::{furc::furc_hash, Selector};
 
 pub struct Ch3 {
     n: u32,

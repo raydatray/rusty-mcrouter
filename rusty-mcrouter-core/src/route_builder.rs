@@ -5,15 +5,12 @@ use rusty_mcrouter_net::{Client, NetError};
 use thiserror::Error;
 
 use crate::{
-    ch3::Ch3,
-    crc32::Crc32,
     destination_route::DestinationRoute,
     error_route::ErrorRoute,
     null_route::NullRoute,
     pool_route::PoolRoute,
     route::{DynRoute, Route},
-    salted::Salted,
-    selector::Selector,
+    selectors::{Ch3, Crc32, Salted, Selector},
 };
 
 #[derive(Debug, Error)]
