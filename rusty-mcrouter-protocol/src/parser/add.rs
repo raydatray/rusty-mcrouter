@@ -39,7 +39,11 @@ pub(super) fn parse_request(
 mod tests {
     use bytes::{Bytes, BytesMut};
 
-    use crate::{parser::parse_request, request::Request, ProtocolError};
+    use crate::{
+        parser::parse_request,
+        request::{Parsed, Request},
+        ProtocolError,
+    };
 
     fn add(key: &'static [u8], flags: u32, exptime: i32, data: &'static [u8]) -> Request {
         Request::Add {
@@ -55,7 +59,7 @@ mod tests {
         let mut buf = BytesMut::from(&b"add foo 0 0 3\r\nbar\r\n"[..]);
         assert_eq!(
             parse_request(&mut buf).unwrap().unwrap(),
-            add(b"foo", 0, 0, b"bar")
+            Parsed::One(add(b"foo", 0, 0, b"bar"))
         );
         assert!(buf.is_empty());
     }
@@ -83,7 +87,7 @@ mod tests {
         let mut buf = BytesMut::new();
         original.serialize_into(&mut buf);
         let parsed = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(parsed, original);
+        assert_eq!(parsed, Parsed::One(original));
         assert!(buf.is_empty());
     }
 }

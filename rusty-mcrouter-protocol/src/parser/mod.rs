@@ -1,6 +1,9 @@
 use bytes::BytesMut;
 
-use crate::{request::Request, ProtocolError, Result};
+use crate::{
+    request::{Parsed, Request},
+    ProtocolError, Result,
+};
 
 mod add;
 mod append;
@@ -24,7 +27,7 @@ use shared::read_line;
 // this stateful via a RequestParser struct holding ParseState — low priority,
 // costs ~µs + 1 small alloc per partial read on multi-fragment set bodies.
 
-pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>> {
+pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Parsed>> {
     let Some((line_end, total)) = read_line(buf, 0) else {
         return Ok(None);
     };
@@ -32,8 +35,8 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>> {
 
     let cmd = command_name(&buf[..line_end]);
 
-    match cmd {
-        b"get" => get::parse_request(buf, eol_idx),
+    let single = match cmd {
+        b"get" => return get::parse_request(buf, eol_idx),
         b"set" => set::parse_request(buf, eol_idx, line_end),
         b"add" => add::parse_request(buf, eol_idx, line_end),
         b"replace" => replace::parse_request(buf, eol_idx, line_end),
@@ -47,7 +50,9 @@ pub fn parse_request(buf: &mut BytesMut) -> Result<Option<Request>> {
             let _ = buf.split_to(total);
             Err(ProtocolError::Malformed("unknown command"))
         }
-    }
+    };
+
+    Ok(single?.map(Parsed::One))
 }
 
 fn command_name(header: &[u8]) -> &[u8] {
@@ -84,9 +89,9 @@ mod tests {
             let req = parse_request(&mut buf).unwrap().unwrap();
             assert_eq!(
                 req,
-                Request::Get {
-                    keys: vec![Bytes::from_static(b"foo")]
-                }
+                Parsed::One(Request::Get {
+                    key: Bytes::from_static(b"foo")
+                })
             );
             assert!(buf.is_empty());
         });
@@ -99,18 +104,18 @@ mod tests {
         let first = parse_request(&mut buf).unwrap().unwrap();
         assert_eq!(
             first,
-            Request::Get {
-                keys: vec![Bytes::from_static(b"foo")]
-            }
+            Parsed::One(Request::Get {
+                key: Bytes::from_static(b"foo")
+            })
         );
         assert_eq!(buf.as_ref(), b"get bar\n");
 
         let second = parse_request(&mut buf).unwrap().unwrap();
         assert_eq!(
             second,
-            Request::Get {
-                keys: vec![Bytes::from_static(b"bar")]
-            }
+            Parsed::One(Request::Get {
+                key: Bytes::from_static(b"bar")
+            })
         );
         assert!(buf.is_empty());
 
@@ -161,21 +166,21 @@ mod tests {
         let first = parse_request(&mut buf).unwrap().unwrap();
         assert_eq!(
             first,
-            Request::Set {
+            Parsed::One(Request::Set {
                 key: Bytes::from_static(b"foo"),
                 flags: 0,
                 exptime: 0,
                 data: Bytes::from_static(b"bar"),
-            }
+            })
         );
         assert_eq!(buf.as_ref(), b"get foo\r\n");
 
         let second = parse_request(&mut buf).unwrap().unwrap();
         assert_eq!(
             second,
-            Request::Get {
-                keys: vec![Bytes::from_static(b"foo")]
-            }
+            Parsed::One(Request::Get {
+                key: Bytes::from_static(b"foo")
+            })
         );
         assert!(buf.is_empty());
     }

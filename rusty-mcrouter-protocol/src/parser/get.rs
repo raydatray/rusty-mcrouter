@@ -1,51 +1,63 @@
 use bytes::BytesMut;
 
-use crate::{request::Request, ProtocolError, Result};
+use crate::{
+    request::{Parsed, Request},
+    ProtocolError, Result,
+};
 
 use super::shared::{extract_command_args, validate_key};
 
-pub(super) fn parse_request(
-    buf: &mut BytesMut,
-    eol_idx: usize,
-) -> Result<Option<Request>> {
+pub(super) fn parse_request(buf: &mut BytesMut, eol_idx: usize) -> Result<Option<Parsed>> {
     let rest = extract_command_args(buf, eol_idx, b"get ")?;
 
-    let keys = rest
+    let mut segments = rest
         .split(|&b| b == b' ')
         .filter(|seg| !seg.is_empty())
-        .map(|seg| validate_key(seg).map(|()| rest.slice_ref(seg)))
-        .collect::<Result<Vec<_>>>()?;
+        .map(|seg| validate_key(seg).map(|()| rest.slice_ref(seg)));
 
-    if keys.is_empty() {
+    let Some(first) = segments.next().transpose()? else {
         return Err(ProtocolError::Malformed("get requires at least one key"));
+    };
+
+    let Some(second) = segments.next().transpose()? else {
+        return Ok(Some(Parsed::One(Request::Get { key: first })));
+    };
+
+    let mut keys = vec![first, second];
+    for seg in segments {
+        keys.push(seg?);
     }
 
-    Ok(Some(Request::Get { keys }))
+    Ok(Some(Parsed::MultiGet(keys)))
 }
 
 #[cfg(test)]
 mod tests {
     use bytes::{Bytes, BytesMut};
 
-    use crate::{parser::parse_request, request::Request, ProtocolError};
+    use crate::{
+        parser::parse_request,
+        request::{Parsed, Request},
+        ProtocolError,
+    };
 
     #[test]
-    fn parse_request_get_single_key() {
+    fn parse_request_get_single_key_is_parsed_one() {
         let mut buf = BytesMut::from(&b"get foo\r\n"[..]);
         assert_eq!(
             parse_request(&mut buf).unwrap().unwrap(),
-            Request::Get {
-                keys: vec![Bytes::from_static(b"foo")]
-            }
+            Parsed::One(Request::Get {
+                key: Bytes::from_static(b"foo")
+            })
         );
         assert!(buf.is_empty());
     }
 
     #[test]
-    fn parse_request_get_multiple_keys() {
+    fn parse_request_get_multiple_keys_is_multiget() {
         let mut buf = BytesMut::from(&b"get foo bar baz\r\n"[..]);
-        let Request::Get { keys } = parse_request(&mut buf).unwrap().unwrap() else {
-            panic!("expected Request::Get");
+        let Parsed::MultiGet(keys) = parse_request(&mut buf).unwrap().unwrap() else {
+            panic!("expected Parsed::MultiGet");
         };
         assert_eq!(
             keys,
@@ -69,8 +81,8 @@ mod tests {
 
         cases.iter().for_each(|input| {
             let mut buf = BytesMut::from(*input);
-            let Request::Get { keys } = parse_request(&mut buf).unwrap().unwrap() else {
-                panic!("expected Request::Get for {input:?}");
+            let Parsed::MultiGet(keys) = parse_request(&mut buf).unwrap().unwrap() else {
+                panic!("expected Parsed::MultiGet for {input:?}");
             };
             assert_eq!(keys.len(), 2, "input={input:?}");
             assert_eq!(keys[0].as_ref(), b"foo");

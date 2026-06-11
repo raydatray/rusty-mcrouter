@@ -4,10 +4,7 @@ use crate::{request::Request, ProtocolError, Result};
 
 use super::shared::{extra_token_error, extract_command_args, parse_u64, validate_key};
 
-pub(super) fn parse_request(
-    buf: &mut BytesMut,
-    eol_idx: usize,
-) -> Result<Option<Request>> {
+pub(super) fn parse_request(buf: &mut BytesMut, eol_idx: usize) -> Result<Option<Request>> {
     let rest = extract_command_args(buf, eol_idx, b"incr ")?;
 
     let mut parts = rest.split(|&b| b == b' ').filter(|s| !s.is_empty());
@@ -33,17 +30,21 @@ pub(super) fn parse_request(
 mod tests {
     use bytes::{Bytes, BytesMut};
 
-    use crate::{parser::parse_request, request::Request, ProtocolError};
+    use crate::{
+        parser::parse_request,
+        request::{Parsed, Request},
+        ProtocolError,
+    };
 
     #[test]
     fn parse_request_incr_basic() {
         let mut buf = BytesMut::from(&b"incr foo 1\r\n"[..]);
         assert_eq!(
             parse_request(&mut buf).unwrap().unwrap(),
-            Request::Incr {
+            Parsed::One(Request::Incr {
                 key: Bytes::from_static(b"foo"),
                 delta: 1,
-            }
+            })
         );
         assert!(buf.is_empty());
     }
@@ -53,10 +54,10 @@ mod tests {
         let mut buf = BytesMut::from(&b"incr k 18446744073709551615\r\n"[..]);
         assert_eq!(
             parse_request(&mut buf).unwrap().unwrap(),
-            Request::Incr {
+            Parsed::One(Request::Incr {
                 key: Bytes::from_static(b"k"),
                 delta: u64::MAX,
-            }
+            })
         );
     }
 
@@ -133,7 +134,7 @@ mod tests {
         let mut buf = BytesMut::new();
         original.serialize_into(&mut buf);
         let parsed = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(parsed, original);
+        assert_eq!(parsed, Parsed::One(original));
         assert!(buf.is_empty());
     }
 }

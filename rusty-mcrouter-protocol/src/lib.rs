@@ -5,7 +5,7 @@ mod wire;
 
 pub use crate::parser::{parse_reply, parse_request};
 pub use crate::reply::{Reply, Value};
-pub use crate::request::Request;
+pub use crate::request::{Parsed, Request};
 
 use thiserror::Error;
 
