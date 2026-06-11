@@ -181,9 +181,9 @@ mod tests {
     use rusty_mcrouter_net::testing::mock_backend;
     use rusty_mcrouter_protocol::{Reply, Request};
 
-    fn req_get(keys: &[&'static [u8]]) -> Request {
+    fn req_get(key: &'static [u8]) -> Request {
         Request::Get {
-            keys: keys.iter().map(|k| Bytes::from_static(k)).collect(),
+            key: Bytes::from_static(key),
         }
     }
 
@@ -198,7 +198,7 @@ mod tests {
     async fn builds_null_route_from_bare_string() {
         let cfg = parse(r#"{"route": "NullRoute"}"#).unwrap();
         let route = build_route(&cfg).await.unwrap();
-        let reply = route.route_dyn(req_get(&[b"foo"])).await.unwrap();
+        let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
 
@@ -206,7 +206,7 @@ mod tests {
     async fn builds_null_route_from_object_form() {
         let cfg = parse(r#"{"route": {"type": "NullRoute"}}"#).unwrap();
         let route = build_route(&cfg).await.unwrap();
-        let reply = route.route_dyn(req_get(&[b"foo"])).await.unwrap();
+        let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
 
@@ -214,7 +214,7 @@ mod tests {
     async fn builds_error_route_from_object_with_message() {
         let cfg = parse(r#"{"route": {"type": "ErrorRoute", "message": "boom"}}"#).unwrap();
         let route = build_route(&cfg).await.unwrap();
-        let reply = route.route_dyn(req_get(&[b"foo"])).await.unwrap();
+        let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"boom")));
     }
 
@@ -222,7 +222,7 @@ mod tests {
     async fn builds_error_route_from_shorthand_with_message_arg() {
         let cfg = parse(r#"{"route": "ErrorRoute|nope"}"#).unwrap();
         let route = build_route(&cfg).await.unwrap();
-        let reply = route.route_dyn(req_get(&[b"foo"])).await.unwrap();
+        let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"nope")));
     }
 
@@ -233,7 +233,7 @@ mod tests {
             format!(r#"{{"pools": {{"P": {{"servers": ["{addr}"]}}}}, "route": "PoolRoute|P"}}"#);
         let cfg = parse(&json).unwrap();
         let route = build_route(&cfg).await.unwrap();
-        let reply = route.route_dyn(req_get(&[b"foo"])).await.unwrap();
+        let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
 
@@ -245,7 +245,7 @@ mod tests {
         );
         let cfg = parse(&json).unwrap();
         let route = build_route(&cfg).await.unwrap();
-        let reply = route.route_dyn(req_get(&[b"foo"])).await.unwrap();
+        let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
 

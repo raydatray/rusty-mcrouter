@@ -28,9 +28,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    fn req_get(keys: &[&'static [u8]]) -> Request {
+    fn req_get(key: &'static [u8]) -> Request {
         Request::Get {
-            keys: keys.iter().map(|k| Bytes::from_static(k)).collect(),
+            key: Bytes::from_static(key),
         }
     }
 
@@ -40,7 +40,7 @@ mod tests {
         let client = Client::connect(addr).await.unwrap();
         let route = DestinationRoute::new(client);
 
-        let reply = route.route(req_get(&[b"foo"])).await.unwrap();
+        let reply = route.route(req_get(b"foo")).await.unwrap();
         let Reply::Get { hits } = reply else {
             panic!("expected Reply::Get");
         };
@@ -55,7 +55,7 @@ mod tests {
         let client = Client::connect(addr).await.unwrap();
         let route = DestinationRoute::new(client);
 
-        let reply = route.route(req_get(&[b"foo"])).await.unwrap();
+        let reply = route.route(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
 
@@ -65,7 +65,7 @@ mod tests {
         let client = Client::connect(addr).await.unwrap();
         let route = DestinationRoute::new(client);
 
-        let result = route.route(req_get(&[b"foo"])).await;
+        let result = route.route(req_get(b"foo")).await;
         assert!(matches!(result, Err(RouteError::Backend(_))));
     }
 
@@ -107,7 +107,7 @@ mod tests {
         let client = Client::connect(addr).await.unwrap();
         let route = DestinationRoute::new(client);
 
-        let reply = route.route(req_get(&[b"foo"])).await.unwrap();
+        let reply = route.route(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"oom")));
     }
 
@@ -118,7 +118,7 @@ mod tests {
         let route = Arc::new(DestinationRoute::new(client));
 
         let route_clone = Arc::clone(&route);
-        let result = tokio::spawn(async move { route_clone.route(req_get(&[b"foo"])).await })
+        let result = tokio::spawn(async move { route_clone.route(req_get(b"foo")).await })
             .await
             .unwrap();
 
@@ -133,11 +133,11 @@ mod tests {
 
         let r1 = {
             let route = Arc::clone(&route);
-            tokio::spawn(async move { route.route(req_get(&[b"a"])).await })
+            tokio::spawn(async move { route.route(req_get(b"a")).await })
         };
         let r2 = {
             let route = Arc::clone(&route);
-            tokio::spawn(async move { route.route(req_get(&[b"b"])).await })
+            tokio::spawn(async move { route.route(req_get(b"b")).await })
         };
 
         let (a, b) = tokio::join!(r1, r2);

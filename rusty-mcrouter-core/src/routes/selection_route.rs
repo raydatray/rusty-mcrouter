@@ -19,23 +19,27 @@ impl SelectionRoute {
 
 impl Route for SelectionRoute {
     async fn route(&self, req: Request) -> Result<Reply> {
-        let idx = self.selector.select(routing_key(&req)?);
+        let idx = self.selector.select(routing_key(&req));
 
         // defensive bounds check: Ch3/Crc32 are bound to `n` and cannot exceed it,
         // but the trait-object seam can't prove that, so a buggy selector must
         // surface a route error instead of panicking the task.
-        let child = self.children.get(idx).ok_or(RouteError::SelectorOutOfRange {
-            idx,
-            len: self.children.len(),
-        })?;
+        let child = self
+            .children
+            .get(idx)
+            .ok_or(RouteError::SelectorOutOfRange {
+                idx,
+                len: self.children.len(),
+            })?;
 
         child.route_dyn(req).await
     }
 }
 
-fn routing_key(req: &Request) -> Result<&[u8]> {
+fn routing_key(req: &Request) -> &[u8] {
     let key = match req {
-        Request::Set { key, .. }
+        Request::Get { key }
+        | Request::Set { key, .. }
         | Request::Delete { key }
         | Request::Add { key, .. }
         | Request::Replace { key, .. }
@@ -44,13 +48,8 @@ fn routing_key(req: &Request) -> Result<&[u8]> {
         | Request::Incr { key, .. }
         | Request::Decr { key, .. }
         | Request::Touch { key, .. } => &key[..],
-        // hash-routing and multiget are independent (see docs/design/multiget.md):
-        // until the routed Get is single-key, hash its first key as the sanctioned
-        // interim; an empty get has no routing key, so surface an error rather than
-        // panicking.
-        Request::Get { keys } => keys.first().map(|k| &k[..]).ok_or(RouteError::EmptyGet)?,
     };
-    Ok(hash_stop(key))
+    hash_stop(key)
 }
 
 /// mcrouter excludes everything from the `|#|` "hash stop" onward from the
@@ -77,21 +76,7 @@ mod tests {
         let req = Request::Delete {
             key: Bytes::from_static(b"user:1"),
         };
-        assert_eq!(routing_key(&req).unwrap(), b"user:1");
-    }
-
-    #[test]
-    fn routing_key_uses_first_key_of_multi_get_interim() {
-        let req = Request::Get {
-            keys: vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
-        };
-        assert_eq!(routing_key(&req).unwrap(), b"a");
-    }
-
-    #[test]
-    fn routing_key_empty_get_is_error() {
-        let req = Request::Get { keys: vec![] };
-        assert!(matches!(routing_key(&req), Err(RouteError::EmptyGet)));
+        assert_eq!(routing_key(&req), b"user:1");
     }
 
     #[test]
@@ -99,19 +84,19 @@ mod tests {
         let req = Request::Delete {
             key: Bytes::from_static(b"user:1|#|debuginfo"),
         };
-        assert_eq!(routing_key(&req).unwrap(), b"user:1");
+        assert_eq!(routing_key(&req), b"user:1");
     }
 
     #[test]
     fn routing_key_hash_stop_makes_suffix_irrelevant() {
         // key and key|#|suffix must produce the same routing key
         let plain = Request::Get {
-            keys: vec![Bytes::from_static(b"user:1")],
+            key: Bytes::from_static(b"user:1"),
         };
         let suffixed = Request::Get {
-            keys: vec![Bytes::from_static(b"user:1|#|x")],
+            key: Bytes::from_static(b"user:1|#|x"),
         };
-        assert_eq!(routing_key(&plain).unwrap(), routing_key(&suffixed).unwrap());
+        assert_eq!(routing_key(&plain), routing_key(&suffixed));
     }
 
     #[test]
