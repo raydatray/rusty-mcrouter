@@ -4,10 +4,7 @@ use crate::{request::Request, ProtocolError, Result};
 
 use super::shared::{extra_token_error, extract_command_args, validate_key};
 
-pub(super) fn parse_request(
-    buf: &mut BytesMut,
-    eol_idx: usize,
-) -> Result<Option<Request>> {
+pub(super) fn parse_request(buf: &mut BytesMut, eol_idx: usize) -> Result<Option<Request>> {
     let rest = extract_command_args(buf, eol_idx, b"delete ")?;
 
     let mut parts = rest.split(|&b| b == b' ').filter(|s| !s.is_empty());
@@ -27,7 +24,11 @@ pub(super) fn parse_request(
 mod tests {
     use bytes::{Bytes, BytesMut};
 
-    use crate::{parser::parse_request, request::Request, ProtocolError};
+    use crate::{
+        parser::parse_request,
+        request::{Parsed, Request},
+        ProtocolError,
+    };
 
     #[test]
     fn parse_request_delete_basic() {
@@ -38,9 +39,9 @@ mod tests {
             let req = parse_request(&mut buf).unwrap().unwrap();
             assert_eq!(
                 req,
-                Request::Delete {
+                Parsed::One(Request::Delete {
                     key: Bytes::from_static(b"foo")
-                }
+                })
             );
             assert!(buf.is_empty());
         });
@@ -60,7 +61,11 @@ mod tests {
 
     #[test]
     fn parse_request_rejects_delete_with_no_key() {
-        for input in [&b"delete \n"[..], &b"delete \r\n"[..], &b"delete   \r\n"[..]] {
+        for input in [
+            &b"delete \n"[..],
+            &b"delete \r\n"[..],
+            &b"delete   \r\n"[..],
+        ] {
             let mut buf = BytesMut::from(input);
             assert!(matches!(
                 parse_request(&mut buf),
@@ -113,7 +118,7 @@ mod tests {
         let mut buf = BytesMut::new();
         original.serialize_into(&mut buf);
         let parsed = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(parsed, original);
+        assert_eq!(parsed, Parsed::One(original));
         assert!(buf.is_empty());
     }
 }

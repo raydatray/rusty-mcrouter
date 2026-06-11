@@ -39,7 +39,11 @@ pub(super) fn parse_request(
 mod tests {
     use bytes::{Bytes, BytesMut};
 
-    use crate::{parser::parse_request, request::Request, ProtocolError};
+    use crate::{
+        parser::parse_request,
+        request::{Parsed, Request},
+        ProtocolError,
+    };
 
     use super::SET_HEADER_HELP;
 
@@ -56,7 +60,7 @@ mod tests {
     fn parse_request_set_basic() {
         let mut buf = BytesMut::from(&b"set foo 0 0 3\r\nbar\r\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, set(b"foo", 0, 0, b"bar"));
+        assert_eq!(req, Parsed::One(set(b"foo", 0, 0, b"bar")));
         assert!(buf.is_empty());
     }
 
@@ -64,7 +68,7 @@ mod tests {
     fn parse_request_set_with_flags_and_exptime() {
         let mut buf = BytesMut::from(&b"set k 42 3600 1\r\nv\r\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, set(b"k", 42, 3600, b"v"));
+        assert_eq!(req, Parsed::One(set(b"k", 42, 3600, b"v")));
         assert!(buf.is_empty());
     }
 
@@ -72,7 +76,7 @@ mod tests {
     fn parse_request_set_negative_exptime() {
         let mut buf = BytesMut::from(&b"set k 0 -1 1\r\nv\r\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, set(b"k", 0, -1, b"v"));
+        assert_eq!(req, Parsed::One(set(b"k", 0, -1, b"v")));
         assert!(buf.is_empty());
     }
 
@@ -80,7 +84,7 @@ mod tests {
     fn parse_request_set_empty_data() {
         let mut buf = BytesMut::from(&b"set k 0 0 0\r\n\r\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, set(b"k", 0, 0, b""));
+        assert_eq!(req, Parsed::One(set(b"k", 0, 0, b"")));
         assert!(buf.is_empty());
     }
 
@@ -88,7 +92,7 @@ mod tests {
     fn parse_request_set_accepts_lf_only_terminators() {
         let mut buf = BytesMut::from(&b"set foo 0 0 3\nbar\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, set(b"foo", 0, 0, b"bar"));
+        assert_eq!(req, Parsed::One(set(b"foo", 0, 0, b"bar")));
         assert!(buf.is_empty());
     }
 
@@ -105,7 +109,7 @@ mod tests {
         wire.extend_from_slice(b"\r\n");
 
         let req = parse_request(&mut wire).unwrap().unwrap();
-        let Request::Set { data, .. } = req else {
+        let Parsed::One(Request::Set { data, .. }) = req else {
             panic!("expected Request::Set");
         };
         assert_eq!(data.as_ref(), payload);
@@ -142,7 +146,7 @@ mod tests {
         assert!(matches!(parse_request(&mut buf), Ok(None)));
         buf.extend_from_slice(b"r\r\n");
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, set(b"foo", 0, 0, b"bar"));
+        assert_eq!(req, Parsed::One(set(b"foo", 0, 0, b"bar")));
         assert!(buf.is_empty());
     }
 
@@ -247,7 +251,7 @@ mod tests {
         let mut buf = BytesMut::new();
         original.serialize_into(&mut buf);
         let parsed = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(parsed, original);
+        assert_eq!(parsed, Parsed::One(original));
         assert!(buf.is_empty());
     }
 }

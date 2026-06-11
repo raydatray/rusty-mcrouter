@@ -2,10 +2,20 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::wire::{write_decimal, write_signed_decimal};
 
+// output of `parse_request`, requests that come of the wire
+// - multi-key operations only live at the parse boundary
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Parsed {
+    One(Request),
+    MultiGet(Vec<Bytes>),
+}
+
+// a routable request type
+// - `Get` is routed as a single key, a multi-key wire `Get` is split into multiple single-key requests
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Request {
     Get {
-        keys: Vec<Bytes>,
+        key: Bytes,
     },
     Set {
         key: Bytes,
@@ -57,12 +67,9 @@ pub enum Request {
 impl Request {
     pub fn serialize_into(&self, out: &mut BytesMut) {
         match self {
-            Request::Get { keys } => {
-                out.put_slice(b"get");
-                keys.iter().for_each(|k| {
-                    out.put_u8(b' ');
-                    out.put_slice(k);
-                });
+            Request::Get { key } => {
+                out.put_slice(b"get ");
+                out.put_slice(key);
                 out.put_slice(b"\r\n");
             }
             Request::Set {
@@ -160,21 +167,9 @@ mod tests {
     #[test]
     fn get_single_key_serializes() {
         let req = Request::Get {
-            keys: vec![Bytes::from_static(b"foo")],
+            key: Bytes::from_static(b"foo"),
         };
         assert_eq!(serialize(&req).as_ref(), b"get foo\r\n");
-    }
-
-    #[test]
-    fn get_multiple_keys_space_separated() {
-        let req = Request::Get {
-            keys: vec![
-                Bytes::from_static(b"a"),
-                Bytes::from_static(b"bb"),
-                Bytes::from_static(b"ccc"),
-            ],
-        };
-        assert_eq!(serialize(&req).as_ref(), b"get a bb ccc\r\n");
     }
 
     #[test]
