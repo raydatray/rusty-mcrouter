@@ -3,14 +3,14 @@ use std::{collections::BTreeMap, rc::Rc};
 use bytes::{Bytes, BytesMut};
 use rusty_mcrouter_core::DynRoute;
 use rusty_mcrouter_net::NetError;
-use rusty_mcrouter_protocol::{parse_request, Reply, Request};
+use rusty_mcrouter_protocol::{parse_request, Parsed, Reply, Request};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
     sync::mpsc,
 };
 
-use crate::proxy::{config::ThreadMode, proxy_set::ProxySet};
+use crate::proxy::{config::ThreadMode, proxy_set::ProxySet, ProxyHandle};
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
 const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
@@ -107,33 +107,73 @@ impl Connection {
     /// parse every complete frame currently buffered and submit it without
     /// waiting for replies (pipelining).
     fn drain_input(&mut self) -> Result<(), NetError> {
-        while let Some(req) = parse_request(&mut self.buf)? {
+        while let Some(parsed) = parse_request(&mut self.buf)? {
             let seq = self.next_seq;
             self.next_seq = self.next_seq.wrapping_add(1);
             self.in_flight = self.in_flight.saturating_add(1);
-            self.submit(seq, req);
+            match parsed {
+                Parsed::One(req) => self.submit_single(seq, req),
+                Parsed::MultiGet(keys) => self.submit_multiget(seq, keys),
+            }
         }
         Ok(())
     }
 
-    /// choose a proxy for `req` and spawn the routing task.
-    /// same-thread requests route inline
-    /// remote requests cross into the target proxy's queue.
-    fn submit(&self, seq: usize, req: Request) {
-        let handle = self.proxies.choose(self.mode, self.current_id, &req);
+    /// resolves `req`'s target
+    /// - which proxy handles it
+    /// - if its the same thread
+    /// - the local route
+    fn route_target(&self, req: &Request) -> RouteTarget {
+        let handle = self.proxies.choose(self.mode, self.current_id, req);
         let same_thread = handle.id() == self.current_id;
-        let route = Rc::clone(&self.local_route);
+
+        RouteTarget {
+            handle,
+            same_thread,
+            route: Rc::clone(&self.local_route),
+        }
+    }
+
+    fn submit_single(&self, seq: usize, req: Request) {
+        let target = self.route_target(&req);
         let completed_tx = self.completed_tx.clone();
 
         tokio::task::spawn_local(async move {
-            let reply = if same_thread {
-                route.route_dyn(req).await.unwrap_or_else(|_| {
-                    Reply::ServerError(Bytes::from_static(b"backend unavailable"))
-                })
-            } else {
-                handle.send_request(req).await
-            };
+            let reply = route_one(target, req).await;
+
             let _ = completed_tx.send((seq, reply)).await;
+        });
+    }
+
+    fn submit_multiget(&self, seq: usize, keys: Vec<Bytes>) {
+        let n = keys.len();
+
+        let (sub_tx, mut sub_rx) = mpsc::channel::<(usize, Reply)>(n);
+
+        for (i, key) in keys.into_iter().enumerate() {
+            let req = Request::Get { key };
+            let target = self.route_target(&req);
+            let sub_tx = sub_tx.clone();
+            tokio::task::spawn_local(async move {
+                let reply = route_one(target, req).await;
+                let _ = sub_tx.send((i, reply)).await;
+            });
+        }
+        drop(sub_tx);
+
+        let completed_tx = self.completed_tx.clone();
+        tokio::task::spawn_local(async move {
+            let mut slots: Vec<Option<Reply>> = (0..n).map(|_| None).collect();
+            let mut first_error: Option<Reply> = None;
+            while let Some((i, reply)) = sub_rx.recv().await {
+                if let Reply::Get { .. } = &reply {
+                    slots[i] = Some(reply);
+                } else {
+                    first_error.get_or_insert(reply);
+                }
+            }
+            let merged = first_error.unwrap_or_else(|| merge_multiget(slots));
+            let _ = completed_tx.send((seq, merged)).await;
         });
     }
 
@@ -150,4 +190,41 @@ impl Connection {
         }
         Ok(())
     }
+}
+
+struct RouteTarget {
+    handle: ProxyHandle,
+    same_thread: bool,
+    route: Rc<dyn DynRoute>,
+}
+
+async fn route_one(target: RouteTarget, req: Request) -> Reply {
+    let RouteTarget {
+        handle,
+        same_thread,
+        route,
+    } = target;
+
+    if same_thread {
+        route
+            .route_dyn(req)
+            .await
+            .unwrap_or_else(|_| Reply::ServerError(Bytes::from_static(b"backend unavialable")))
+    } else {
+        handle.send_request(req).await
+    }
+}
+
+fn merge_multiget(slots: Vec<Option<Reply>>) -> Reply {
+    let mut hits = Vec::new();
+
+    for slot in slots {
+        match slot {
+            Some(Reply::Get { hits: h }) => hits.extend(h),
+            Some(other) => return other,
+            None => return Reply::ServerError(Bytes::from_static(b"multiget: lost subreply")),
+        }
+    }
+
+    Reply::Get { hits }
 }
