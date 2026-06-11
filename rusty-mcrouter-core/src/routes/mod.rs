@@ -22,9 +22,6 @@ pub enum RouteError {
 
     #[error("selector returned index {idx} but pool has {len} children")]
     SelectorOutOfRange { idx: usize, len: usize },
-
-    #[error("cannot route an empty get (no keys)")]
-    EmptyGet,
 }
 
 pub type Result<T> = std::result::Result<T, RouteError>;

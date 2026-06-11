@@ -31,7 +31,7 @@ mod tests {
         let r = NullRoute;
         let reply = r
             .route(Request::Get {
-                keys: vec![Bytes::from_static(b"foo")],
+                key: Bytes::from_static(b"foo"),
             })
             .await
             .unwrap();
@@ -51,22 +51,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply, Reply::Stored);
-    }
-
-    #[tokio::test]
-    async fn multiple_keys_in_get_still_returns_empty_hits() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Get {
-                keys: vec![
-                    Bytes::from_static(b"a"),
-                    Bytes::from_static(b"b"),
-                    Bytes::from_static(b"c"),
-                ],
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Get { hits: vec![] });
     }
 
     #[tokio::test]
