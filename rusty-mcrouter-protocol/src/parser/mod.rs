@@ -1,9 +1,6 @@
 use bytes::BytesMut;
 
-use crate::{
-    request::{Parsed, Request},
-    ProtocolError, Result,
-};
+use crate::{request::Parsed, ProtocolError, Result};
 
 mod add;
 mod append;
@@ -68,6 +65,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::request::Request;
 
     #[test]
     fn parse_request_returns_none_when_no_newline() {
