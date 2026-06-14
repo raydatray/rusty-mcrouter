@@ -41,7 +41,7 @@ flowchart LR
   SEL --> PR["PoolRoute { pool_name, SelectionRoute }"]
   DST --> PR
   REQ["Request"] --> PR
-  PR --> RK["routing_key(req)? (+ |#| cut)"]
+  PR --> RK["routing_key(req) (+ |#| cut)"]
   RK --> IDX["selector.select(key) -> idx"]
   IDX --> CH["children.get(idx)? -> DestinationRoute -> backend"]
 ```
@@ -194,7 +194,6 @@ pub enum RouteError {
     #[error("backend error: {0}")]                                   Backend(#[from] NetError),
     #[error("selector returned index {idx} but pool has {len} children")]
                                                                      SelectorOutOfRange { idx: usize, len: usize },
-    #[error("cannot route an empty get (no keys)")]                  EmptyGet,
 }
 ```
 
@@ -207,7 +206,7 @@ pub struct SelectionRoute {
 }
 impl Route for SelectionRoute {
     async fn route(&self, req: Request) -> Result<Reply> {
-        let idx = self.selector.select(routing_key(&req)?);
+        let idx = self.selector.select(routing_key(&req));
         // defensive bounds check — a buggy selector surfaces a route error, not a panic
         let child = self.children.get(idx).ok_or(RouteError::SelectorOutOfRange {
             idx, len: self.children.len(),
@@ -223,23 +222,21 @@ impl Route for SelectionRoute {
 ### `routing_key` + `hash_stop` (`routes/selection_route.rs`)
 
 ```rust
-fn routing_key(req: &Request) -> Result<&[u8]> {
+fn routing_key(req: &Request) -> &[u8] {
     let key = match req {
-        Request::Set { key, .. } | Request::Delete { key } | … | Request::Touch { key, .. } => &key[..],
-        // multiget is split upstream; until then hash the first key (interim).
-        // an empty get has no routing key -> error, never a panic.
-        Request::Get { keys } => keys.first().map(|k| &k[..]).ok_or(RouteError::EmptyGet)?,
+        Request::Get { key } | Request::Set { key, .. } | Request::Delete { key }
+        | … | Request::Touch { key, .. } => &key[..],
     };
-    Ok(hash_stop(key))   // exclude everything from `|#|` onward (matches mcrouter)
+    hash_stop(key)   // exclude everything from `|#|` onward (matches mcrouter)
 }
 ```
 
 `hash_stop` cuts the key at the first `|#|` marker, so `user:1` and
-`user:1|#|debuginfo` route to the same backend (the mcrouter "hash stop"). The
-function is fallible: an empty `Get` yields `RouteError::EmptyGet` rather than
-panicking; a multi-key `Get` arriving before the upstream split hashes its first
-key. Routing-prefix (`/region/cluster/`) stripping is deferred until prefix
-routing exists.
+`user:1|#|debuginfo` route to the same backend (the mcrouter "hash stop"). Since
+the [multiget split](./multiget.md) landed, the routed `Get` is single-key, so
+`routing_key` is **infallible** — every variant yields a key and
+`RouteError::EmptyGet` is gone. Routing-prefix (`/region/cluster/`) stripping is
+deferred until prefix routing exists.
 
 ### `PoolRoute` (`routes/pool_route.rs`) — the named pool case
 
@@ -334,7 +331,7 @@ struct RouteBuilder<'a> {
 | error | layer | when | notable |
 |---|---|---|---|
 | `SelectorBuildError` | `selectors/` | building a selector | `Ch3PoolSizeOutOfRange`; `pub`, nested into `BuildError` |
-| `RouteError` | `routes/` | per request | `Backend`, `SelectorOutOfRange`, `EmptyGet`; matchable + `→ Reply`-mappable |
+| `RouteError` | `routes/` | per request | `Backend`, `SelectorOutOfRange`; matchable + `→ Reply`-mappable |
 | `BuildError` | `route_builder` | building the graph | `PoolNotFound`, `EmptyPool`, `ConnectFailed`, …, `Selector(#[from] SelectorBuildError)` |
 
 All `thiserror`; no `anyhow` in the library (the binary wraps these at its
@@ -356,7 +353,7 @@ boundary). `Ch3::new(n)?` lifts `SelectorBuildError` into `BuildError` via the
 | `PoolRoute` ≡ `HashRoute` (config sugar) | `routes::PoolRoute` = thin named wrapper over `SelectionRoute`; `HashRoute` deferred |
 | `furc_maximum_pool_size()` = `2^23` | `Ch3::new` size bound |
 | default `Ch3` | `HashFunc::default() == Ch3` |
-| multiget split (ASCII parser) | request-layer split — see [`../design/multiget.md`](../design/multiget.md), **not** any route handle |
+| multiget split (ASCII parser) | connection-layer split — see [`./multiget.md`](./multiget.md), **not** any route handle |
 
 ---
 
@@ -400,9 +397,9 @@ distribution, `Ch3` consistency (~`1/N` re-homing), `Ch3::new` rejects `0` /
 `> 2^23` (`rejects_pool_size_out_of_range`), CRC-32 canonical values + the
 `0x7fffffff` mask, salt distribution.
 
-**Route level** (`selection_route.rs`): `routing_key` extraction, the multi-get
-first-key interim, `EmptyGet`, the `|#|` cut and its suffix-irrelevant invariant,
-`hash_stop` marker edges.
+**Route level** (`selection_route.rs`): `routing_key` extraction (single-key `Get`
+included), the `|#|` cut and its suffix-irrelevant invariant, `hash_stop` marker
+edges.
 
 **Builder level** (`route_builder.rs`): build + route to a mock backend for
 shorthand/object forms, `PoolNotFound`, `EmptyPool`, connect failure, shorthand

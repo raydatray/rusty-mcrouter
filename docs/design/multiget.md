@@ -1,8 +1,8 @@
 # rusty-mcrouter multiget (design)
 
-> Status: **Planned**
+> Status: **Implemented**
 > Mirrors: [`../mcrouter/multiget.md`](../mcrouter/multiget.md) — how mcrouter does it (parser split + `MultiOpParent`)
-> Implemented in: `../architecture/multiget.md` (once built)
+> Implemented in: [`../architecture/multiget.md`](../architecture/multiget.md) — the as-built record (including where it diverged from this plan)
 > Related: [`./hash-routing.md`](./hash-routing.md) — independent and complementary, **not** a dependency: making the routed `Request::Get` single-key is where `PoolRoute`'s per-key hash lands cleanly. Either can land first; this supersedes that doc's "multi-key get problem" section.
 
 Make the **routed** get single-key *by type*, split a wire multi-key `get` into
@@ -403,8 +403,9 @@ So choosing stateless now is not a corner we have to back out of.
   routes 1-key gets through the multiget path.)
 - **Spans backends.** With a 2+ backend pool and consistent hashing, `get k1 k2`
   where the keys hash to different backends returns both hits (no false miss).
-  Counting mock backends (as in `pool_route.rs`) assert each backend saw only its
-  key.
+  As-built: recording `keyed_echo_backend`s in `connection.rs` (not the
+  never-existent `pool_route.rs` counting backend) assert each backend saw only
+  its own keys — see [`../architecture/multiget.md`](../architecture/multiget.md).
 - **Order.** `VALUE` lines come back in request-key order regardless of which
   sub-route completes first (drive with a slow + fast mock backend).
 - **Misses absorbed.** Mixed hit/miss → only the hits + single `END`; all-miss →
