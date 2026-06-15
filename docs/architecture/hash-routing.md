@@ -455,6 +455,6 @@ Whole suite: 57 tests, `cargo clippy` clean.
   `routes/` holding state behind `RefCell`/atomics (since `route` is `&self`),
   plus the explicit strategy fork in `build_pool_handle` (divergence 4). It does
   not touch `Selector` or `SelectionRoute`.
-- **Ranked failover** (`FailoverRoute`): a separate `RankedSelector` trait
+- **Ranked failover** ([`FailoverRoute`](../design/failover.md)): a separate `RankedSelector` trait
   (`rank(&self, key) -> impl Iterator<Item = usize>`), not a widening of
   `Selector`.

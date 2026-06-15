@@ -668,7 +668,7 @@ exactly one of the two tiers:
    for the split. The pure-selector path stays pure.
 
 **A third shape, anticipated but not built: ranked selection.** A future
-`FailoverRoute` may want "hash to a primary, then try the *other* children in a
+[`FailoverRoute`](./failover.md) may want "hash to a primary, then try the *other* children in a
 deterministic, key-derived order." That needs **more than one index**, so it is
 *not* `Selector` (single primary index) and *not* the stateful tier (it's still a
 pure function of the key). When it arrives, add a separate
