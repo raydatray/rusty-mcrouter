@@ -201,7 +201,65 @@ pub(super) fn parse_u64(s: &[u8]) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+
     use super::*;
+    use crate::{
+        fixtures::{assert_request_round_trips, storage},
+        parser::parse_request,
+        request::{Parsed, Request},
+        ProtocolError,
+    };
+
+    fn assert_storage_variant(verb: &str, req: Request) {
+        match (verb, req) {
+            ("add", Request::Add { key, flags, exptime, data })
+            | ("replace", Request::Replace { key, flags, exptime, data })
+            | ("append", Request::Append { key, flags, exptime, data })
+            | ("prepend", Request::Prepend { key, flags, exptime, data }) => {
+                assert_eq!(key.as_ref(), b"foo", "verb={verb}");
+                assert_eq!(flags, 0, "verb={verb}");
+                assert_eq!(exptime, 0, "verb={verb}");
+                assert_eq!(data.as_ref(), b"bar", "verb={verb}");
+            }
+            (_, other) => panic!("verb={verb} parsed to wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_request_storage_clone_verbs_basic_matrix() {
+        for verb in ["add", "replace", "append", "prepend"] {
+            let wire = format!("{verb} foo 0 0 3\r\nbar\r\n");
+            let mut buf = BytesMut::from(wire.as_bytes());
+            let Parsed::One(req) = parse_request(&mut buf).unwrap().unwrap() else {
+                panic!("verb={verb} did not parse to one request");
+            };
+            assert_storage_variant(verb, req);
+            assert!(buf.is_empty(), "verb={verb}");
+        }
+    }
+
+    #[test]
+    fn parse_request_storage_clone_verbs_reject_extra_token_matrix() {
+        for verb in ["add", "replace", "append", "prepend"] {
+            let wire = format!("{verb} foo 0 0 3 garbage\r\nbar\r\n");
+            let mut buf = BytesMut::from(wire.as_bytes());
+            match parse_request(&mut buf) {
+                Err(ProtocolError::Malformed(msg)) => {
+                    assert_eq!(msg, format!("{verb}: unexpected extra token in header"), "verb={verb}");
+                }
+                other => panic!("verb={verb} expected extra-token error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_request_storage_clone_verbs_round_trip_matrix() {
+        for verb in ["add", "replace", "append", "prepend"] {
+            let original = storage(verb, b"alpha", u32::MAX, -42, b"hello \x00 world\r\n");
+            assert_request_round_trips(original);
+        }
+    }
 
     #[test]
     fn validate_key_basic_ascii() {

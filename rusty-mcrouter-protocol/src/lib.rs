@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod fixtures;
 mod parser;
 mod reply;
 mod request;

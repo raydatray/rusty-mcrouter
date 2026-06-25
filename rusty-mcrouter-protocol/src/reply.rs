@@ -72,20 +72,7 @@ impl Reply {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn val(key: &'static [u8], flags: u32, data: &'static [u8]) -> Value {
-        Value {
-            key: Bytes::from_static(key),
-            flags,
-            data: Bytes::from_static(data),
-        }
-    }
-
-    fn serialize(reply: &Reply) -> BytesMut {
-        let mut out = BytesMut::new();
-        reply.serialize_into(&mut out);
-        out
-    }
+    use crate::fixtures::{serialize, value};
 
     #[test]
     fn miss_serializes_to_end_only() {
@@ -96,7 +83,7 @@ mod tests {
     #[test]
     fn single_hit_matches_mcrouter_fixture() {
         let reply = Reply::Get {
-            hits: vec![val(b"t", 10, b"te")],
+            hits: vec![value(b"t", 10, b"te")],
         };
         assert_eq!(serialize(&reply).as_ref(), b"VALUE t 10 2\r\nte\r\nEND\r\n");
     }
@@ -104,7 +91,7 @@ mod tests {
     #[test]
     fn empty_value_writes_zero_byte_count() {
         let reply = Reply::Get {
-            hits: vec![val(b"t", 5, b"")],
+            hits: vec![value(b"t", 5, b"")],
         };
         assert_eq!(serialize(&reply).as_ref(), b"VALUE t 5 0\r\n\r\nEND\r\n");
     }
@@ -112,7 +99,7 @@ mod tests {
     #[test]
     fn larger_flags_and_value_match_mcrouter_fixture() {
         let reply = Reply::Get {
-            hits: vec![val(b"test", 15889, b"test ")],
+            hits: vec![value(b"test", 15889, b"test ")],
         };
         assert_eq!(
             serialize(&reply).as_ref(),
@@ -123,7 +110,7 @@ mod tests {
     #[test]
     fn zero_flags_serialize_as_literal_zero() {
         let reply = Reply::Get {
-            hits: vec![val(b"k", 0, b"v")],
+            hits: vec![value(b"k", 0, b"v")],
         };
         assert_eq!(serialize(&reply).as_ref(), b"VALUE k 0 1\r\nv\r\nEND\r\n");
     }
@@ -132,9 +119,9 @@ mod tests {
     fn multiple_hits_concatenate_with_single_terminating_end() {
         let reply = Reply::Get {
             hits: vec![
-                val(b"a", 1, b"AA"),
-                val(b"bb", 2, b"BBB"),
-                val(b"ccc", 3, b"CCCC"),
+                value(b"a", 1, b"AA"),
+                value(b"bb", 2, b"BBB"),
+                value(b"ccc", 3, b"CCCC"),
             ],
         };
         assert_eq!(
@@ -152,7 +139,11 @@ mod tests {
         // shaped like protocol keywords must pass through unaltered.
         let payload: &[u8] = b"\x00\r\nVALUE fake 0 0\r\nEND\r\n\x01\xff";
         let reply = Reply::Get {
-            hits: vec![val(b"k", 0, payload)],
+            hits: vec![Value {
+                key: Bytes::from_static(b"k"),
+                flags: 0,
+                data: Bytes::copy_from_slice(payload),
+            }],
         };
 
         let mut expected = BytesMut::new();
@@ -169,7 +160,7 @@ mod tests {
     fn serialize_into_appends_without_clobbering_existing_bytes() {
         let mut out = BytesMut::from(&b"prefix:"[..]);
         Reply::Get {
-            hits: vec![val(b"k", 0, b"v")],
+            hits: vec![value(b"k", 0, b"v")],
         }
         .serialize_into(&mut out);
         assert_eq!(out.as_ref(), b"prefix:VALUE k 0 1\r\nv\r\nEND\r\n");

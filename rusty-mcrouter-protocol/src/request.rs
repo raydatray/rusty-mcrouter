@@ -157,12 +157,7 @@ fn write_storage(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn serialize(req: &Request) -> BytesMut {
-        let mut out = BytesMut::new();
-        req.serialize_into(&mut out);
-        out
-    }
+    use crate::fixtures::serialize;
 
     #[test]
     fn get_single_key_serializes() {

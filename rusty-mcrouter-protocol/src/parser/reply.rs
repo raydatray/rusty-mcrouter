@@ -144,6 +144,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
 
     use crate::{
+        fixtures::assert_reply_round_trips,
         reply::{Reply, Value},
         ProtocolError, Result,
     };
@@ -446,12 +447,7 @@ mod tests {
     fn parse_reply_numeric_round_trips_with_serializer() {
         let values = [0u64, 1, 12345, u64::MAX];
         values.iter().for_each(|v| {
-            let original = Reply::Numeric(*v);
-            let mut buf = BytesMut::new();
-            original.serialize_into(&mut buf);
-            let parsed = parse_reply(&mut buf).unwrap().unwrap();
-            assert_eq!(parsed, original);
-            assert!(buf.is_empty());
+            assert_reply_round_trips(Reply::Numeric(*v));
         });
     }
 
@@ -477,10 +473,6 @@ mod tests {
             ],
         };
 
-        let mut buf = BytesMut::new();
-        original.serialize_into(&mut buf);
-        let parsed = parse_reply(&mut buf).unwrap().unwrap();
-        assert_eq!(parsed, original);
-        assert!(buf.is_empty());
+        assert_reply_round_trips(original);
     }
 }

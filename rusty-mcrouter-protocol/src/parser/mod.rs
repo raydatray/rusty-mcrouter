@@ -62,10 +62,8 @@ fn command_name(header: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-
     use super::*;
-    use crate::request::Request;
+    use crate::fixtures::{get, storage};
 
     #[test]
     fn parse_request_returns_none_when_no_newline() {
@@ -87,9 +85,7 @@ mod tests {
             let req = parse_request(&mut buf).unwrap().unwrap();
             assert_eq!(
                 req,
-                Parsed::One(Request::Get {
-                    key: Bytes::from_static(b"foo")
-                })
+                Parsed::One(get(b"foo"))
             );
             assert!(buf.is_empty());
         });
@@ -102,18 +98,14 @@ mod tests {
         let first = parse_request(&mut buf).unwrap().unwrap();
         assert_eq!(
             first,
-            Parsed::One(Request::Get {
-                key: Bytes::from_static(b"foo")
-            })
+            Parsed::One(get(b"foo"))
         );
         assert_eq!(buf.as_ref(), b"get bar\n");
 
         let second = parse_request(&mut buf).unwrap().unwrap();
         assert_eq!(
             second,
-            Parsed::One(Request::Get {
-                key: Bytes::from_static(b"bar")
-            })
+            Parsed::One(get(b"bar"))
         );
         assert!(buf.is_empty());
 
@@ -164,21 +156,14 @@ mod tests {
         let first = parse_request(&mut buf).unwrap().unwrap();
         assert_eq!(
             first,
-            Parsed::One(Request::Set {
-                key: Bytes::from_static(b"foo"),
-                flags: 0,
-                exptime: 0,
-                data: Bytes::from_static(b"bar"),
-            })
+            Parsed::One(storage("set", b"foo", 0, 0, b"bar"))
         );
         assert_eq!(buf.as_ref(), b"get foo\r\n");
 
         let second = parse_request(&mut buf).unwrap().unwrap();
         assert_eq!(
             second,
-            Parsed::One(Request::Get {
-                key: Bytes::from_static(b"foo")
-            })
+            Parsed::One(get(b"foo"))
         );
         assert!(buf.is_empty());
     }
