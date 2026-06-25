@@ -5,7 +5,9 @@ use crate::{
     ProtocolError, Result,
 };
 
-use super::shared::{body_terminator_len, parse_u32, parse_u64, parse_usize, read_line};
+use super::shared::{
+    body_terminator_len, parse_u32, parse_u64, parse_usize, read_line, MAX_VALUE_SIZE,
+};
 
 pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>> {
     let Some((line_end, total)) = read_line(buf, 0) else {
@@ -111,6 +113,10 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>> {
 
         let flags = parse_u32(flags_bytes)?;
         let bytes_count = parse_usize(bytes_str)?;
+        if bytes_count > MAX_VALUE_SIZE {
+            let _ = buf.split_to(line_total);
+            return Err(ProtocolError::Malformed("value too large"));
+        }
 
         let key_start = cursor + 6;
         let key_end = key_start + key.len();
@@ -397,6 +403,16 @@ mod tests {
             result,
             Err(ProtocolError::Malformed("invalid usize"))
         ));
+    }
+
+    #[test]
+    fn parse_reply_rejects_too_large_declared_value_without_buffering() {
+        let (result, buf) = pr(b"VALUE foo 0 1048577\r\n");
+        assert!(matches!(
+            result,
+            Err(ProtocolError::Malformed("value too large"))
+        ));
+        assert!(buf.is_empty());
     }
 
     #[test]

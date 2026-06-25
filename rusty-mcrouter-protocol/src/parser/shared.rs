@@ -6,6 +6,10 @@ use crate::{ProtocolError, Result};
 
 const MAX_KEY_LEN: usize = 250;
 
+// 1 MiB: matches mcrouter/memcached's default item-size cap; reject oversized
+// declarations up front instead of buffering forever.
+pub(super) const MAX_VALUE_SIZE: usize = 1024 * 1024;
+
 pub(super) fn read_line(buf: &[u8], offset: usize) -> Option<(usize, usize)> {
     let lf = offset + buf[offset..].iter().position(|&b| b == b'\n')?;
     let text_end = if lf > offset && buf[lf - 1] == b'\r' {
@@ -122,11 +126,16 @@ fn parse_storage_header(
     }
 
     validate_key(key)?;
+    let bytes_count = parse_usize(bytes_bytes)?;
+    if bytes_count > MAX_VALUE_SIZE {
+        return Err(ProtocolError::Malformed("value too large"));
+    }
+
     Ok(StorageHeader {
         key: Bytes::copy_from_slice(key),
         flags: parse_u32(flags_bytes)?,
         exptime: parse_i32(exptime_bytes)?,
-        bytes_count: parse_usize(bytes_bytes)?,
+        bytes_count,
     })
 }
 
