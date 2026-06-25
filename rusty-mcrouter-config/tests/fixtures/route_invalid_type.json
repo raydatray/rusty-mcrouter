@@ -1,0 +1,4 @@
+// hand-written: no mcrouter equivalent (negative case for ConfigError::Json — RouteHandleConfig rejects non-string non-object root)
+{
+  "route": 42
+}

@@ -14,13 +14,13 @@ pub struct PoolConfig {
 mod tests {
     use super::*;
 
-    fn parse(json: &str) -> PoolConfig {
+    fn pool(json: &str) -> PoolConfig {
         serde_json::from_str(json).unwrap()
     }
 
     #[test]
     fn parse_pool_with_one_server() {
-        let pool = parse(r#"{ "servers": ["localhost:11211"] }"#);
+        let pool = pool(r#"{ "servers": ["localhost:11211"] }"#);
 
         assert_eq!(pool.servers, vec!["localhost:11211".to_string()]);
         assert!(pool.extra.is_empty())
@@ -28,7 +28,7 @@ mod tests {
 
     #[test]
     fn parse_pool_with_no_servers() {
-        let pool = parse(r#"{ "servers": []}"#);
+        let pool = pool(r#"{ "servers": []}"#);
 
         assert!(pool.servers.is_empty());
         assert!(pool.extra.is_empty())
@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn parse_unknown_fields_into_extra() {
-        let pool = parse(
+        let pool = pool(
             r#"{
                        "servers": ["a:1", "b:2"],
                        "protocol": "ascii",

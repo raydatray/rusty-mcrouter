@@ -159,19 +159,17 @@ mod tests {
 
     use super::*;
 
-    fn parse(json: &str) -> ConfigDocument {
-        let value: Value = serde_json::from_str(json).unwrap();
-        ConfigDocument::from_value(value).unwrap()
+    fn parse_ok(json: &str) -> ConfigDocument {
+        crate::parse(json).unwrap_or_else(|e| panic!("expected ok parse, got error: {e}"))
     }
 
     fn parse_err(json: &str) -> ConfigError {
-        let value: Value = serde_json::from_str(json).unwrap();
-        ConfigDocument::from_value(value).unwrap_err()
+        crate::parse(json).expect_err("expected parse to fail")
     }
 
     #[test]
     fn smallest_valid_config_only_has_route() {
-        let doc = parse(r#"{ "route": "NullRoute" }"#);
+        let doc = parse_ok(r#"{ "route": "NullRoute" }"#);
         assert!(doc.pools.is_empty());
         assert!(doc.named_handles.is_empty());
         assert_eq!(
@@ -182,8 +180,9 @@ mod tests {
 
     #[test]
     fn pools_and_route_round_trip() {
-        let doc =
-            parse(r#"{ "pools": { "foo": { "servers": ["a:1"] } }, "route": "PoolRoute|foo" }"#);
+        let doc = parse_ok(
+            r#"{ "pools": { "foo": { "servers": ["a:1"] } }, "route": "PoolRoute|foo" }"#,
+        );
         assert_eq!(doc.pools.len(), 1);
         assert_eq!(doc.pools["foo"].servers, vec!["a:1"]);
         assert!(matches!(
@@ -195,7 +194,7 @@ mod tests {
 
     #[test]
     fn named_handles_object_form_indexes_by_key() {
-        let doc = parse(
+        let doc = parse_ok(
             r#"{
                 "named_handles": {
                     "route:A": { "type": "PoolRoute", "pool": "A" },
@@ -220,7 +219,7 @@ mod tests {
 
     #[test]
     fn named_handles_list_form_uses_name_field() {
-        let doc = parse(
+        let doc = parse_ok(
             r#"{
                 "named_handles": [
                     { "type": "PoolRoute", "name": "route:A", "pool": "A" },
@@ -242,7 +241,7 @@ mod tests {
 
     #[test]
     fn routes_plural_array_form_preserves_aliases() {
-        let doc = parse(
+        let doc = parse_ok(
             r#"{
                 "pools": { "A": { "servers": ["x:1"] }, "B": { "servers": ["y:1"] } },
                 "routes": [
@@ -261,7 +260,7 @@ mod tests {
 
     #[test]
     fn routes_plural_object_form_lifts_keys_to_aliases() {
-        let doc = parse(
+        let doc = parse_ok(
             r#"{
                 "pools": { "A": { "servers": ["x:1"] } },
                 "routes": { "/foo/bar/": "PoolRoute|A" }

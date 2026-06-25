@@ -163,3 +163,21 @@ fn bad_pool_servers_yields_json_error() {
     let err = parse_err("bad_pool_servers_not_array.json");
     assert!(matches!(err, ConfigError::Json(_)), "got {err:?}");
 }
+
+#[test]
+fn malformed_json_yields_json_error() {
+    let err = parse_err("malformed_json.json");
+    assert!(matches!(err, ConfigError::Json(_)), "got {err:?}");
+}
+
+#[test]
+fn pool_missing_servers_yields_json_error() {
+    let err = parse_err("pool_missing_servers.json");
+    assert!(matches!(err, ConfigError::Json(_)), "got {err:?}");
+}
+
+#[test]
+fn route_invalid_type_yields_json_error() {
+    let err = parse_err("route_invalid_type.json");
+    assert!(matches!(err, ConfigError::Json(_)), "got {err:?}");
+}
