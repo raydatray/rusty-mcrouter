@@ -212,6 +212,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_request_set_rejects_too_large_declared_value_without_buffering() {
+        let mut buf = BytesMut::from(&b"set foo 0 0 1048577\r\n"[..]);
+        assert!(matches!(
+            parse_request(&mut buf),
+            Err(ProtocolError::Malformed("value too large"))
+        ));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
     fn parse_request_set_rejects_missing_crlf_after_body() {
         let mut buf = BytesMut::from(&b"set foo 0 0 3\r\nbarXX\r\nEND\r\n"[..]);
         assert!(matches!(
