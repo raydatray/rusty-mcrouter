@@ -167,4 +167,25 @@ mod tests {
         );
         assert!(buf.is_empty());
     }
+
+    #[test]
+    fn parse_request_partial_reads_leave_buffer_untouched_for_each_command() {
+        let cases: &[(&str, &[u8])] = &[
+            ("get", b"get foo"),
+            ("delete", b"delete foo"),
+            ("incr", b"incr foo 1"),
+            ("decr", b"decr foo 1"),
+            ("touch", b"touch foo 60"),
+            ("add", b"add foo 0 0 3\r\nba"),
+            ("replace", b"replace foo 0 0 3\r\nba"),
+            ("append", b"append foo 0 0 3\r\nba"),
+            ("prepend", b"prepend foo 0 0 3\r\nba"),
+        ];
+
+        cases.iter().for_each(|(verb, input)| {
+            let mut buf = BytesMut::from(*input);
+            assert!(matches!(parse_request(&mut buf), Ok(None)), "verb={verb}");
+            assert_eq!(buf.as_ref(), *input, "verb={verb}");
+        });
+    }
 }
