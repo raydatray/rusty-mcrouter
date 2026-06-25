@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -15,34 +16,6 @@ pub async fn mock_backend(reply: &'static [u8]) -> SocketAddr {
         let mut buf = vec![0u8; 1024];
         let _ = stream.read(&mut buf).await.unwrap();
         stream.write_all(reply).await.unwrap();
-    });
-    addr
-}
-
-/// Long-lived mock backend that writes `reply` once per `\r\n` terminator
-/// observed in the inbound byte stream.
-///
-/// Suitable for tests that issue many sequential requests on the same
-/// `Client`. Replies are emitted immediately as each request arrives,
-/// so this does NOT prove pipelining.
-pub async fn looping_mock_backend(reply: &'static [u8]) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0u8; 4096];
-        loop {
-            let n = match stream.read(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => n,
-            };
-            let replies = count_terminators(&buf[..n]);
-            for _ in 0..replies {
-                if stream.write_all(reply).await.is_err() {
-                    return;
-                }
-            }
-        }
     });
     addr
 }
@@ -77,6 +50,56 @@ pub async fn pipelining_mock_backend(
         for _ in 0..n_requests {
             if stream.write_all(reply).await.is_err() {
                 return;
+            }
+        }
+    });
+    addr
+}
+
+/// One step in a [`scripted_backend`] script.
+pub enum Step {
+    /// Read at least `n` request terminators before replying — forces the client to pipeline.
+    ReadRequests(usize),
+    Write(&'static [u8]),
+    /// Write one byte at a time, forcing the client to reassemble across partial reads.
+    WriteChunked(&'static [u8]),
+    Close,
+}
+
+/// A scripted single-connection TCP peer for `Client` actor tests.
+pub async fn scripted_backend(steps: Vec<Step>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut seen = Vec::<u8>::new();
+        let mut buf = vec![0u8; 4096];
+
+        for step in steps {
+            match step {
+                Step::ReadRequests(n) => {
+                    while count_terminators(&seen) < n {
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(k) => seen.extend_from_slice(&buf[..k]),
+                        }
+                    }
+                }
+                Step::Write(bytes) => {
+                    if stream.write_all(bytes).await.is_err() {
+                        return;
+                    }
+                }
+                Step::WriteChunked(bytes) => {
+                    for byte in bytes {
+                        if stream.write_all(&[*byte]).await.is_err() {
+                            return;
+                        }
+                        let _ = stream.flush().await;
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                }
+                Step::Close => return,
             }
         }
     });
