@@ -31,6 +31,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
 
     use crate::{
+        fixtures::assert_request_round_trips,
         parser::parse_request,
         request::{Parsed, Request},
         ProtocolError,
@@ -126,15 +127,9 @@ mod tests {
 
     #[test]
     fn parse_request_incr_round_trips_with_serializer() {
-        let original = Request::Incr {
+        assert_request_round_trips(Request::Incr {
             key: Bytes::from_static(b"counter"),
             delta: 12345,
-        };
-
-        let mut buf = BytesMut::new();
-        original.serialize_into(&mut buf);
-        let parsed = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(parsed, Parsed::One(original));
-        assert!(buf.is_empty());
+        });
     }
 }

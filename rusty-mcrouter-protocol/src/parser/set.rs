@@ -37,9 +37,10 @@ pub(super) fn parse_request(
 
 #[cfg(test)]
 mod tests {
-    use bytes::{Bytes, BytesMut};
+    use bytes::BytesMut;
 
     use crate::{
+        fixtures::{assert_request_round_trips, storage},
         parser::parse_request,
         request::{Parsed, Request},
         ProtocolError,
@@ -47,20 +48,11 @@ mod tests {
 
     use super::SET_HEADER_HELP;
 
-    fn set(key: &'static [u8], flags: u32, exptime: i32, data: &'static [u8]) -> Request {
-        Request::Set {
-            key: Bytes::from_static(key),
-            flags,
-            exptime,
-            data: Bytes::from_static(data),
-        }
-    }
-
     #[test]
     fn parse_request_set_basic() {
         let mut buf = BytesMut::from(&b"set foo 0 0 3\r\nbar\r\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, Parsed::One(set(b"foo", 0, 0, b"bar")));
+        assert_eq!(req, Parsed::One(storage("set", b"foo", 0, 0, b"bar")));
         assert!(buf.is_empty());
     }
 
@@ -68,7 +60,7 @@ mod tests {
     fn parse_request_set_with_flags_and_exptime() {
         let mut buf = BytesMut::from(&b"set k 42 3600 1\r\nv\r\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, Parsed::One(set(b"k", 42, 3600, b"v")));
+        assert_eq!(req, Parsed::One(storage("set", b"k", 42, 3600, b"v")));
         assert!(buf.is_empty());
     }
 
@@ -76,7 +68,7 @@ mod tests {
     fn parse_request_set_negative_exptime() {
         let mut buf = BytesMut::from(&b"set k 0 -1 1\r\nv\r\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, Parsed::One(set(b"k", 0, -1, b"v")));
+        assert_eq!(req, Parsed::One(storage("set", b"k", 0, -1, b"v")));
         assert!(buf.is_empty());
     }
 
@@ -84,7 +76,7 @@ mod tests {
     fn parse_request_set_empty_data() {
         let mut buf = BytesMut::from(&b"set k 0 0 0\r\n\r\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, Parsed::One(set(b"k", 0, 0, b"")));
+        assert_eq!(req, Parsed::One(storage("set", b"k", 0, 0, b"")));
         assert!(buf.is_empty());
     }
 
@@ -92,7 +84,7 @@ mod tests {
     fn parse_request_set_accepts_lf_only_terminators() {
         let mut buf = BytesMut::from(&b"set foo 0 0 3\nbar\n"[..]);
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, Parsed::One(set(b"foo", 0, 0, b"bar")));
+        assert_eq!(req, Parsed::One(storage("set", b"foo", 0, 0, b"bar")));
         assert!(buf.is_empty());
     }
 
@@ -146,7 +138,7 @@ mod tests {
         assert!(matches!(parse_request(&mut buf), Ok(None)));
         buf.extend_from_slice(b"r\r\n");
         let req = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req, Parsed::One(set(b"foo", 0, 0, b"bar")));
+        assert_eq!(req, Parsed::One(storage("set", b"foo", 0, 0, b"bar")));
         assert!(buf.is_empty());
     }
 
@@ -241,17 +233,12 @@ mod tests {
 
     #[test]
     fn parse_request_set_round_trips_with_serializer() {
-        let original = Request::Set {
-            key: Bytes::from_static(b"alpha"),
-            flags: u32::MAX,
-            exptime: -42,
-            data: Bytes::from_static(b"hello \x00 world\r\n"),
-        };
-
-        let mut buf = BytesMut::new();
-        original.serialize_into(&mut buf);
-        let parsed = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(parsed, Parsed::One(original));
-        assert!(buf.is_empty());
+        assert_request_round_trips(storage(
+            "set",
+            b"alpha",
+            u32::MAX,
+            -42,
+            b"hello \x00 world\r\n",
+        ));
     }
 }
