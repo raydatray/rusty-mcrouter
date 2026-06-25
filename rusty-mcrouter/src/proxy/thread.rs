@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, rc::Rc, sync::mpsc::SyncSender};
 
 use rusty_mcrouter_core::build_route;
-use rusty_mcrouter_net::Server;
+use rusty_mcrouter_net::{ClientFactory, Server};
 use tokio::{runtime::Builder, task::LocalSet};
 
 use crate::proxy::{ConnectionWorker, ListenerConfig, Proxy, ProxyThreadConfig};
@@ -67,7 +67,7 @@ pub fn proxy_thread_main(
 
         // each thread builds its own route graph. `Rc<dyn DynRoute>` is
         // thread-local and never shared across threads.
-        let route = match build_route(&config).await {
+        let route = match build_route(&config, &ClientFactory).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = ready_tx.send(Err(anyhow::anyhow!("build_route failed: {e}")));

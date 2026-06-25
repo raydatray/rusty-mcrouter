@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use rusty_mcrouter_net::Backend;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::selectors::Selector;
@@ -14,9 +15,9 @@ pub struct PoolRoute {
 }
 
 impl PoolRoute {
-    pub fn new(
+    pub fn new<B: Backend>(
         pool_name: impl Into<String>,
-        destinations: Vec<Rc<DestinationRoute>>,
+        destinations: Vec<Rc<DestinationRoute<B>>>,
         selector: Box<dyn Selector>,
     ) -> Self {
         let children = destinations
