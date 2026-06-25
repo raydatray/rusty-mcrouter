@@ -31,7 +31,13 @@ pub fn parse_reply(buf: &mut BytesMut) -> Result<Option<Reply>> {
             Ok(Some(Reply::ServerError(msg)))
         }
         FirstLine::NumericLine => {
-            let value = parse_u64(&buf[..line_end])?;
+            let value = match parse_u64(&buf[..line_end]) {
+                Ok(value) => value,
+                Err(e) => {
+                    let _ = buf.split_to(total);
+                    return Err(e);
+                }
+            };
             let _ = buf.split_to(total);
             Ok(Some(Reply::Numeric(value)))
         }
@@ -94,25 +100,40 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>> {
         }
 
         if !line.starts_with(b"VALUE ") {
+            let _ = buf.split_to(line_total);
             return Err(ProtocolError::Malformed("expected VALUE or END"));
         }
 
         let after_value = &line[6..];
         let mut parts = after_value.split(|&b| b == b' ');
-        let key = parts
-            .next()
-            .filter(|k| !k.is_empty())
-            .ok_or(ProtocolError::Malformed("missing or empty key in VALUE"))?;
-        let flags_bytes = parts
-            .next()
-            .ok_or(ProtocolError::Malformed("missing flags in VALUE"))?;
-        let bytes_str = parts
-            .next()
-            .ok_or(ProtocolError::Malformed("missing byte count in VALUE"))?;
+        let Some(key) = parts.next().filter(|k| !k.is_empty()) else {
+            let _ = buf.split_to(line_total);
+            return Err(ProtocolError::Malformed("missing or empty key in VALUE"));
+        };
+        let Some(flags_bytes) = parts.next() else {
+            let _ = buf.split_to(line_total);
+            return Err(ProtocolError::Malformed("missing flags in VALUE"));
+        };
+        let Some(bytes_str) = parts.next() else {
+            let _ = buf.split_to(line_total);
+            return Err(ProtocolError::Malformed("missing byte count in VALUE"));
+        };
         // Extra fields (e.g. CAS for `gets`) are accepted and silently ignored.
 
-        let flags = parse_u32(flags_bytes)?;
-        let bytes_count = parse_usize(bytes_str)?;
+        let flags = match parse_u32(flags_bytes) {
+            Ok(flags) => flags,
+            Err(e) => {
+                let _ = buf.split_to(line_total);
+                return Err(e);
+            }
+        };
+        let bytes_count = match parse_usize(bytes_str) {
+            Ok(bytes_count) => bytes_count,
+            Err(e) => {
+                let _ = buf.split_to(line_total);
+                return Err(e);
+            }
+        };
         if bytes_count > MAX_VALUE_SIZE {
             let _ = buf.split_to(line_total);
             return Err(ProtocolError::Malformed("value too large"));
@@ -126,12 +147,20 @@ fn parse_get_reply(buf: &mut BytesMut) -> Result<Option<Reply>> {
         // bytes_count. Embedded \r, \n, NULs, or fake protocol keywords in
         // the payload must pass through untouched.
         let data_start = line_total;
-        let data_end = data_start
-            .checked_add(bytes_count)
-            .ok_or(ProtocolError::Malformed("body length overflow"))?;
-        let terminator_len = match body_terminator_len(buf, data_end)? {
-            Some(len) => len,
-            None => return Ok(None),
+        let data_end = match data_start.checked_add(bytes_count) {
+            Some(data_end) => data_end,
+            None => {
+                let _ = buf.split_to(line_total);
+                return Err(ProtocolError::Malformed("body length overflow"));
+            }
+        };
+        let terminator_len = match body_terminator_len(buf, data_end) {
+            Ok(Some(len)) => len,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                let _ = buf.split_to(data_end + 1);
+                return Err(e);
+            }
         };
 
         blocks.push(ValueOffsets {
@@ -299,11 +328,22 @@ mod tests {
 
     #[test]
     fn parse_reply_rejects_unknown_line() {
-        let (result, _buf) = pr(b"FOO\r\n");
+        let (result, buf) = pr(b"FOO\r\n");
         assert!(matches!(
             result,
             Err(ProtocolError::Malformed("expected VALUE or END"))
         ));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_error_consumes_offending_bytes() {
+        let mut buf = BytesMut::from(&b"VALUE foo 0 3\r\nbarXX\r\nEND\r\n"[..]);
+        assert!(matches!(
+            parse_reply(&mut buf),
+            Err(ProtocolError::Malformed("missing CRLF after body"))
+        ));
+        assert_eq!(buf.as_ref(), b"X\r\nEND\r\n");
     }
 
     #[test]
@@ -398,11 +438,12 @@ mod tests {
 
     #[test]
     fn parse_reply_rejects_non_numeric_byte_count() {
-        let (result, _buf) = pr(b"VALUE foo 0 abc\r\nbar\r\nEND\r\n");
+        let (result, buf) = pr(b"VALUE foo 0 abc\r\nbar\r\nEND\r\n");
         assert!(matches!(
             result,
             Err(ProtocolError::Malformed("invalid usize"))
         ));
+        assert_eq!(buf.as_ref(), b"bar\r\nEND\r\n");
     }
 
     #[test]
@@ -417,11 +458,12 @@ mod tests {
 
     #[test]
     fn parse_reply_rejects_missing_crlf_after_data() {
-        let (result, _buf) = pr(b"VALUE foo 0 3\r\nbarXX\r\nEND\r\n");
+        let (result, buf) = pr(b"VALUE foo 0 3\r\nbarXX\r\nEND\r\n");
         assert!(matches!(
             result,
             Err(ProtocolError::Malformed("missing CRLF after body"))
         ));
+        assert_eq!(buf.as_ref(), b"X\r\nEND\r\n");
     }
 
     #[test]
