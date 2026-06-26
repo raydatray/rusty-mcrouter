@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, rc::Rc};
 
 use rusty_mcrouter_config::{ConfigDocument, HashConfig, HashFunc, RouteEntry, RouteHandleConfig};
-use rusty_mcrouter_net::{Client, NetError};
+use rusty_mcrouter_net::{Backend, BackendFactory, NetError};
 use thiserror::Error;
 
 use crate::{
@@ -44,25 +44,32 @@ pub enum BuildError {
 
 type Result<T> = std::result::Result<T, BuildError>;
 
-pub async fn build_route(config: &ConfigDocument) -> Result<Rc<dyn DynRoute>> {
+/// Builds the route graph from `config`, constructing backends via `factory`
+/// (production: `&ClientFactory`; tests: `&MockBackendFactory`, no sockets).
+pub async fn build_route<F: BackendFactory>(
+    config: &ConfigDocument,
+    factory: &F,
+) -> Result<Rc<dyn DynRoute>> {
     let entry = match &config.route {
         RouteEntry::Single(handle) => handle,
         RouteEntry::Prefixed(_) => return Err(BuildError::PrefixRoutingNotImplemented),
     };
 
-    let mut route_builder = RouteBuilder::new(config);
+    let mut route_builder = RouteBuilder::new(config, factory);
     route_builder.build_handle(entry).await
 }
 
-struct RouteBuilder<'a> {
+struct RouteBuilder<'a, F: BackendFactory> {
     config: &'a ConfigDocument,
-    pool_cache: BTreeMap<String, Vec<Rc<DestinationRoute>>>,
+    factory: &'a F,
+    pool_cache: BTreeMap<String, Vec<Rc<DestinationRoute<F::Backend>>>>,
 }
 
-impl<'a> RouteBuilder<'a> {
-    fn new(config: &'a ConfigDocument) -> Self {
+impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
+    fn new(config: &'a ConfigDocument, factory: &'a F) -> Self {
         Self {
             config,
+            factory,
             pool_cache: BTreeMap::new(),
         }
     }
@@ -110,7 +117,7 @@ impl<'a> RouteBuilder<'a> {
     async fn get_or_build_destinations(
         &mut self,
         pool_name: &str,
-    ) -> Result<Vec<Rc<DestinationRoute>>> {
+    ) -> Result<Vec<Rc<DestinationRoute<F::Backend>>>> {
         if let Some(cached) = self.pool_cache.get(pool_name) {
             return Ok(cached.clone());
         }
@@ -133,14 +140,14 @@ impl<'a> RouteBuilder<'a> {
 
         for server in &pool_config.servers {
             // todo - this is an eager connect and will fail if any backend is down, this should become lazy
-            let client = Client::connect(server.as_str()).await.map_err(|source| {
+            let backend = self.factory.connect(server.as_str()).await.map_err(|source| {
                 BuildError::ConnectFailed {
                     pool: pool_name.to_string(),
                     server: server.clone(),
                     source,
                 }
             })?;
-            destinations.push(Rc::new(DestinationRoute::new(client)));
+            destinations.push(Rc::new(DestinationRoute::<F::Backend>::new(backend)));
         }
 
         self.pool_cache
@@ -150,10 +157,10 @@ impl<'a> RouteBuilder<'a> {
     }
 }
 
-fn build_pool_handle(
+fn build_pool_handle<B: Backend>(
     pool_name: &str,
     hash: &HashConfig,
-    destinations: Vec<Rc<DestinationRoute>>,
+    destinations: Vec<Rc<DestinationRoute<B>>>,
 ) -> Result<Rc<dyn DynRoute>> {
     let selector = build_selector(hash, destinations.len())?;
     let route = PoolRoute::new(pool_name, destinations, selector);
@@ -176,19 +183,14 @@ fn build_selector(hash: &HashConfig, n: usize) -> Result<Box<dyn Selector>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::req_get;
     use bytes::Bytes;
     use rusty_mcrouter_config::parse;
-    use rusty_mcrouter_net::testing::mock_backend;
-    use rusty_mcrouter_protocol::{Reply, Request};
+    use rusty_mcrouter_net::testing::MockBackendFactory;
+    use rusty_mcrouter_protocol::Reply;
 
-    fn req_get(key: &'static [u8]) -> Request {
-        Request::Get {
-            key: Bytes::from_static(key),
-        }
-    }
-
-    async fn expect_err(cfg: &ConfigDocument) -> BuildError {
-        match build_route(cfg).await {
+    async fn expect_err<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> BuildError {
+        match build_route(cfg, factory).await {
             Err(e) => e,
             Ok(_) => panic!("expected build_route to fail, but it succeeded"),
         }
@@ -197,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn builds_null_route_from_bare_string() {
         let cfg = parse(r#"{"route": "NullRoute"}"#).unwrap();
-        let route = build_route(&cfg).await.unwrap();
+        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
@@ -205,7 +207,7 @@ mod tests {
     #[tokio::test]
     async fn builds_null_route_from_object_form() {
         let cfg = parse(r#"{"route": {"type": "NullRoute"}}"#).unwrap();
-        let route = build_route(&cfg).await.unwrap();
+        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
@@ -213,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn builds_error_route_from_object_with_message() {
         let cfg = parse(r#"{"route": {"type": "ErrorRoute", "message": "boom"}}"#).unwrap();
-        let route = build_route(&cfg).await.unwrap();
+        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"boom")));
     }
@@ -221,30 +223,25 @@ mod tests {
     #[tokio::test]
     async fn builds_error_route_from_shorthand_with_message_arg() {
         let cfg = parse(r#"{"route": "ErrorRoute|nope"}"#).unwrap();
-        let route = build_route(&cfg).await.unwrap();
+        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"nope")));
     }
 
     #[tokio::test]
     async fn builds_pool_route_from_shorthand() {
-        let addr = mock_backend(b"END\r\n").await;
-        let json =
-            format!(r#"{{"pools": {{"P": {{"servers": ["{addr}"]}}}}, "route": "PoolRoute|P"}}"#);
-        let cfg = parse(&json).unwrap();
-        let route = build_route(&cfg).await.unwrap();
+        let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
+        let cfg = parse(json).unwrap();
+        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
 
     #[tokio::test]
     async fn builds_pool_route_from_object_form() {
-        let addr = mock_backend(b"END\r\n").await;
-        let json = format!(
-            r#"{{"pools": {{"P": {{"servers": ["{addr}"]}}}}, "route": {{"type": "PoolRoute", "pool": "P"}}}}"#
-        );
-        let cfg = parse(&json).unwrap();
-        let route = build_route(&cfg).await.unwrap();
+        let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": {"type": "PoolRoute", "pool": "P"}}"#;
+        let cfg = parse(json).unwrap();
+        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
@@ -252,21 +249,21 @@ mod tests {
     #[tokio::test]
     async fn errors_when_pool_not_found() {
         let cfg = parse(r#"{"route": "PoolRoute|missing"}"#).unwrap();
-        let err = expect_err(&cfg).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
         assert!(matches!(err, BuildError::PoolNotFound { ref name } if name == "missing"));
     }
 
     #[tokio::test]
     async fn errors_when_pool_has_zero_servers() {
         let cfg = parse(r#"{"pools": {"E": {"servers": []}}, "route": "PoolRoute|E"}"#).unwrap();
-        let err = expect_err(&cfg).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
         assert!(matches!(err, BuildError::EmptyPool { ref name } if name == "E"));
     }
 
     #[tokio::test]
     async fn errors_on_unknown_object_route_type() {
         let cfg = parse(r#"{"route": {"type": "FailoverRoute", "children": []}}"#).unwrap();
-        let err = expect_err(&cfg).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
         assert!(matches!(
             err,
             BuildError::RouteTypeNotImplemented { ref kind } if kind == "FailoverRoute"
@@ -276,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn errors_on_unknown_shorthand_kind() {
         let cfg = parse(r#"{"route": "FailoverRoute|x"}"#).unwrap();
-        let err = expect_err(&cfg).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
         assert!(matches!(
             err,
             BuildError::RouteTypeNotImplemented { ref kind } if kind == "FailoverRoute"
@@ -286,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn errors_on_unresolved_bare_reference() {
         let cfg = parse(r#"{"route": "route:made-up"}"#).unwrap();
-        let err = expect_err(&cfg).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
         assert!(matches!(
             err,
             BuildError::UnresolvedReference { ref name } if name == "route:made-up"
@@ -297,14 +294,14 @@ mod tests {
     async fn errors_on_prefixed_routes() {
         let json = r#"{"pools": {"A": {"servers": ["x:1"]}}, "routes": [{"aliases": ["/a/"], "route": "PoolRoute|A"}]}"#;
         let cfg = parse(json).unwrap();
-        let err = expect_err(&cfg).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
         assert!(matches!(err, BuildError::PrefixRoutingNotImplemented));
     }
 
     #[tokio::test]
     async fn errors_on_pool_route_shorthand_with_wrong_arity() {
         let cfg = parse(r#"{"route": "PoolRoute|a|b"}"#).unwrap();
-        let err = expect_err(&cfg).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
         assert!(matches!(
             err,
             BuildError::PoolRouteShorthandArity { got: 2 }
@@ -316,7 +313,7 @@ mod tests {
         let cfg =
             parse(r#"{"pools": {"P": {"servers": ["127.0.0.1:1"]}}, "route": "PoolRoute|P"}"#)
                 .unwrap();
-        let err = expect_err(&cfg).await;
+        let err = expect_err(&cfg, &MockBackendFactory::failing("127.0.0.1:1")).await;
         let BuildError::ConnectFailed { pool, server, .. } = &err else {
             panic!("expected ConnectFailed, got {err:?}");
         };
@@ -326,11 +323,10 @@ mod tests {
 
     #[tokio::test]
     async fn pool_referenced_twice_shares_destinations() {
-        let addr = mock_backend(b"END\r\n").await;
-        let json =
-            format!(r#"{{"pools": {{"P": {{"servers": ["{addr}"]}}}}, "route": "PoolRoute|P"}}"#);
-        let cfg = parse(&json).unwrap();
-        let mut builder = RouteBuilder::new(&cfg);
+        let factory = MockBackendFactory::new();
+        let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
+        let cfg = parse(json).unwrap();
+        let mut builder = RouteBuilder::new(&cfg, &factory);
         let d1 = builder.get_or_build_destinations("P").await.unwrap();
         let d2 = builder.get_or_build_destinations("P").await.unwrap();
         assert!(

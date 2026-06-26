@@ -1,12 +1,14 @@
 use rusty_mcrouter_protocol::ProtocolError;
 use thiserror::Error;
 
+mod backend;
 mod client;
 mod server;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use crate::backend::{Backend, BackendFactory, ClientFactory};
 pub use crate::client::{Client, ClientConfig};
 pub use crate::server::Server;
 
