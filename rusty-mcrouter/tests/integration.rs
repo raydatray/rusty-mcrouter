@@ -62,7 +62,6 @@ async fn fixture() -> &'static Fixture {
                 .arg("--config")
                 .arg(&config_path)
                 .env("RUSTY_MCROUTER_LISTEN", "127.0.0.1:0")
-                .env("RUSTY_MCROUTER_BACKEND", backend_addr.to_string())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .kill_on_drop(true)
