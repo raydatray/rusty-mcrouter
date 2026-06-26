@@ -1,8 +1,8 @@
 # rusty-mcrouter testing strategy (design)
 
-> Status: **Proposed (2026-06-12)**
+> Status: **Implemented (2026-06-12)**
 > Mirrors: real mcrouter's three-layer test design. There is **no** `../mcrouter/testing.md` (testing isn't a single mcrouter "concept" like multiget); this doc cites the mcrouter tree directly — `mcrouter/lib/test/RouteHandleTestUtil.h`, `mcrouter/lib/network/test/MockMc.*`, `mcrouter/test/MCProcess.py`. A `../mcrouter/testing.md` write-up could follow if we want the full mirror (see open questions).
-> Implemented in: `../architecture/testing.md` (once built; **nothing exists yet**)
+> Implemented in: [`../architecture/testing.md`](../architecture/testing.md) — the as-built record (incl. where it diverged from this plan)
 > Related: [`../architecture/backend-client.md`](../architecture/backend-client.md) — the concrete `Client` we put a trait over; [`./hash-routing.md`](./hash-routing.md) + [`../architecture/multiget.md`](../architecture/multiget.md) — the route/builder tests that go socket-free; [`./observability.md`](./observability.md) — shares the "faithful to mcrouter, cheap, in-process" framing.
 
 Why our testing situation is bad today, and the layered fix: a `Backend` trait seam
