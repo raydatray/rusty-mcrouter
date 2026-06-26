@@ -1,0 +1,2 @@
+// hand-written: no mcrouter equivalent (negative case for ConfigError::Json on broken syntax — missing closing brace)
+{ "route": "NullRoute"

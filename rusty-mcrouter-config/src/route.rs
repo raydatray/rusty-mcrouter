@@ -148,18 +148,18 @@ fn parse_hash_func(name: &str) -> Result<HashFunc, String> {
 mod tests {
     use super::*;
 
-    fn parse(json: &str) -> RouteHandleConfig {
+    fn route_handle(json: &str) -> RouteHandleConfig {
         serde_json::from_str(json).unwrap()
     }
 
     #[test]
     fn bare_string_with_no_pipe_is_a_reference() {
         assert_eq!(
-            parse(r#""NullRoute""#),
+            route_handle(r#""NullRoute""#),
             RouteHandleConfig::Reference("NullRoute".into())
         );
         assert_eq!(
-            parse(r#""route:A""#),
+            route_handle(r#""route:A""#),
             RouteHandleConfig::Reference("route:A".into())
         );
     }
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn pipe_form_becomes_shorthand_with_args() {
         assert_eq!(
-            parse(r#""PoolRoute|foo""#),
+            route_handle(r#""PoolRoute|foo""#),
             RouteHandleConfig::Shorthand {
                 kind: "PoolRoute".into(),
                 args: vec!["foo".into()]
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn multi_pipe_form_keeps_all_args() {
         assert_eq!(
-            parse(r#""AllSyncRoute|Pool|A-foo""#),
+            route_handle(r#""AllSyncRoute|Pool|A-foo""#),
             RouteHandleConfig::Shorthand {
                 kind: "AllSyncRoute".into(),
                 args: vec!["Pool".into(), "A-foo".into()],
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn object_form_pool_route_defaults_hash_to_ch3() {
-        let r = parse(r#"{ "type": "PoolRoute", "pool": "foo" }"#);
+        let r = route_handle(r#"{ "type": "PoolRoute", "pool": "foo" }"#);
         assert_eq!(
             r,
             RouteHandleConfig::PoolRoute {
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn object_form_pool_route_with_object_pool_name() {
-        let r = parse(r#"{ "type": "PoolRoute", "pool": { "name": "foo", "servers": [] } }"#);
+        let r = route_handle(r#"{ "type": "PoolRoute", "pool": { "name": "foo", "servers": [] } }"#);
         assert_eq!(
             r,
             RouteHandleConfig::PoolRoute {
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn object_form_pool_route_drops_extras_but_keeps_pool_and_hash() {
-        let r = parse(r#"{ "type": "PoolRoute", "pool": "foo", "asynclog": "log_a" }"#);
+        let r = route_handle(r#"{ "type": "PoolRoute", "pool": "foo", "asynclog": "log_a" }"#);
         assert_eq!(
             r,
             RouteHandleConfig::PoolRoute {
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn pool_route_hash_string_form() {
-        let r = parse(r#"{ "type": "PoolRoute", "pool": "A", "hash": "Crc32" }"#);
+        let r = route_handle(r#"{ "type": "PoolRoute", "pool": "A", "hash": "Crc32" }"#);
         assert_eq!(
             r,
             RouteHandleConfig::PoolRoute {
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn pool_route_hash_object_form_with_salt() {
-        let r = parse(
+        let r = route_handle(
             r#"{ "type": "PoolRoute", "pool": "A", "hash": { "hash_func": "Crc32", "salt": "x" } }"#,
         );
         assert_eq!(
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn pool_route_hash_object_omitted_func_defaults_to_ch3() {
-        let r = parse(r#"{ "type": "PoolRoute", "pool": "A", "hash": { "salt": "x" } }"#);
+        let r = route_handle(r#"{ "type": "PoolRoute", "pool": "A", "hash": { "salt": "x" } }"#);
         assert_eq!(
             r,
             RouteHandleConfig::PoolRoute {
@@ -290,14 +290,14 @@ mod tests {
     #[test]
     fn object_form_null_route() {
         assert_eq!(
-            parse(r#"{ "type": "NullRoute" }"#),
+            route_handle(r#"{ "type": "NullRoute" }"#),
             RouteHandleConfig::NullRoute
         );
     }
 
     #[test]
     fn object_form_error_route_with_message() {
-        let r = parse(r#"{ "type": "ErrorRoute", "message": "boom" }"#);
+        let r = route_handle(r#"{ "type": "ErrorRoute", "message": "boom" }"#);
         assert_eq!(
             r,
             RouteHandleConfig::ErrorRoute {
@@ -308,13 +308,13 @@ mod tests {
 
     #[test]
     fn object_form_error_route_without_message() {
-        let r = parse(r#"{ "type": "ErrorRoute" }"#);
+        let r = route_handle(r#"{ "type": "ErrorRoute" }"#);
         assert_eq!(r, RouteHandleConfig::ErrorRoute { message: None });
     }
 
     #[test]
     fn unknown_object_type_preserves_kind_and_all_fields() {
-        let r = parse(
+        let r = route_handle(
             r#"{ "type": "PrefixSelectorRoute", "policies": { "good": "PoolRoute|A" }, "wildcard": "PoolRoute|B" }"#,
         );
         match r {
