@@ -42,3 +42,83 @@ impl Client {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{scripted_backend, Step};
+    use bytes::Bytes;
+    use rusty_mcrouter_protocol::Reply;
+
+    fn get(key: &'static [u8]) -> Request {
+        Request::Get {
+            key: Bytes::from_static(key),
+        }
+    }
+
+    fn hit_data(reply: Reply) -> Bytes {
+        let Reply::Get { mut hits } = reply else {
+            panic!("expected Reply::Get, got {reply:?}");
+        };
+        assert_eq!(hits.len(), 1);
+        hits.remove(0).data
+    }
+
+    #[tokio::test]
+    async fn pipelines_requests() {
+        let addr =
+            scripted_backend(vec![Step::ReadRequests(2), Step::Write(b"END\r\nEND\r\n")]).await;
+        let client = Client::connect(addr).await.unwrap();
+
+        let (a, b) = tokio::join!(client.send(get(b"a")), client.send(get(b"b")));
+        assert_eq!(a.unwrap(), Reply::Get { hits: vec![] });
+        assert_eq!(b.unwrap(), Reply::Get { hits: vec![] });
+    }
+
+    #[tokio::test]
+    async fn matches_replies_fifo() {
+        let addr = scripted_backend(vec![
+            Step::ReadRequests(3),
+            Step::Write(b"VALUE k 0 1\r\n1\r\nEND\r\n"),
+            Step::Write(b"VALUE k 0 1\r\n2\r\nEND\r\n"),
+            Step::Write(b"VALUE k 0 1\r\n3\r\nEND\r\n"),
+        ])
+        .await;
+        let client = Client::connect(addr).await.unwrap();
+
+        let (r1, r2, r3) = tokio::join!(
+            client.send(get(b"k")),
+            client.send(get(b"k")),
+            client.send(get(b"k")),
+        );
+        assert_eq!(hit_data(r1.unwrap()).as_ref(), b"1");
+        assert_eq!(hit_data(r2.unwrap()).as_ref(), b"2");
+        assert_eq!(hit_data(r3.unwrap()).as_ref(), b"3");
+    }
+
+    #[tokio::test]
+    async fn fails_pending_on_eof() {
+        let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Close]).await;
+        let client = Client::connect(addr).await.unwrap();
+        assert!(client.send(get(b"a")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reassembles_reply_across_partial_reads() {
+        let addr = scripted_backend(vec![
+            Step::ReadRequests(1),
+            Step::WriteChunked(b"VALUE foo 0 3\r\nbar\r\nEND\r\n"),
+        ])
+        .await;
+        let client = Client::connect(addr).await.unwrap();
+
+        assert_eq!(hit_data(client.send(get(b"foo")).await.unwrap()).as_ref(), b"bar");
+    }
+
+    #[tokio::test]
+    async fn tears_down_on_malformed_reply() {
+        let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Write(b"WAT\r\n")]).await;
+        let client = Client::connect(addr).await.unwrap();
+        assert!(client.send(get(b"a")).await.is_err());
+    }
+}
