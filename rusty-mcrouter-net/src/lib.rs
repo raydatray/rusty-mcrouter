@@ -6,6 +6,8 @@ mod client;
 mod server;
 
 #[cfg(any(test, feature = "testing"))]
+pub mod mock_memcached;
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 pub use crate::backend::{Backend, BackendFactory, ClientFactory};
