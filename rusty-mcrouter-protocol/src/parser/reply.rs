@@ -179,7 +179,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
 
     use crate::{
-        fixtures::assert_reply_round_trips,
+        fixtures::{assert_reply_round_trips, value},
         reply::{Reply, Value},
         ProtocolError, Result,
     };
@@ -210,6 +210,18 @@ mod tests {
                     flags: 0,
                     data: Bytes::from_static(b"bar"),
                 }]
+            }
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_reply_accepts_cas_field_and_ignores_it() {
+        let (result, buf) = pr(b"VALUE key 0 3 99\r\nbar\r\nEND\r\n");
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Reply::Get {
+                hits: vec![value(b"key", 0, b"bar")]
             }
         );
         assert!(buf.is_empty());
