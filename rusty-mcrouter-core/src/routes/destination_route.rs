@@ -1,44 +1,44 @@
-use rusty_mcrouter_net::Client;
+use rusty_mcrouter_net::Backend;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use super::{Result, Route, RouteError};
 
-pub struct DestinationRoute {
-    client: Client,
+pub struct DestinationRoute<B: Backend> {
+    backend: B,
 }
 
-impl DestinationRoute {
-    pub fn new(client: Client) -> Self {
-        Self { client }
+impl<B: Backend> DestinationRoute<B> {
+    pub fn new(backend: B) -> Self {
+        Self { backend }
     }
 }
 
-impl Route for DestinationRoute {
+impl<B: Backend> Route for DestinationRoute<B> {
     async fn route(&self, req: Request) -> Result<Reply> {
-        self.client.send(req).await.map_err(RouteError::from)
+        self.backend.send(req).await.map_err(RouteError::from)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::req_get;
     use bytes::Bytes;
-    use rusty_mcrouter_net::testing::{mock_backend, pipelining_mock_backend};
+    use rusty_mcrouter_net::testing::MockBackend;
+    use rusty_mcrouter_net::NetError;
+    use rusty_mcrouter_protocol::{ProtocolError, Value};
     use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    fn req_get(key: &'static [u8]) -> Request {
-        Request::Get {
-            key: Bytes::from_static(key),
-        }
-    }
 
     #[tokio::test]
-    async fn destination_route_forwards_request_to_backend_and_returns_reply() {
-        let addr = mock_backend(b"VALUE foo 0 3\r\nbar\r\nEND\r\n").await;
-        let client = Client::connect(addr).await.unwrap();
-        let route = DestinationRoute::new(client);
+    async fn forwards_request_to_backend_and_returns_reply() {
+        let backend = MockBackend::replying(Reply::Get {
+            hits: vec![Value {
+                key: Bytes::from_static(b"foo"),
+                flags: 0,
+                data: Bytes::from_static(b"bar"),
+            }],
+        });
+        let route = DestinationRoute::<MockBackend>::new(backend.clone());
 
         let reply = route.route(req_get(b"foo")).await.unwrap();
         let Reply::Get { hits } = reply else {
@@ -47,45 +47,30 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].key.as_ref(), b"foo");
         assert_eq!(hits[0].data.as_ref(), b"bar");
+        assert_eq!(backend.received(), vec![req_get(b"foo")]);
     }
 
     #[tokio::test]
-    async fn destination_route_returns_empty_reply_on_miss() {
-        let addr = mock_backend(b"END\r\n").await;
-        let client = Client::connect(addr).await.unwrap();
-        let route = DestinationRoute::new(client);
-
+    async fn returns_empty_reply_on_miss() {
+        let route = DestinationRoute::<MockBackend>::new(MockBackend::miss());
         let reply = route.route(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get { hits: vec![] });
     }
 
     #[tokio::test]
-    async fn destination_route_propagates_backend_protocol_error() {
-        let addr = mock_backend(b"WAT\r\n").await;
-        let client = Client::connect(addr).await.unwrap();
-        let route = DestinationRoute::new(client);
+    async fn propagates_backend_protocol_error() {
+        let backend =
+            MockBackend::failing(NetError::Protocol(ProtocolError::Malformed("bad reply")));
+        let route = DestinationRoute::<MockBackend>::new(backend);
 
         let result = route.route(req_get(b"foo")).await;
         assert!(matches!(result, Err(RouteError::Backend(_))));
     }
 
     #[tokio::test]
-    async fn destination_route_forwards_set_request_and_returns_stored() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let received = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        let received_clone = Arc::clone(&received);
-
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 1024];
-            let n = stream.read(&mut buf).await.unwrap();
-            received_clone.lock().unwrap().extend_from_slice(&buf[..n]);
-            stream.write_all(b"STORED\r\n").await.unwrap();
-        });
-
-        let client = Client::connect(addr).await.unwrap();
-        let route = DestinationRoute::new(client);
+    async fn forwards_set_request_and_returns_stored() {
+        let backend = MockBackend::replying(Reply::Stored);
+        let route = DestinationRoute::<MockBackend>::new(backend.clone());
 
         let req = Request::Set {
             key: Bytes::from_static(b"foo"),
@@ -93,29 +78,23 @@ mod tests {
             exptime: 0,
             data: Bytes::from_static(b"bar"),
         };
-        let reply = route.route(req).await.unwrap();
+        let reply = route.route(req.clone()).await.unwrap();
         assert_eq!(reply, Reply::Stored);
-        assert_eq!(
-            received.lock().unwrap().as_slice(),
-            b"set foo 0 0 3\r\nbar\r\n"
-        );
+        assert_eq!(backend.received(), vec![req]);
     }
 
     #[tokio::test]
-    async fn destination_route_propagates_backend_server_error_as_reply() {
-        let addr = mock_backend(b"SERVER_ERROR oom\r\n").await;
-        let client = Client::connect(addr).await.unwrap();
-        let route = DestinationRoute::new(client);
-
+    async fn propagates_backend_server_error_as_reply() {
+        let route = DestinationRoute::<MockBackend>::new(MockBackend::replying(
+            Reply::ServerError(Bytes::from_static(b"oom")),
+        ));
         let reply = route.route(req_get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"oom")));
     }
 
     #[tokio::test]
-    async fn destination_route_can_be_shared_across_tasks_via_arc() {
-        let addr = mock_backend(b"END\r\n").await;
-        let client = Client::connect(addr).await.unwrap();
-        let route = Arc::new(DestinationRoute::new(client));
+    async fn can_be_shared_across_tasks_via_arc() {
+        let route = Arc::new(DestinationRoute::<MockBackend>::new(MockBackend::miss()));
 
         let route_clone = Arc::clone(&route);
         let result = tokio::spawn(async move { route_clone.route(req_get(b"foo")).await })
@@ -126,10 +105,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn destination_route_serves_concurrent_requests_without_locking() {
-        let addr = pipelining_mock_backend(b"END\r\n", 2).await;
-        let client = Client::connect(addr).await.unwrap();
-        let route = Arc::new(DestinationRoute::new(client));
+    async fn serves_concurrent_requests_without_locking() {
+        let backend = MockBackend::miss();
+        let route = Arc::new(DestinationRoute::<MockBackend>::new(backend.clone()));
 
         let r1 = {
             let route = Arc::clone(&route);
@@ -143,5 +121,6 @@ mod tests {
         let (a, b) = tokio::join!(r1, r2);
         assert_eq!(a.unwrap().unwrap(), Reply::Get { hits: vec![] });
         assert_eq!(b.unwrap().unwrap(), Reply::Get { hits: vec![] });
+        assert_eq!(backend.received().len(), 2);
     }
 }
