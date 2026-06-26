@@ -1,59 +1,114 @@
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// Single-shot mock backend.
-///
-/// Accepts one TCP connection, reads once, writes `reply` once, closes.
-/// Suitable only for tests that issue exactly one request.
-pub async fn mock_backend(reply: &'static [u8]) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0u8; 1024];
-        let _ = stream.read(&mut buf).await.unwrap();
-        stream.write_all(reply).await.unwrap();
-    });
-    addr
+use crate::{Backend, BackendFactory, NetError, Result};
+
+/// Recording in-process `Backend` double: records every request, answers with a
+/// scripted `Reply` (or `NetError` for the failure path). `Clone` shares one
+/// recorder via `Arc`; `Send + Sync` so route tests can spawn it.
+#[derive(Clone)]
+pub struct MockBackend {
+    inner: Arc<MockState>,
 }
 
-/// Mock backend that proves backend pipelining.
-///
-/// Reads the input stream until it has observed at least `n_requests`
-/// `\r\n` terminators, *then* writes `reply` exactly `n_requests` times.
-/// Any client that fails to pipeline will deadlock against this backend:
-/// the client waits for a reply, the backend waits for the next request.
-pub async fn pipelining_mock_backend(
-    reply: &'static [u8],
-    n_requests: usize,
-) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0u8; 4096];
-        let mut accumulated = Vec::<u8>::new();
+struct MockState {
+    response: MockResponse,
+    received: Mutex<Vec<Request>>,
+}
 
-        // Phase 1: read at least `n_requests` complete frames before replying.
-        while count_terminators(&accumulated) < n_requests {
-            let n = match stream.read(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => n,
-            };
-            accumulated.extend_from_slice(&buf[..n]);
-        }
+enum MockResponse {
+    Reply(Reply),
+    Error(NetError),
+}
 
-        // Phase 2: emit one reply per observed request, in order.
-        for _ in 0..n_requests {
-            if stream.write_all(reply).await.is_err() {
-                return;
-            }
+impl MockBackend {
+    pub fn replying(reply: Reply) -> Self {
+        Self {
+            inner: Arc::new(MockState {
+                response: MockResponse::Reply(reply),
+                received: Mutex::new(Vec::new()),
+            }),
         }
-    });
-    addr
+    }
+
+    pub fn failing(err: NetError) -> Self {
+        Self {
+            inner: Arc::new(MockState {
+                response: MockResponse::Error(err),
+                received: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    pub fn miss() -> Self {
+        Self::replying(Reply::Get { hits: vec![] })
+    }
+
+    pub fn received(&self) -> Vec<Request> {
+        self.inner.received.lock().unwrap().clone()
+    }
+}
+
+impl Backend for MockBackend {
+    async fn send(&self, req: Request) -> Result<Reply> {
+        self.inner.received.lock().unwrap().push(req);
+        match &self.inner.response {
+            MockResponse::Reply(reply) => Ok(reply.clone()),
+            MockResponse::Error(err) => Err(err.clone()),
+        }
+    }
+}
+
+/// A [`BackendFactory`] handing out [`MockBackend`]s without opening sockets;
+/// `failing(addr)` drives the builder's `ConnectFailed` path deterministically.
+#[derive(Clone, Default)]
+pub struct MockBackendFactory {
+    reply: Option<Reply>,
+    fail_addr: Option<String>,
+    connected: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockBackendFactory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn replying(reply: Reply) -> Self {
+        Self {
+            reply: Some(reply),
+            ..Self::default()
+        }
+    }
+
+    pub fn failing(addr: impl Into<String>) -> Self {
+        Self {
+            fail_addr: Some(addr.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn connected(&self) -> Vec<String> {
+        self.connected.lock().unwrap().clone()
+    }
+}
+
+impl BackendFactory for MockBackendFactory {
+    type Backend = MockBackend;
+
+    async fn connect(&self, addr: &str) -> Result<MockBackend> {
+        if self.fail_addr.as_deref() == Some(addr) {
+            return Err(NetError::ClientClosed);
+        }
+        self.connected.lock().unwrap().push(addr.to_string());
+        Ok(MockBackend::replying(
+            self.reply.clone().unwrap_or(Reply::Get { hits: vec![] }),
+        ))
+    }
 }
 
 /// One step in a [`scripted_backend`] script.
