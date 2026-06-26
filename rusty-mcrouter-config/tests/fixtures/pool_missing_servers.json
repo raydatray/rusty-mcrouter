@@ -1,0 +1,7 @@
+// hand-written: no mcrouter equivalent (negative case for ConfigError::Json on PoolConfig missing required `servers` field)
+{
+  "pools": {
+    "A": { "protocol": "ascii" }
+  },
+  "route": "PoolRoute|A"
+}
