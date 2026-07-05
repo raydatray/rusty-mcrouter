@@ -36,3 +36,42 @@ impl Proxy {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusty_mcrouter_core::{DestinationRoute, Route};
+    use rusty_mcrouter_net::testing::MockBackend;
+    use rusty_mcrouter_net::{NetError, TimeoutPhase};
+    use rusty_mcrouter_protocol::Request;
+    use tokio::sync::oneshot;
+    use tokio::task::LocalSet;
+
+    #[tokio::test]
+    async fn unrecovered_timeout_becomes_server_error_at_boundary() {
+        let route = DestinationRoute::new(MockBackend::failing(NetError::Timeout {
+            phase: TimeoutPhase::Reply,
+        }))
+        .into_dyn();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let req = ProxyRequest {
+            request: Request::Get {
+                key: Bytes::from_static(b"foo"),
+            },
+            reply_tx,
+        };
+
+        let reply = LocalSet::new()
+            .run_until(async move {
+                Proxy::spawn_request(route, req);
+                reply_rx.await.unwrap()
+            })
+            .await;
+
+        assert_eq!(
+            reply,
+            Reply::ServerError(Bytes::from_static(b"backend unavailable"))
+        );
+    }
+}
