@@ -201,4 +201,32 @@ mod tests {
             })
         ));
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_timeout_fires_when_backend_stops_reading() {
+        let addr = scripted_backend(vec![Step::Hang]).await;
+        let cfg = ClientConfig {
+            connect_timeout: None,
+            write_timeout: Some(Duration::from_millis(100)),
+            reply_timeout: None,
+            read_idle_timeout: None,
+            ..ClientConfig::default()
+        };
+        let client = Client::connect_with_config(addr, cfg).await.unwrap();
+
+        let payload_larger_than_socket_buffers = vec![b'x'; 16 * 1024 * 1024];
+        let big = Request::Set {
+            key: Bytes::from_static(b"k"),
+            flags: 0,
+            exptime: 0,
+            data: Bytes::from(payload_larger_than_socket_buffers),
+        };
+        let result = client.send(big).await;
+        assert!(matches!(
+            result,
+            Err(NetError::Timeout {
+                phase: TimeoutPhase::Write
+            })
+        ));
+    }
 }
