@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 
-use crate::{NetError, Result};
+use crate::{NetError, Result, TimeoutPhase};
 use bytes::BytesMut;
 use rusty_mcrouter_protocol::{parse_reply, ProtocolError, Reply};
+use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
@@ -22,6 +23,7 @@ pub(crate) struct ClientConnection {
     pending: VecDeque<oneshot::Sender<Result<Reply>>>,
     read_buf: BytesMut,
     write_buf: BytesMut,
+    write_timeout: Option<Duration>,
 }
 
 impl ClientConnection {
@@ -39,6 +41,7 @@ impl ClientConnection {
             pending: VecDeque::new(),
             read_buf: BytesMut::with_capacity(cfg.read_buf_initial_capacity),
             write_buf: BytesMut::new(),
+            write_timeout: cfg.write_timeout,
         }
     }
 
@@ -96,7 +99,18 @@ impl ClientConnection {
             self.pending.push_back(cmd.reply_tx);
         }
 
-        self.writer.write_all(&self.write_buf).await?;
+        let write_timeout = self.write_timeout;
+        let write = self.writer.write_all(&self.write_buf);
+        match write_timeout {
+            Some(dur) => {
+                tokio::time::timeout(dur, write)
+                    .await
+                    .map_err(|_| NetError::Timeout {
+                        phase: TimeoutPhase::Write,
+                    })??
+            }
+            None => write.await?,
+        }
         Ok(())
     }
 
