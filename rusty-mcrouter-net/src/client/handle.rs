@@ -256,4 +256,30 @@ mod tests {
         let c = client.send(get(b"k")).await;
         assert_eq!(hit_data(c.unwrap()).as_ref(), b"C");
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_idle_deadline_reclaims_a_silent_connection() {
+        let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Hang]).await;
+        let cfg = ClientConfig {
+            connect_timeout: None,
+            write_timeout: None,
+            reply_timeout: None,
+            read_idle_timeout: Some(Duration::from_millis(200)),
+            ..ClientConfig::default()
+        };
+        let client = Client::connect_with_config(addr, cfg).await.unwrap();
+
+        let outstanding = client.send(get(b"a")).await;
+        assert!(matches!(
+            outstanding,
+            Err(NetError::Timeout {
+                phase: TimeoutPhase::Reply
+            })
+        ));
+
+        assert!(matches!(
+            client.send(get(b"b")).await,
+            Err(NetError::ClientClosed)
+        ));
+    }
 }

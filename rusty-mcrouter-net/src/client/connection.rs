@@ -11,6 +11,7 @@ use tokio::{
         TcpStream,
     },
     sync::{mpsc, oneshot},
+    time::{sleep_until, Instant},
 };
 
 use super::command::ClientCommand;
@@ -24,6 +25,8 @@ pub(crate) struct ClientConnection {
     read_buf: BytesMut,
     write_buf: BytesMut,
     write_timeout: Option<Duration>,
+    read_idle_timeout: Option<Duration>,
+    read_deadline: Instant,
 }
 
 impl ClientConnection {
@@ -42,6 +45,8 @@ impl ClientConnection {
             read_buf: BytesMut::with_capacity(cfg.read_buf_initial_capacity),
             write_buf: BytesMut::new(),
             write_timeout: cfg.write_timeout,
+            read_idle_timeout: cfg.read_idle_timeout,
+            read_deadline: Instant::now(),
         }
     }
 
@@ -76,10 +81,19 @@ impl ClientConnection {
                         )));
                         return;
                     }
+                    self.arm_read_deadline();
                     if let Err(err) = self.deliver_replies() {
                         self.fail_all_pending(err);
                         return;
                     }
+                }
+                _ = sleep_until(self.read_deadline),
+                    if self.read_idle_timeout.is_some() && !self.pending.is_empty() =>
+                {
+                    self.fail_all_pending(NetError::Timeout {
+                        phase: TimeoutPhase::Reply,
+                    });
+                    return;
                 }
             }
         }
@@ -111,7 +125,14 @@ impl ClientConnection {
             }
             None => write.await?,
         }
+        self.arm_read_deadline();
         Ok(())
+    }
+
+    fn arm_read_deadline(&mut self) {
+        if let Some(dur) = self.read_idle_timeout {
+            self.read_deadline = Instant::now() + dur;
+        }
     }
 
     fn deliver_replies(&mut self) -> Result<()> {
