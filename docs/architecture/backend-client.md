@@ -25,8 +25,10 @@ as-built description of the current tree.
 - Replies are matched **FIFO** via a `pending: VecDeque<oneshot::Sender<...>>`.
 - On EOF / IO error / protocol error the connection **fails all pending waiters
   and exits** — no waiter hangs.
-- Implemented: handle + actor, pipelining, FIFO matching, fail-all. **Not yet:**
-  reconnect, timeouts, `maxInflight`, write batching (see
+- Implemented: handle + actor, pipelining, FIFO matching, fail-all, and
+  **timeouts** — connect / write / per-request reply, plus a connection-level
+  read-idle reclaim (see [`./timeouts.md`](./timeouts.md)). **Not yet:**
+  reconnect, `maxInflight`, write batching (see
   [not-yet-parity](#what-we-dont-do-yet-vs-mcrouter)).
 
 ---
@@ -262,18 +264,24 @@ reconnect** (see below).
 
 ## configuration
 
-`ClientConfig` (`rusty-mcrouter-net/src/client/config.rs`) has two knobs today:
+`ClientConfig` (`rusty-mcrouter-net/src/client/config.rs`) now has six knobs:
 
 ```rust
 pub struct ClientConfig {
-    pub max_pending: usize,            // bounds the command mpsc (default 1024)
-    pub read_buf_initial_capacity: usize, // default 4096
+    pub max_pending: usize,                   // bounds the command mpsc (default 1024)
+    pub read_buf_initial_capacity: usize,     // default 4096
+    pub connect_timeout: Option<Duration>,    // default Some(1000ms); None = disabled
+    pub write_timeout: Option<Duration>,      // default Some(1000ms)
+    pub reply_timeout: Option<Duration>,      // default Some(1000ms); mcrouter server_timeout_ms
+    pub read_idle_timeout: Option<Duration>,  // default Some(2000ms); keep >= reply_timeout
 }
 ```
 
 `max_pending` is the channel capacity, so it doubles as backpressure: when the
 queue is full, `Client::send` awaits on `tx.send` until the connection drains a
-slot.
+slot. The four `Option<Duration>` deadlines (`Some` by default, `None` to opt out
+— mcrouter's `0`-means-infinite) are documented in
+[`./timeouts.md`](./timeouts.md).
 
 ---
 
@@ -320,19 +328,24 @@ all deferred on purpose for now:
 
 - **No reconnect.** A terminal error ends the actor and the `Client` is closed
   for the process's life. mcrouter reconnects while requests remain pending.
-- **No timeouts.** No connect timeout, no per-request reply timeout. A backend
-  that accepts but never replies leaves `send` awaiting indefinitely (the read
-  branch only fires on data, and nothing arms a deadline). mcrouter has both,
-  plus tombstones to keep ASCII FIFO aligned after a timeout.
+- ~~**No timeouts.**~~ **Resolved** (this was the #1 gap). Connect, write, and
+  per-request reply timeouts now exist, plus a connection-level read-idle deadline
+  that reclaims a silently dead connection. A backend that accepts but never
+  replies now fails fast with `NetError::Timeout { phase }` instead of awaiting
+  forever, and the stateless `parse_reply` + a dropped-receiver tombstone keep
+  ASCII FIFO aligned after a timeout with no extra machinery. Full as-built:
+  [`./timeouts.md`](./timeouts.md).
 - **No `maxInflight`.** Only `max_pending` (queued, not-yet-written) is bounded;
   there is no cap on written-and-awaiting-reply. mcrouter throttles both.
 - **No write batching / `writev`.** `write_one` issues one `write_all` per
   request (there's a `// todo - writev` marker). mcrouter coalesces a turn's
   worth of requests into one scatter-gather write.
-- **Write-path head-of-line risk.** `write_one().await` holds the `select!`
-  branch, so while a `write_all` is blocked on TCP backpressure the read branch
-  can't drain replies — a possible deadlock window under large bidirectional
-  load. mcrouter schedules writes on a separate loop callback.
+- **Write-path head-of-line risk (now bounded).** A blocked `write_all` holds the
+  command `select!` branch, so while it's stuck on TCP backpressure the read
+  branch can't drain replies. The **write timeout** now caps this window — a stuck
+  write trips `Timeout { phase: Write }`, fails the connection, and exits rather
+  than starving reads forever; mcrouter additionally schedules writes on a
+  separate loop callback.
 - **`read_buf` never shrinks** after a large reply (minor; matters for
   long-lived connections).
 

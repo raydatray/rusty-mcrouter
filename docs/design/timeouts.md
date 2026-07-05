@@ -1,8 +1,8 @@
 # rusty-mcrouter client timeouts (design)
 
-> Status: **Proposed** (2026-06-26)
+> Status: **Implemented** (2026-06-30)
 > Mirrors: [`../mcrouter/timeouts.md`](../mcrouter/timeouts.md) — how mcrouter does it (reply timeout via `sendSync(req, timeout)` + `Baton::TimeoutHandler`, connect/write timeouts in `ConnectionOptions`, `timedOutInitializers_` for ASCII alignment, TKO, failover-on-`TIMEOUT`)
-> Implemented in: `../architecture/timeouts.md` — *not written yet* (as-built record follows implementation)
+> Implemented in: [`../architecture/timeouts.md`](../architecture/timeouts.md) — the as-built record (what shipped + where it diverged from this plan)
 > Builds on: [`../architecture/backend-client.md`](../architecture/backend-client.md) — the `Client` handle + `ClientConnection` actor we're arming deadlines on; its [*"what we don't do yet"*](../architecture/backend-client.md) section names "No timeouts" as the #1 gap this closes. Also [`./write-batching.md`](./write-batching.md) — the `write_batch` seam the write timeout wraps.
 > Unblocks: **`FailoverRoute` / TKO** — today `route_builder` returns `BuildError::RouteTypeNotImplemented { kind: "FailoverRoute" }`. A failover route can't be written until a slow/dead backend produces a *classifiable error*; that error is what this design manufactures.
 
