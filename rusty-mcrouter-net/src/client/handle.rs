@@ -229,4 +229,31 @@ mod tests {
             })
         ));
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_reply_to_timed_out_request_discarded_keeping_fifo_aligned() {
+        let addr = scripted_backend(vec![
+            Step::ReadRequests(1),
+            Step::Write(b"VALUE k 0 1\r\nA\r\nEND\r\n"),
+            Step::ReadRequests(3),
+            Step::Write(b"VALUE k 0 1\r\nB\r\nEND\r\n"),
+            Step::Write(b"VALUE k 0 1\r\nC\r\nEND\r\n"),
+        ])
+        .await;
+        // Under paused time a pending deadline always beats real loopback I/O, so a
+        // request that must SUCCEED cannot own a timer: A and C run timer-free
+        // (reply_timeout=None) and B is orphaned by an explicit timeout, which drops
+        // its receiver through the same path the client's internal reply timeout uses.
+        let cfg = reply_only_cfg(None);
+        let client = Client::connect_with_config(addr, cfg).await.unwrap();
+
+        let a = client.send(get(b"k")).await;
+        assert_eq!(hit_data(a.unwrap()).as_ref(), b"A");
+
+        let b = tokio::time::timeout(Duration::from_millis(100), client.send(get(b"k"))).await;
+        assert!(b.is_err());
+
+        let c = client.send(get(b"k")).await;
+        assert_eq!(hit_data(c.unwrap()).as_ref(), b"C");
+    }
 }
