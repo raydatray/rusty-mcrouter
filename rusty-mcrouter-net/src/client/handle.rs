@@ -1,8 +1,9 @@
 use super::command::ClientCommand;
 use super::config::ClientConfig;
 use super::connection::ClientConnection;
-use crate::{NetError, Result};
+use crate::{NetError, Result, TimeoutPhase};
 use rusty_mcrouter_protocol::{Reply, Request};
+use std::time::Duration;
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::sync::{mpsc, oneshot};
 
@@ -11,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Clone)]
 pub struct Client {
     tx: mpsc::Sender<ClientCommand>,
+    reply_timeout: Option<Duration>,
 }
 
 impl Client {
@@ -25,10 +27,25 @@ impl Client {
         let connection = ClientConnection::new(stream, rx, &cfg);
         tokio::spawn(connection.run());
 
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            reply_timeout: cfg.reply_timeout,
+        })
     }
 
     pub async fn send(&self, request: Request) -> Result<Reply> {
+        match self.reply_timeout {
+            Some(dur) => match tokio::time::timeout(dur, self.send_inner(request)).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(NetError::Timeout {
+                    phase: TimeoutPhase::Reply,
+                }),
+            },
+            None => self.send_inner(request).await,
+        }
+    }
+
+    async fn send_inner(&self, request: Request) -> Result<Reply> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.tx
@@ -62,6 +79,16 @@ mod tests {
         };
         assert_eq!(hits.len(), 1);
         hits.remove(0).data
+    }
+
+    fn reply_only_cfg(reply_timeout: Option<Duration>) -> ClientConfig {
+        ClientConfig {
+            connect_timeout: None,
+            write_timeout: None,
+            reply_timeout,
+            read_idle_timeout: None,
+            ..ClientConfig::default()
+        }
     }
 
     #[tokio::test]
@@ -120,5 +147,30 @@ mod tests {
         let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Write(b"WAT\r\n")]).await;
         let client = Client::connect(addr).await.unwrap();
         assert!(client.send(get(b"a")).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reply_timeout_fires_when_backend_never_replies() {
+        let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Hang]).await;
+        let cfg = reply_only_cfg(Some(Duration::from_millis(100)));
+        let client = Client::connect_with_config(addr, cfg).await.unwrap();
+
+        let result = client.send(get(b"a")).await;
+        assert!(matches!(
+            result,
+            Err(NetError::Timeout {
+                phase: TimeoutPhase::Reply
+            })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reply_timeout_none_leaves_send_pending() {
+        let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Hang]).await;
+        let cfg = reply_only_cfg(None);
+        let client = Client::connect_with_config(addr, cfg).await.unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), client.send(get(b"a"))).await;
+        assert!(outcome.is_err());
     }
 }

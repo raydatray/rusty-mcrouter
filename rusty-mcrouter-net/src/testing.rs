@@ -118,6 +118,8 @@ pub enum Step {
     Write(&'static [u8]),
     /// Write one byte at a time, forcing the client to reassemble across partial reads.
     WriteChunked(&'static [u8]),
+    /// Hold the connection open without replying, so the client's reply deadline fires.
+    Hang,
     Close,
 }
 
@@ -154,6 +156,7 @@ pub async fn scripted_backend(steps: Vec<Step>) -> SocketAddr {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                 }
+                Step::Hang => std::future::pending::<()>().await,
                 Step::Close => return,
             }
         }
