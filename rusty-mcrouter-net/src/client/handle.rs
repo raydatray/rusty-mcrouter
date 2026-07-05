@@ -21,7 +21,18 @@ impl Client {
     }
 
     pub async fn connect_with_config(addr: impl ToSocketAddrs, cfg: ClientConfig) -> Result<Self> {
-        let stream = TcpStream::connect(addr).await?;
+        let stream = match cfg.connect_timeout {
+            Some(dur) => match tokio::time::timeout(dur, TcpStream::connect(addr)).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(e)) => return Err(NetError::Io(e)),
+                Err(_elapsed) => {
+                    return Err(NetError::Timeout {
+                        phase: TimeoutPhase::Connect,
+                    })
+                }
+            },
+            None => TcpStream::connect(addr).await?,
+        };
         let (tx, rx) = mpsc::channel(cfg.max_pending);
 
         let connection = ClientConnection::new(stream, rx, &cfg);
@@ -172,5 +183,22 @@ mod tests {
 
         let outcome = tokio::time::timeout(Duration::from_secs(5), client.send(get(b"a"))).await;
         assert!(outcome.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_timeout_fires_on_black_holed_addr() {
+        // 192.0.2.0/24 is TEST-NET-1 (RFC 5737): routed to the default gateway and
+        // dropped, so the connect stays pending until the deadline elapses.
+        let cfg = ClientConfig {
+            connect_timeout: Some(Duration::from_millis(100)),
+            ..ClientConfig::default()
+        };
+        let result = Client::connect_with_config("192.0.2.1:12345", cfg).await;
+        assert!(matches!(
+            result.err(),
+            Some(NetError::Timeout {
+                phase: TimeoutPhase::Connect
+            })
+        ));
     }
 }
