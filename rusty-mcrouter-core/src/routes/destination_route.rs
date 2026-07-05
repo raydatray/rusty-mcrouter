@@ -25,7 +25,7 @@ mod tests {
     use crate::test_support::req_get;
     use bytes::Bytes;
     use rusty_mcrouter_net::testing::MockBackend;
-    use rusty_mcrouter_net::NetError;
+    use rusty_mcrouter_net::{NetError, TimeoutPhase};
     use rusty_mcrouter_protocol::{ProtocolError, Value};
     use std::sync::Arc;
 
@@ -65,6 +65,22 @@ mod tests {
 
         let result = route.route(req_get(b"foo")).await;
         assert!(matches!(result, Err(RouteError::Backend(_))));
+    }
+
+    #[tokio::test]
+    async fn propagates_backend_timeout_as_route_error() {
+        let backend = MockBackend::failing(NetError::Timeout {
+            phase: TimeoutPhase::Reply,
+        });
+        let route = DestinationRoute::<MockBackend>::new(backend);
+
+        let result = route.route(req_get(b"foo")).await;
+        assert!(matches!(
+            result,
+            Err(RouteError::Backend(NetError::Timeout {
+                phase: TimeoutPhase::Reply
+            }))
+        ));
     }
 
     #[tokio::test]
