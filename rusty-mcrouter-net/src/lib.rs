@@ -14,6 +14,13 @@ pub use crate::backend::{Backend, BackendFactory, ClientFactory};
 pub use crate::client::{Client, ClientConfig};
 pub use crate::server::Server;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeoutPhase {
+    Connect,
+    Write,
+    Reply,
+}
+
 #[derive(Debug, Error)]
 pub enum NetError {
     #[error("io error: {0}")]
@@ -30,6 +37,9 @@ pub enum NetError {
 
     #[error("backend client closed")]
     ClientClosed,
+
+    #[error("{phase:?} timed out")]
+    Timeout { phase: TimeoutPhase },
 }
 
 // todo - revisit this error type because fucking std::io::Error is not clone
@@ -41,6 +51,7 @@ impl Clone for NetError {
             NetError::NoAddresses => NetError::NoAddresses,
             NetError::WorkerClosed { worker } => NetError::WorkerClosed { worker: *worker },
             NetError::ClientClosed => NetError::ClientClosed,
+            NetError::Timeout { phase } => NetError::Timeout { phase: *phase },
         }
     }
 }
