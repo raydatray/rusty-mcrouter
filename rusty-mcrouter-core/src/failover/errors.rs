@@ -24,7 +24,7 @@ fn is_failover_error(result: &Result<Reply>) -> bool {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct FailoverErrors {
+pub struct FailoverErrors {
     gets: Option<Vec<FailoverErrorKind>>,
     updates: Option<Vec<FailoverErrorKind>>,
     deletes: Option<Vec<FailoverErrorKind>>,
