@@ -7,7 +7,7 @@ mod route;
 
 pub use crate::document::{ConfigDocument, PrefixedRoute, RouteEntry};
 pub use crate::pool::PoolConfig;
-pub use crate::route::{HashConfig, HashFunc, RouteHandleConfig};
+pub use crate::route::{FailoverErrorKind, HashConfig, HashFunc, RouteHandleConfig};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
