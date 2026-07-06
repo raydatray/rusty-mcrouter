@@ -1,3 +1,4 @@
+mod failover;
 mod route_builder;
 mod routes;
 mod selectors;
