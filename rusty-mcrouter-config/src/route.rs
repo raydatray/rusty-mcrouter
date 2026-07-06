@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use serde::de::{self, Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
@@ -35,6 +37,34 @@ pub enum HashFunc {
 pub struct HashConfig {
     pub func: HashFunc,
     pub salt: Option<String>,
+}
+
+/// Failover-eligible conditions and the `failover_errors` config vocabulary (parsed
+/// alias-aware via [`FromStr`]). Covers only what rusty can observe today (transport
+/// errors + a backend `SERVER_ERROR`); mcrouter codes with no rusty analogue
+/// (`busy`/`tko`/`shutdown`) are rejected rather than silently ignored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailoverErrorKind {
+    Timeout,
+    Io,
+    Protocol,
+    ClientClosed,
+    ServerError,
+}
+
+impl FromStr for FailoverErrorKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "timeout" => Ok(FailoverErrorKind::Timeout),
+            "connect_error" | "io_error" => Ok(FailoverErrorKind::Io),
+            "protocol_error" => Ok(FailoverErrorKind::Protocol),
+            "client_closed" => Ok(FailoverErrorKind::ClientClosed),
+            "server_error" | "remote_error" => Ok(FailoverErrorKind::ServerError),
+            other => Err(format!("unknown failover error `{other}`")),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for RouteHandleConfig {
@@ -346,5 +376,39 @@ mod tests {
         assert!(serde_json::from_str::<RouteHandleConfig>("42").is_err());
         assert!(serde_json::from_str::<RouteHandleConfig>("[]").is_err());
         assert!(serde_json::from_str::<RouteHandleConfig>("true").is_err());
+    }
+
+    #[test]
+    fn failover_error_kind_parses_canonical_names() {
+        assert_eq!("timeout".parse::<FailoverErrorKind>(), Ok(FailoverErrorKind::Timeout));
+        assert_eq!(
+            "protocol_error".parse::<FailoverErrorKind>(),
+            Ok(FailoverErrorKind::Protocol)
+        );
+        assert_eq!(
+            "client_closed".parse::<FailoverErrorKind>(),
+            Ok(FailoverErrorKind::ClientClosed)
+        );
+    }
+
+    #[test]
+    fn failover_error_kind_accepts_aliases() {
+        assert_eq!("connect_error".parse::<FailoverErrorKind>(), Ok(FailoverErrorKind::Io));
+        assert_eq!("io_error".parse::<FailoverErrorKind>(), Ok(FailoverErrorKind::Io));
+        assert_eq!(
+            "server_error".parse::<FailoverErrorKind>(),
+            Ok(FailoverErrorKind::ServerError)
+        );
+        assert_eq!(
+            "remote_error".parse::<FailoverErrorKind>(),
+            Ok(FailoverErrorKind::ServerError)
+        );
+    }
+
+    #[test]
+    fn failover_error_kind_rejects_unknown_names() {
+        assert!("tko".parse::<FailoverErrorKind>().is_err());
+        assert!("busy".parse::<FailoverErrorKind>().is_err());
+        assert!("".parse::<FailoverErrorKind>().is_err());
     }
 }
