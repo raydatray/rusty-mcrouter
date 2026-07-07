@@ -198,6 +198,14 @@ impl MockMcStore {
 }
 
 pub async fn spawn_mock_memcached() -> SocketAddr {
+    spawn_mock(false).await
+}
+
+pub async fn spawn_failing_mock_memcached() -> SocketAddr {
+    spawn_mock(true).await
+}
+
+async fn spawn_mock(always_server_error: bool) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let store = Arc::new(Mutex::new(MockMcStore::default()));
@@ -209,7 +217,7 @@ pub async fn spawn_mock_memcached() -> SocketAddr {
             };
             let store = Arc::clone(&store);
             tokio::spawn(async move {
-                handle_connection(stream, store).await;
+                handle_connection(stream, store, always_server_error).await;
             });
         }
     });
@@ -217,7 +225,11 @@ pub async fn spawn_mock_memcached() -> SocketAddr {
     addr
 }
 
-async fn handle_connection(mut stream: TcpStream, store: Arc<Mutex<MockMcStore>>) {
+async fn handle_connection(
+    mut stream: TcpStream,
+    store: Arc<Mutex<MockMcStore>>,
+    always_server_error: bool,
+) {
     let mut input = BytesMut::with_capacity(4096);
     let mut scratch = [0; 4096];
 
@@ -234,7 +246,9 @@ async fn handle_connection(mut stream: TcpStream, store: Arc<Mutex<MockMcStore>>
                 Err(_) => return,
             };
 
-            let reply = {
+            let reply = if always_server_error {
+                Reply::ServerError(Bytes::from_static(b"primary down"))
+            } else {
                 let mut store = store.lock().unwrap();
                 apply_parsed(&mut store, parsed)
             };
