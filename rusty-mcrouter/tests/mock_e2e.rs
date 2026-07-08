@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use rusty_mcrouter_net::mock_memcached::spawn_mock_memcached;
+use rusty_mcrouter_net::mock_memcached::{spawn_failing_mock_memcached, spawn_mock_memcached};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
@@ -13,25 +13,9 @@ struct Stack {
     _config_path: PathBuf,
 }
 
-async fn start_stack() -> Stack {
-    let backend_addr = spawn_mock_memcached().await;
-
-    let mut seed = TcpStream::connect(backend_addr).await.unwrap();
-    seed.write_all(b"set seeded_foo 0 0 3\r\nbar\r\n").await.unwrap();
-    let mut buf = [0u8; 32];
-    let n = seed.read(&mut buf).await.unwrap();
-    assert_eq!(&buf[..n], b"STORED\r\n");
-    drop(seed);
-
-    let config_path = std::env::temp_dir().join(format!(
-        "rusty-mcrouter-mock-e2e-{}.json",
-        backend_addr.port()
-    ));
-    let config_body = format!(
-        r#"{{ "pools": {{ "memcached": {{ "servers": ["{}"] }} }}, "route": "PoolRoute|memcached" }}"#,
-        backend_addr
-    );
-    std::fs::write(&config_path, &config_body).unwrap();
+async fn start_router(config_body: &str, tag: u16) -> Stack {
+    let config_path = std::env::temp_dir().join(format!("rusty-mcrouter-mock-e2e-{tag}.json"));
+    std::fs::write(&config_path, config_body).unwrap();
 
     let mut router = Command::new(env!("CARGO_BIN_EXE_rusty-mcrouter"))
         .arg("--config")
@@ -63,6 +47,23 @@ async fn start_stack() -> Stack {
         _router: router,
         _config_path: config_path,
     }
+}
+
+async fn start_stack() -> Stack {
+    let backend_addr = spawn_mock_memcached().await;
+
+    let mut seed = TcpStream::connect(backend_addr).await.unwrap();
+    seed.write_all(b"set seeded_foo 0 0 3\r\nbar\r\n").await.unwrap();
+    let mut buf = [0u8; 32];
+    let n = seed.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"STORED\r\n");
+    drop(seed);
+
+    let config_body = format!(
+        r#"{{ "pools": {{ "memcached": {{ "servers": ["{}"] }} }}, "route": "PoolRoute|memcached" }}"#,
+        backend_addr
+    );
+    start_router(&config_body, backend_addr.port()).await
 }
 
 async fn round_trip(addr: SocketAddr, request: &[u8]) -> Vec<u8> {
@@ -130,4 +131,25 @@ async fn multiget_returns_only_hits() {
     let fx = start_stack().await;
     let resp = round_trip(fx.router_addr, b"get seeded_foo mock_e2e_multi_miss\r\n").await;
     assert_eq!(resp, b"VALUE seeded_foo 0 3\r\nbar\r\nEND\r\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failover_from_failing_primary_serves_from_secondary() {
+    let primary = spawn_failing_mock_memcached().await;
+    let secondary = spawn_mock_memcached().await;
+
+    let mut seed = TcpStream::connect(secondary).await.unwrap();
+    seed.write_all(b"set failover_k 0 0 6\r\nbackup\r\n").await.unwrap();
+    let mut buf = [0u8; 32];
+    let n = seed.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"STORED\r\n");
+    drop(seed);
+
+    let config_body = format!(
+        r#"{{ "pools": {{ "primary": {{ "servers": ["{primary}"] }}, "secondary": {{ "servers": ["{secondary}"] }} }}, "route": {{ "type": "FailoverRoute", "children": ["PoolRoute|primary", "PoolRoute|secondary"] }} }}"#
+    );
+    let fx = start_router(&config_body, primary.port()).await;
+
+    let resp = round_trip(fx.router_addr, b"get failover_k\r\n").await;
+    assert_eq!(resp, b"VALUE failover_k 0 6\r\nbackup\r\nEND\r\n");
 }
