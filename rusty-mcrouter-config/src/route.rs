@@ -14,6 +14,11 @@ pub enum RouteHandleConfig {
         pool: String,
         hash: HashConfig,
     },
+    FailoverRoute {
+        children: Vec<RouteHandleConfig>,
+        failover_errors: FailoverErrorsConfig,
+        failover_policy: FailoverPolicyConfig,
+    },
     NullRoute,
     ErrorRoute {
         message: Option<String>,
@@ -23,6 +28,27 @@ pub enum RouteHandleConfig {
     Unknown {
         kind: String,
         fields: Map<String, Value>,
+    },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum FailoverErrorsConfig {
+    #[default]
+    Default,
+    All(Vec<FailoverErrorKind>),
+    PerOp {
+        gets: Option<Vec<FailoverErrorKind>>,
+        updates: Option<Vec<FailoverErrorKind>>,
+        deletes: Option<Vec<FailoverErrorKind>>,
+    },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum FailoverPolicyConfig {
+    #[default]
+    InOrder,
+    LeastFailures {
+        max_tries: usize,
     },
 }
 
@@ -138,6 +164,16 @@ fn parse_object_form(mut map: Map<String, Value>) -> Result<RouteHandleConfig, S
             let hash = parse_hash(&mut map)?;
             Ok(RouteHandleConfig::PoolRoute { pool, hash })
         }
+        "FailoverRoute" => {
+            let children = parse_failover_children(&mut map)?;
+            let failover_errors = parse_failover_errors(&mut map)?;
+            let failover_policy = parse_failover_policy(&mut map)?;
+            Ok(RouteHandleConfig::FailoverRoute {
+                children,
+                failover_errors,
+                failover_policy,
+            })
+        }
         _ => Ok(RouteHandleConfig::Unknown { kind, fields: map }),
     }
 }
@@ -171,6 +207,92 @@ fn parse_hash_func(name: &str) -> Result<HashFunc, String> {
         "Ch3" => Ok(HashFunc::Ch3),
         "Crc32" => Ok(HashFunc::Crc32),
         other => Err(format!("unknown hash_func `{}`", other)),
+    }
+}
+
+fn parse_failover_children(map: &mut Map<String, Value>) -> Result<Vec<RouteHandleConfig>, String> {
+    match map.remove("children") {
+        Some(Value::Array(items)) => items
+            .into_iter()
+            .map(|item| serde_json::from_value(item).map_err(|e| e.to_string()))
+            .collect(),
+        Some(other) => Err(format!(
+            "FailoverRoute `children` must be an array, got {}",
+            other
+        )),
+        None => Err("FailoverRoute missing required field `children`".to_string()),
+    }
+}
+
+fn parse_failover_errors(map: &mut Map<String, Value>) -> Result<FailoverErrorsConfig, String> {
+    match map.remove("failover_errors") {
+        None => Ok(FailoverErrorsConfig::Default),
+        Some(Value::Array(names)) => Ok(FailoverErrorsConfig::All(parse_error_names(names)?)),
+        Some(Value::Object(mut obj)) => Ok(FailoverErrorsConfig::PerOp {
+            gets: parse_optional_error_names(&mut obj, "gets")?,
+            updates: parse_optional_error_names(&mut obj, "updates")?,
+            deletes: parse_optional_error_names(&mut obj, "deletes")?,
+        }),
+        Some(other) => Err(format!(
+            "`failover_errors` must be an array or object, got {}",
+            other
+        )),
+    }
+}
+
+fn parse_optional_error_names(
+    obj: &mut Map<String, Value>,
+    key: &str,
+) -> Result<Option<Vec<FailoverErrorKind>>, String> {
+    match obj.remove(key) {
+        None => Ok(None),
+        Some(Value::Array(names)) => Ok(Some(parse_error_names(names)?)),
+        Some(other) => Err(format!(
+            "`failover_errors.{}` must be an array, got {}",
+            key, other
+        )),
+    }
+}
+
+fn parse_error_names(names: Vec<Value>) -> Result<Vec<FailoverErrorKind>, String> {
+    names
+        .into_iter()
+        .map(|value| match value {
+            Value::String(name) => name.parse::<FailoverErrorKind>(),
+            other => Err(format!("failover error name must be a string, got {}", other)),
+        })
+        .collect()
+}
+
+fn parse_failover_policy(map: &mut Map<String, Value>) -> Result<FailoverPolicyConfig, String> {
+    let mut obj = match map.remove("failover_policy") {
+        None => return Ok(FailoverPolicyConfig::InOrder),
+        Some(Value::Object(obj)) => obj,
+        Some(other) => return Err(format!("`failover_policy` must be an object, got {}", other)),
+    };
+    let policy_type = match obj.remove("type") {
+        Some(Value::String(s)) => s,
+        Some(other) => {
+            return Err(format!("`failover_policy.type` must be a string, got {}", other))
+        }
+        None => return Err("`failover_policy` object missing `type`".to_string()),
+    };
+    match policy_type.as_str() {
+        "InOrderPolicy" => Ok(FailoverPolicyConfig::InOrder),
+        "LeastFailuresPolicy" => {
+            let max_tries = match obj.remove("max_tries") {
+                Some(Value::Number(n)) => n
+                    .as_u64()
+                    .and_then(|v| usize::try_from(v).ok())
+                    .ok_or_else(|| "`max_tries` must be a non-negative integer".to_string())?,
+                Some(other) => {
+                    return Err(format!("`max_tries` must be an integer, got {}", other))
+                }
+                None => return Err("LeastFailuresPolicy requires `max_tries`".to_string()),
+            };
+            Ok(FailoverPolicyConfig::LeastFailures { max_tries })
+        }
+        other => Err(format!("unknown failover_policy type `{}`", other)),
     }
 }
 
@@ -410,5 +532,127 @@ mod tests {
         assert!("tko".parse::<FailoverErrorKind>().is_err());
         assert!("busy".parse::<FailoverErrorKind>().is_err());
         assert!("".parse::<FailoverErrorKind>().is_err());
+    }
+
+    #[test]
+    fn failover_route_parses_children_and_defaults() {
+        let r = route_handle(r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"] }"#);
+        let RouteHandleConfig::FailoverRoute {
+            children,
+            failover_errors,
+            failover_policy,
+        } = r
+        else {
+            panic!("expected FailoverRoute, got {r:?}");
+        };
+        assert_eq!(children.len(), 2);
+        assert_eq!(failover_errors, FailoverErrorsConfig::Default);
+        assert_eq!(failover_policy, FailoverPolicyConfig::InOrder);
+    }
+
+    #[test]
+    fn failover_route_missing_children_is_error() {
+        let err = serde_json::from_str::<RouteHandleConfig>(r#"{ "type": "FailoverRoute" }"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("children"), "got: {err}");
+    }
+
+    #[test]
+    fn failover_route_non_array_children_is_error() {
+        let err = serde_json::from_str::<RouteHandleConfig>(
+            r#"{ "type": "FailoverRoute", "children": "nope" }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("children"), "got: {err}");
+    }
+
+    #[test]
+    fn failover_route_nests() {
+        let r = route_handle(
+            r#"{ "type": "FailoverRoute", "children": [ { "type": "FailoverRoute", "children": ["PoolRoute|A"] }, "PoolRoute|B" ] }"#,
+        );
+        let RouteHandleConfig::FailoverRoute { children, .. } = r else {
+            panic!("expected FailoverRoute");
+        };
+        assert!(matches!(
+            children.first(),
+            Some(RouteHandleConfig::FailoverRoute { .. })
+        ));
+    }
+
+    #[test]
+    fn failover_errors_array_form() {
+        let r = route_handle(
+            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": ["timeout", "server_error"] }"#,
+        );
+        let RouteHandleConfig::FailoverRoute { failover_errors, .. } = r else {
+            panic!("expected FailoverRoute");
+        };
+        assert_eq!(
+            failover_errors,
+            FailoverErrorsConfig::All(vec![
+                FailoverErrorKind::Timeout,
+                FailoverErrorKind::ServerError
+            ])
+        );
+    }
+
+    #[test]
+    fn failover_errors_object_form_with_missing_keys() {
+        let r = route_handle(
+            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": { "updates": [] } }"#,
+        );
+        let RouteHandleConfig::FailoverRoute { failover_errors, .. } = r else {
+            panic!("expected FailoverRoute");
+        };
+        assert_eq!(
+            failover_errors,
+            FailoverErrorsConfig::PerOp {
+                gets: None,
+                updates: Some(vec![]),
+                deletes: None,
+            }
+        );
+    }
+
+    #[test]
+    fn failover_errors_unknown_name_is_error() {
+        let err = serde_json::from_str::<RouteHandleConfig>(
+            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": ["tko"] }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("tko"), "got: {err}");
+    }
+
+    #[test]
+    fn failover_policy_least_failures() {
+        let r = route_handle(
+            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_policy": { "type": "LeastFailuresPolicy", "max_tries": 3 } }"#,
+        );
+        let RouteHandleConfig::FailoverRoute { failover_policy, .. } = r else {
+            panic!("expected FailoverRoute");
+        };
+        assert_eq!(
+            failover_policy,
+            FailoverPolicyConfig::LeastFailures { max_tries: 3 }
+        );
+    }
+
+    #[test]
+    fn failover_policy_least_failures_requires_max_tries() {
+        let err = serde_json::from_str::<RouteHandleConfig>(
+            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_policy": { "type": "LeastFailuresPolicy" } }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("max_tries"), "got: {err}");
+    }
+
+    #[test]
+    fn failover_policy_unknown_type_is_error() {
+        let err = serde_json::from_str::<RouteHandleConfig>(
+            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_policy": { "type": "Nope" } }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Nope"), "got: {err}");
     }
 }
