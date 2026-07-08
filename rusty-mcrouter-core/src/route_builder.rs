@@ -1,11 +1,15 @@
 use std::{collections::BTreeMap, rc::Rc};
 
-use rusty_mcrouter_config::{ConfigDocument, HashConfig, HashFunc, RouteEntry, RouteHandleConfig};
+use rusty_mcrouter_config::{
+    ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, RouteEntry,
+    RouteHandleConfig,
+};
 use rusty_mcrouter_net::{Backend, BackendFactory, NetError};
 use thiserror::Error;
 
 use crate::{
-    routes::{DestinationRoute, DynRoute, ErrorRoute, NullRoute, PoolRoute, Route},
+    failover::{FailoverErrors, FailoverPolicy, InOrderPolicy, LeastFailuresPolicy},
+    routes::{DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, Route},
     selectors::{Ch3, Crc32, Salted, Selector, SelectorBuildError},
 };
 
@@ -16,6 +20,9 @@ pub enum BuildError {
 
     #[error("pool `{name}` has zero servers; refusing to construct empty PoolRoute")]
     EmptyPool { name: String },
+
+    #[error("FailoverRoute has zero children; refusing to construct an empty failover")]
+    EmptyFailover,
 
     #[error("failed to connect to backend `{server}` of pool `{pool}`: {source}")]
     ConnectFailed {
@@ -85,6 +92,22 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
             RouteHandleConfig::PoolRoute { pool, hash } => {
                 let destinations = self.get_or_build_destinations(pool).await?;
                 build_pool_handle(pool, hash, destinations)
+            }
+
+            RouteHandleConfig::FailoverRoute {
+                children,
+                failover_errors,
+                failover_policy,
+            } => {
+                let mut built = Vec::with_capacity(children.len());
+                for child in children {
+                    built.push(Box::pin(self.build_handle(child)).await?);
+                }
+                let errors = build_failover_errors(failover_errors);
+                let policy = build_failover_policy(failover_policy, built.len());
+                FailoverRoute::new(built, errors, policy)
+                    .map(Route::into_dyn)
+                    .ok_or(BuildError::EmptyFailover)
             }
 
             RouteHandleConfig::Reference(name) => match name.as_str() {
@@ -180,6 +203,29 @@ fn build_selector(hash: &HashConfig, n: usize) -> Result<Box<dyn Selector>> {
     })
 }
 
+fn build_failover_errors(cfg: &FailoverErrorsConfig) -> FailoverErrors {
+    match cfg {
+        FailoverErrorsConfig::Default => FailoverErrors::default(),
+        FailoverErrorsConfig::All(kinds) => {
+            FailoverErrors::new(Some(kinds.clone()), Some(kinds.clone()), Some(kinds.clone()))
+        }
+        FailoverErrorsConfig::PerOp {
+            gets,
+            updates,
+            deletes,
+        } => FailoverErrors::new(gets.clone(), updates.clone(), deletes.clone()),
+    }
+}
+
+fn build_failover_policy(cfg: &FailoverPolicyConfig, n: usize) -> Box<dyn FailoverPolicy> {
+    match cfg {
+        FailoverPolicyConfig::InOrder => Box::new(InOrderPolicy),
+        FailoverPolicyConfig::LeastFailures { max_tries } => {
+            Box::new(LeastFailuresPolicy::new(n, *max_tries))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,22 +308,57 @@ mod tests {
 
     #[tokio::test]
     async fn errors_on_unknown_object_route_type() {
-        let cfg = parse(r#"{"route": {"type": "FailoverRoute", "children": []}}"#).unwrap();
+        let cfg = parse(r#"{"route": {"type": "AllSyncRoute", "children": []}}"#).unwrap();
         let err = expect_err(&cfg, &MockBackendFactory::new()).await;
         assert!(matches!(
             err,
-            BuildError::RouteTypeNotImplemented { ref kind } if kind == "FailoverRoute"
+            BuildError::RouteTypeNotImplemented { ref kind } if kind == "AllSyncRoute"
         ));
     }
 
     #[tokio::test]
     async fn errors_on_unknown_shorthand_kind() {
-        let cfg = parse(r#"{"route": "FailoverRoute|x"}"#).unwrap();
+        let cfg = parse(r#"{"route": "AllSyncRoute|x"}"#).unwrap();
         let err = expect_err(&cfg, &MockBackendFactory::new()).await;
         assert!(matches!(
             err,
-            BuildError::RouteTypeNotImplemented { ref kind } if kind == "FailoverRoute"
+            BuildError::RouteTypeNotImplemented { ref kind } if kind == "AllSyncRoute"
         ));
+    }
+
+    #[tokio::test]
+    async fn errors_on_empty_failover_children() {
+        let cfg = parse(r#"{"route": {"type": "FailoverRoute", "children": []}}"#).unwrap();
+        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
+        assert!(matches!(err, BuildError::EmptyFailover));
+    }
+
+    #[tokio::test]
+    async fn builds_failover_route_with_pool_children() {
+        let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"]}}"#;
+        let cfg = parse(json).unwrap();
+        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
+        assert_eq!(reply, Reply::Get { hits: vec![] });
+    }
+
+    #[tokio::test]
+    async fn builds_nested_failover() {
+        let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": [{"type": "FailoverRoute", "children": ["PoolRoute|A"]}, "PoolRoute|B"]}}"#;
+        let cfg = parse(json).unwrap();
+        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
+        assert_eq!(reply, Reply::Get { hits: vec![] });
+    }
+
+    #[tokio::test]
+    async fn failover_route_surfaces_last_error_when_all_children_fail() {
+        let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"]}}"#;
+        let cfg = parse(json).unwrap();
+        let factory = MockBackendFactory::replying(Reply::ServerError(Bytes::from_static(b"down")));
+        let route = build_route(&cfg, &factory).await.unwrap();
+        let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
+        assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"down")));
     }
 
     #[tokio::test]
