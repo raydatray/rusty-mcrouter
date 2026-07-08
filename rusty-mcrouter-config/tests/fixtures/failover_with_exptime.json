@@ -1,0 +1,15 @@
+// source: mcrouter/test/test_get_failover.json
+// note: FailoverWithExptimeRoute is recognized-but-unimplemented, so it parses
+// as RouteHandleConfig::Unknown until the ModifyExptimeRoute seam lands.
+{
+  "pools": {
+    "A.gut": { "servers": [ "localhost:12345" ] },
+    "A.wildcard": { "servers": [ "localhost:12346" ] }
+  },
+  "route": {
+    "type": "FailoverWithExptimeRoute",
+    "failover": "PoolRoute|A.gut",
+    "normal": "PoolRoute|A.wildcard",
+    "failover_exptime": 3
+  }
+}
