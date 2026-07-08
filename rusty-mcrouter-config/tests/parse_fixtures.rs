@@ -1,5 +1,6 @@
 use rusty_mcrouter_config::{
-    parse_file, ConfigDocument, ConfigError, HashConfig, RouteEntry, RouteHandleConfig,
+    parse_file, ConfigDocument, ConfigError, FailoverErrorKind, FailoverErrorsConfig,
+    FailoverPolicyConfig, HashConfig, RouteEntry, RouteHandleConfig,
 };
 use std::path::PathBuf;
 
@@ -180,4 +181,71 @@ fn pool_missing_servers_yields_json_error() {
 fn route_invalid_type_yields_json_error() {
     let err = parse_err("route_invalid_type.json");
     assert!(matches!(err, ConfigError::Json(_)), "got {err:?}");
+}
+
+#[test]
+fn failover_least_failures_parses_children_and_policy() {
+    let doc = parse_ok("failover_least_failures.json");
+    assert_eq!(doc.pools.len(), 4);
+    let RouteEntry::Single(RouteHandleConfig::FailoverRoute {
+        children,
+        failover_errors,
+        failover_policy,
+    }) = &doc.route
+    else {
+        panic!("expected FailoverRoute, got {:?}", doc.route);
+    };
+    assert_eq!(children.len(), 4);
+    assert_eq!(*failover_errors, FailoverErrorsConfig::Default);
+    assert_eq!(
+        *failover_policy,
+        FailoverPolicyConfig::LeastFailures { max_tries: 3 }
+    );
+}
+
+#[test]
+fn failover_custom_errors_parses_per_op_lists() {
+    let doc = parse_ok("failover_custom_errors.json");
+    let RouteEntry::Single(RouteHandleConfig::FailoverRoute { failover_errors, .. }) = &doc.route
+    else {
+        panic!("expected FailoverRoute, got {:?}", doc.route);
+    };
+    assert_eq!(
+        *failover_errors,
+        FailoverErrorsConfig::PerOp {
+            gets: Some(vec![FailoverErrorKind::ServerError]),
+            updates: Some(vec![]),
+            deletes: None,
+        }
+    );
+}
+
+#[test]
+fn failover_limit_parses_and_tolerates_unsupported_rate_limiter() {
+    let doc = parse_ok("failover_limit.json");
+    let RouteEntry::Single(RouteHandleConfig::FailoverRoute {
+        children,
+        failover_errors,
+        failover_policy,
+    }) = &doc.route
+    else {
+        panic!("expected FailoverRoute, got {:?}", doc.route);
+    };
+    assert_eq!(children.len(), 2);
+    assert_eq!(*failover_errors, FailoverErrorsConfig::Default);
+    assert_eq!(*failover_policy, FailoverPolicyConfig::InOrder);
+    assert!(matches!(
+        children.first(),
+        Some(RouteHandleConfig::ErrorRoute { .. })
+    ));
+}
+
+#[test]
+fn failover_with_exptime_route_is_unknown_pending_support() {
+    let doc = parse_ok("failover_with_exptime.json");
+    assert_eq!(doc.pools.len(), 2);
+    let RouteEntry::Single(RouteHandleConfig::Unknown { kind, .. }) = &doc.route else {
+        panic!("expected Unknown FailoverWithExptimeRoute, got {:?}", doc.route);
+    };
+    assert_eq!(kind, "FailoverWithExptimeRoute");
 }
