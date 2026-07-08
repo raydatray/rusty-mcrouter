@@ -1,0 +1,15 @@
+// source: mcrouter/test/test_custom_failover_override.json
+{
+  "pools": {
+    "A.wildcard": { "servers": [ "localhost:12345" ] },
+    "B.wildcard": { "servers": [ "localhost:12346" ] }
+  },
+  "route": {
+    "type": "FailoverRoute",
+    "children": ["PoolRoute|A.wildcard", "PoolRoute|B.wildcard"],
+    "failover_errors": {
+      "gets": ["remote_error"],
+      "updates": []
+    }
+  }
+}
