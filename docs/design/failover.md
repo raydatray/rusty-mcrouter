@@ -1,8 +1,8 @@
 # rusty-mcrouter failover routes (design)
 
-> Status: **Draft**
+> Status: **Implemented**
 > Mirrors: [`../mcrouter/failover.md`](../mcrouter/failover.md) — how mcrouter does it (`FailoverRoute` tries children in a `FailoverPolicy` order on a *failover-eligible* result decided by `FailoverErrorsSettings`; `FailoverWithExptimeRoute` caps the backup TTL; `FailoverRateLimiter` caps the spill)
-> Implemented in: `../architecture/failover.md` — the as-built record (written when this ships; does not exist yet)
+> Implemented in: [`../architecture/failover.md`](../architecture/failover.md) — the as-built record (incl. where it diverged from this plan)
 > Builds on: [`./timeouts.md`](./timeouts.md) — **the prerequisite.** Failover *consumes* the classified error that timeouts *produce*: `NetError::Timeout { phase }` already rides `RouteError::Backend` to the route tree ([`../architecture/timeouts.md`](../architecture/timeouts.md) "the failover seam"). Also [`./hash-routing.md`](./hash-routing.md) — this doc **reuses its framework playbook** (`Selector` trait + `build_selector` dispatch → `FailoverPolicy` trait + `build_failover_policy` dispatch), a `FailoverRoute`'s children are usually `PoolRoute`s, and its [§11 "future seam"](./hash-routing.md#11-the-future-seam-how-new-strategies-slot-in) *anticipated* this route's key-derived policies (the deferred `RankedSelector`). And [`./multiget.md`](./multiget.md) — the routed `Request` is single-key, so failover re-sends one key at a time.
 > Unblocks: **`FailoverWithExptimeRoute` / key-derived policies / rate limiting / TKO** — each an additive impl behind the two traits/config this doc lands (see [§10](#10-the-future-seams)).
 
