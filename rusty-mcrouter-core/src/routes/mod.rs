@@ -1,11 +1,13 @@
 mod destination_route;
 mod error_route;
+mod failover_route;
 mod null_route;
 mod pool_route;
 mod selection_route;
 
 pub use destination_route::DestinationRoute;
 pub use error_route::ErrorRoute;
+pub use failover_route::FailoverRoute;
 pub use null_route::NullRoute;
 pub use pool_route::PoolRoute;
 
