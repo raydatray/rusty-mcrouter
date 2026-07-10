@@ -137,8 +137,12 @@ fn deliver_replies(&mut self) -> Result<()> {
 ```
 
 One wire reply consumes exactly one `pending` slot regardless of what its waiter
-expected, because `parse_reply(&mut BytesMut)` is stateless. That is the whole
-reason mcrouter's `timedOutInitializers_` machinery is unnecessary here.
+expected. The as-built `parse_reply(&mut BytesMut)` is stateless. The proposed
+stateful codec preserves the same tombstone invariant by keeping decoder state
+bound to `pending.front()` until a complete reply resets the decoder to `Idle`;
+only then does the actor pop the sender. See
+[`../design/stateful-parser.md`](../design/stateful-parser.md#reply-timeout-tombstone-under-a-stateful-decoder).
+Neither shape needs mcrouter's request-type `timedOutInitializers_` machinery.
 
 ## 3. read-idle deadline — the third `select!` arm (`connection.rs`)
 
@@ -228,7 +232,7 @@ future `FailoverRoute` matches every `Timeout { phase }` identically.
 |---|---|
 | `sendSync(req, timeout)` + `Baton::TimeoutHandler` | `tokio::time::timeout(reply_timeout, send_inner)` in `Client::send` |
 | deadline armed post-write only | one combined budget over enqueue+write+reply (documented divergence) |
-| `timedOutInitializers_` (ASCII alignment) | **nothing** — stateless `parse_reply` + dropped-receiver tombstone |
+| `timedOutInitializers_` (ASCII alignment) | **nothing** — as-built stateless `parse_reply` + dropped-receiver tombstone; future stateful decoder remains FIFO-front-bound |
 | `carbon::Result::TIMEOUT` | `Err(NetError::Timeout { phase: Reply })` |
 | `carbon::Result::CONNECT_TIMEOUT` | `Err(NetError::Timeout { phase: Connect })` |
 | write timeout → `processShutdown` (`REMOTE_ERROR`) | `Timeout { Write }` → existing `fail_all_pending` + exit |

@@ -211,14 +211,18 @@ there.
 ### the key insight
 
 mcrouter spends real machinery (`timedOutInitializers_`, head-only removal
-invariants) keeping the in-order ASCII stream aligned after a timeout, because
-its parser is **stateful** — it must know the next reply's type. rusty's parser
-is **stateless**. That single difference collapses the whole alignment problem:
-if we enforce the per-request timeout at the *handle* (dropping the
-`oneshot::Receiver`) rather than the *actor* (removing a `pending` entry), the
-timed-out request's `Sender` simply stays in the FIFO and the orphaned reply is
-parsed-and-discarded in order, for free. The actor only grows **one**
-connection-level arm (the read-idle deadline) to reclaim a fully-dead socket.
+invariants) keeping the in-order ASCII stream aligned after a timeout because its
+reply parser must be initialized with the expected request type. Rusty's current
+`parse_reply` is stateless, but the proposed
+[`AsciiReplyDecoder`](./stateful-parser.md#5-asciireplydecoder-stateful-incremental-decoder)
+is stateful without requiring request-type initialization. The tombstone works in
+both designs: enforce the timeout at the *handle* (dropping the
+`oneshot::Receiver`), never remove the actor's FIFO entry, and let the complete
+orphaned wire reply consume that entry before the next reply starts. With the
+stateful decoder, partial state belongs to `pending.front()` until `decode`
+returns a complete reply and resets to `Idle`; only then does `pop_front()` occur.
+The actor still needs only the connection-level read-idle arm to reclaim a fully
+dead socket.
 
 ### 1. reply timeout: enforce in `Client::send`
 

@@ -1,6 +1,7 @@
 # rusty-mcrouter multiget (architecture)
 
 > As-built — describes what the code does now.
+> Future replacement: [`../design/stateful-parser.md`](../design/stateful-parser.md) + [`../design/request-frames.md`](../design/request-frames.md) replace `Parsed::MultiGet` with per-key parser events after the codec migration. This file remains authoritative until that implementation lands.
 > Mirrors: [`../mcrouter/multiget.md`](../mcrouter/multiget.md) — the model we track (parser split + `MultiOpParent`)
 > Designed in: [`../design/multiget.md`](../design/multiget.md) — the plan; this records what we actually built and where it diverged.
 > Related: [`./hash-routing.md`](./hash-routing.md) — the routed `Get` is now single-key, so `PoolRoute` hashes the one key with no special-casing; and [`./backend-client.md`](./backend-client.md) — each sub-get pipelines onto a `DestinationRoute`'s `Client`.
