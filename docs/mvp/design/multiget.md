@@ -1,6 +1,7 @@
 # rusty-mcrouter multiget (design)
 
-> Status: **Implemented**
+> Status: **Implemented; parse-boundary replacement proposed**
+> Superseded for the next parser rewrite by: [`./stateful-parser.md`](./stateful-parser.md) and [`./request-frames.md`](./request-frames.md). This document remains the design record for the current `Parsed::MultiGet` implementation.
 > Mirrors: [`../mcrouter/multiget.md`](../mcrouter/multiget.md) — how mcrouter does it (parser split + `MultiOpParent`)
 > Implemented in: [`../architecture/multiget.md`](../architecture/multiget.md) — the as-built record (including where it diverged from this plan)
 > Related: [`./hash-routing.md`](./hash-routing.md) — independent and complementary, **not** a dependency: making the routed `Request::Get` single-key is where `PoolRoute`'s per-key hash lands cleanly. Either can land first; this supersedes that doc's "multi-key get problem" section.
@@ -9,6 +10,12 @@ Make the **routed** get single-key *by type*, split a wire multi-key `get` into
 independent single-key gets **before** routing, then reassemble the sub-replies
 into one client reply. Read the [mcrouter reference](../mcrouter/multiget.md)
 first — this doc assumes it and only describes our side.
+
+The newer parser design deliberately reverses this document's earlier decision
+to keep grouping in one `Parsed::MultiGet` value. Once that work lands, the
+stateful decoder emits one single-key request event per key plus `MultiOpEnd`,
+while the frontend session owns the group and routes children immediately. Until
+then, this document and its architecture twin describe the running code.
 
 ---
 

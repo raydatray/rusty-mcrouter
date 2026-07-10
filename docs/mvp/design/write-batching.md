@@ -197,9 +197,15 @@ of the read buffer. So the emit step is: **`&'static` framing + payload `Bytes`
 write.
 
 ```rust
-// protocol: append wire form as zero-copy segments
-impl Reply {
-    pub fn encode_segments(&self, scratch: &mut BytesMut, out: &mut Vec<Bytes>) {
+// codec: append wire form as zero-copy segments
+impl AsciiReplyEncoder {
+    pub fn encode_segments(
+        &self,
+        context: &BasicTextEncodeContext,
+        reply: &Reply,
+        scratch: &mut BytesMut,
+        out: &mut Vec<Bytes>,
+    ) {
         // Get hit: b"VALUE ", key.clone(), b" ", <flags>, b" ", <len>, b"\r\n",
         //          data.clone() /* <-- the value payload, zero-copy */, b"\r\n"
         // ... End/Stored/Numeric/ServerError similarly

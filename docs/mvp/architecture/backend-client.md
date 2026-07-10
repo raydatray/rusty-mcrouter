@@ -332,9 +332,12 @@ all deferred on purpose for now:
   per-request reply timeouts now exist, plus a connection-level read-idle deadline
   that reclaims a silently dead connection. A backend that accepts but never
   replies now fails fast with `NetError::Timeout { phase }` instead of awaiting
-  forever, and the stateless `parse_reply` + a dropped-receiver tombstone keep
-  ASCII FIFO aligned after a timeout with no extra machinery. Full as-built:
-  [`./timeouts.md`](./timeouts.md).
+  forever, and the as-built stateless `parse_reply` + a dropped-receiver
+  tombstone keep ASCII FIFO aligned after a timeout with no extra machinery.
+  The proposed stateful decoder preserves the same invariant by binding partial
+  decoder state to `pending.front()` until one complete reply is popped. Full
+  as-built: [`./timeouts.md`](./timeouts.md); future parser contract:
+  [`../design/stateful-parser.md`](../design/stateful-parser.md#reply-timeout-tombstone-under-a-stateful-decoder).
 - **No `maxInflight`.** Only `max_pending` (queued, not-yet-written) is bounded;
   there is no cap on written-and-awaiting-reply. mcrouter throttles both.
 - **No write batching / `writev`.** `write_one` issues one `write_all` per
