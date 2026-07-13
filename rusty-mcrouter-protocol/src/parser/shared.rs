@@ -139,10 +139,7 @@ fn parse_storage_header(
     })
 }
 
-pub(super) fn body_terminator_len(
-    buf: &[u8],
-    data_end: usize,
-) -> Result<Option<usize>> {
+pub(super) fn body_terminator_len(buf: &[u8], data_end: usize) -> Result<Option<usize>> {
     if buf.len() <= data_end {
         return Ok(None);
     }
@@ -152,7 +149,9 @@ pub(super) fn body_terminator_len(
             if buf.len() < data_end + 2 {
                 Ok(None)
             } else if buf[data_end + 1] != b'\n' {
-                Err(ProtocolError::Malformed("missing LF after CR in body terminator"))
+                Err(ProtocolError::Malformed(
+                    "missing LF after CR in body terminator",
+                ))
             } else {
                 Ok(Some(2))
             }
@@ -222,10 +221,42 @@ mod tests {
 
     fn assert_storage_variant(verb: &str, req: Request) {
         match (verb, req) {
-            ("add", Request::Add { key, flags, exptime, data })
-            | ("replace", Request::Replace { key, flags, exptime, data })
-            | ("append", Request::Append { key, flags, exptime, data })
-            | ("prepend", Request::Prepend { key, flags, exptime, data }) => {
+            (
+                "add",
+                Request::Add {
+                    key,
+                    flags,
+                    exptime,
+                    data,
+                },
+            )
+            | (
+                "replace",
+                Request::Replace {
+                    key,
+                    flags,
+                    exptime,
+                    data,
+                },
+            )
+            | (
+                "append",
+                Request::Append {
+                    key,
+                    flags,
+                    exptime,
+                    data,
+                },
+            )
+            | (
+                "prepend",
+                Request::Prepend {
+                    key,
+                    flags,
+                    exptime,
+                    data,
+                },
+            ) => {
                 assert_eq!(key.as_ref(), b"foo", "verb={verb}");
                 assert_eq!(flags, 0, "verb={verb}");
                 assert_eq!(exptime, 0, "verb={verb}");
@@ -255,7 +286,11 @@ mod tests {
             let mut buf = BytesMut::from(wire.as_bytes());
             match parse_request(&mut buf) {
                 Err(ProtocolError::Malformed(msg)) => {
-                    assert_eq!(msg, format!("{verb}: unexpected extra token in header"), "verb={verb}");
+                    assert_eq!(
+                        msg,
+                        format!("{verb}: unexpected extra token in header"),
+                        "verb={verb}"
+                    );
                 }
                 other => panic!("verb={verb} expected extra-token error, got {other:?}"),
             }

@@ -206,7 +206,9 @@ fn failover_least_failures_parses_children_and_policy() {
 #[test]
 fn failover_custom_errors_parses_per_op_lists() {
     let doc = parse_ok("failover_custom_errors.json");
-    let RouteEntry::Single(RouteHandleConfig::FailoverRoute { failover_errors, .. }) = &doc.route
+    let RouteEntry::Single(RouteHandleConfig::FailoverRoute {
+        failover_errors, ..
+    }) = &doc.route
     else {
         panic!("expected FailoverRoute, got {:?}", doc.route);
     };
@@ -245,7 +247,10 @@ fn failover_with_exptime_route_is_unknown_pending_support() {
     let doc = parse_ok("failover_with_exptime.json");
     assert_eq!(doc.pools.len(), 2);
     let RouteEntry::Single(RouteHandleConfig::Unknown { kind, .. }) = &doc.route else {
-        panic!("expected Unknown FailoverWithExptimeRoute, got {:?}", doc.route);
+        panic!(
+            "expected Unknown FailoverWithExptimeRoute, got {:?}",
+            doc.route
+        );
     };
     assert_eq!(kind, "FailoverWithExptimeRoute");
 }

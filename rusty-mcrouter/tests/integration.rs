@@ -185,11 +185,7 @@ async fn set_overwrites_existing_value() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn delete_existing_key_returns_deleted() {
     let fx = fixture().await;
-    let stored = round_trip(
-        fx.router_addr,
-        b"set delete_existing_key 0 0 3\r\nbar\r\n",
-    )
-    .await;
+    let stored = round_trip(fx.router_addr, b"set delete_existing_key 0 0 3\r\nbar\r\n").await;
     assert_eq!(stored, b"STORED\r\n");
 
     let deleted = round_trip(fx.router_addr, b"delete delete_existing_key\r\n").await;
@@ -252,7 +248,11 @@ async fn add_then_get_round_trip() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn replace_missing_key_returns_not_stored() {
     let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"replace replace_missing_key 0 0 5\r\nhello\r\n").await;
+    let resp = round_trip(
+        fx.router_addr,
+        b"replace replace_missing_key 0 0 5\r\nhello\r\n",
+    )
+    .await;
     assert_eq!(resp, b"NOT_STORED\r\n");
 }
 
@@ -279,7 +279,11 @@ async fn replace_existing_key_returns_stored() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn replace_changes_value() {
     let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set replace_changes_key 0 0 5\r\nfirst\r\n").await;
+    let stored = round_trip(
+        fx.router_addr,
+        b"set replace_changes_key 0 0 5\r\nfirst\r\n",
+    )
+    .await;
     assert_eq!(stored, b"STORED\r\n");
 
     let replaced = round_trip(
@@ -300,7 +304,11 @@ async fn replace_changes_value() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn append_to_missing_key_returns_not_stored() {
     let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"append append_missing_key 0 0 3\r\nbar\r\n").await;
+    let resp = round_trip(
+        fx.router_addr,
+        b"append append_missing_key 0 0 3\r\nbar\r\n",
+    )
+    .await;
     assert_eq!(resp, b"NOT_STORED\r\n");
 }
 
@@ -350,7 +358,11 @@ async fn append_keeps_original_flags_when_command_specifies_different_flags() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn prepend_to_missing_key_returns_not_stored() {
     let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"prepend prepend_missing_key 0 0 3\r\nbar\r\n").await;
+    let resp = round_trip(
+        fx.router_addr,
+        b"prepend prepend_missing_key 0 0 3\r\nbar\r\n",
+    )
+    .await;
     assert_eq!(resp, b"NOT_STORED\r\n");
 }
 
@@ -358,7 +370,11 @@ async fn prepend_to_missing_key_returns_not_stored() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn prepend_extends_existing_value() {
     let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set prepend_extends_key 0 0 5\r\nworld\r\n").await;
+    let stored = round_trip(
+        fx.router_addr,
+        b"set prepend_extends_key 0 0 5\r\nworld\r\n",
+    )
+    .await;
     assert_eq!(stored, b"STORED\r\n");
 
     let prepended = round_trip(
@@ -379,7 +395,11 @@ async fn prepend_extends_existing_value() {
 #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
 async fn prepend_keeps_original_flags_when_command_specifies_different_flags() {
     let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set prepend_ignores_key 7 0 5\r\nworld\r\n").await;
+    let stored = round_trip(
+        fx.router_addr,
+        b"set prepend_ignores_key 7 0 5\r\nworld\r\n",
+    )
+    .await;
     assert_eq!(stored, b"STORED\r\n");
 
     let prepended = round_trip(

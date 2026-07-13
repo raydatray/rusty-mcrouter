@@ -152,7 +152,9 @@ mod tests {
     async fn all_children_failing_returns_the_last_result() {
         let route = in_order(vec![
             dest(MockBackend::failing(timeout())),
-            dest(MockBackend::replying(Reply::ServerError(Bytes::from_static(b"x")))),
+            dest(MockBackend::replying(Reply::ServerError(
+                Bytes::from_static(b"x"),
+            ))),
         ]);
         assert_eq!(
             route.route(get()).await.unwrap(),

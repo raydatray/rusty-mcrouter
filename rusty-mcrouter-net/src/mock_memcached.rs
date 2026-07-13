@@ -70,7 +70,9 @@ impl MockMcStore {
                     Reply::NotStored
                 }
             }
-            Request::Append { key, data, .. } => self.append_or_prepend(key, data, AppendMode::Append),
+            Request::Append { key, data, .. } => {
+                self.append_or_prepend(key, data, AppendMode::Append)
+            }
             Request::Prepend { key, data, .. } => {
                 self.append_or_prepend(key, data, AppendMode::Prepend)
             }
@@ -469,7 +471,10 @@ mod tests {
             store.apply(set_req(key(b"k"), 0, 0, key(b"v"))),
             Reply::Stored
         );
-        assert_eq!(store.apply(Request::Delete { key: key(b"k") }), Reply::Deleted);
+        assert_eq!(
+            store.apply(Request::Delete { key: key(b"k") }),
+            Reply::Deleted
+        );
         assert_eq!(
             store.apply(Request::Delete { key: key(b"k") }),
             Reply::NotFound
@@ -559,7 +564,9 @@ mod tests {
     fn get_miss() {
         let mut store = MockMcStore::default();
         assert_eq!(
-            store.apply(Request::Get { key: key(b"missing") }),
+            store.apply(Request::Get {
+                key: key(b"missing")
+            }),
             Reply::Get { hits: vec![] }
         );
     }

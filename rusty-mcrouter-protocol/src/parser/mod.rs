@@ -83,10 +83,7 @@ mod tests {
         cases.iter().for_each(|input| {
             let mut buf = BytesMut::from(*input);
             let req = parse_request(&mut buf).unwrap().unwrap();
-            assert_eq!(
-                req,
-                Parsed::One(get(b"foo"))
-            );
+            assert_eq!(req, Parsed::One(get(b"foo")));
             assert!(buf.is_empty());
         });
     }
@@ -96,17 +93,11 @@ mod tests {
         let mut buf = BytesMut::from(&b"get foo\nget bar\n"[..]);
 
         let first = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(
-            first,
-            Parsed::One(get(b"foo"))
-        );
+        assert_eq!(first, Parsed::One(get(b"foo")));
         assert_eq!(buf.as_ref(), b"get bar\n");
 
         let second = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(
-            second,
-            Parsed::One(get(b"bar"))
-        );
+        assert_eq!(second, Parsed::One(get(b"bar")));
         assert!(buf.is_empty());
 
         assert!(matches!(parse_request(&mut buf), Ok(None)));
@@ -154,17 +145,11 @@ mod tests {
     fn parse_request_pipelined_set_then_get() {
         let mut buf = BytesMut::from(&b"set foo 0 0 3\r\nbar\r\nget foo\r\n"[..]);
         let first = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(
-            first,
-            Parsed::One(storage("set", b"foo", 0, 0, b"bar"))
-        );
+        assert_eq!(first, Parsed::One(storage("set", b"foo", 0, 0, b"bar")));
         assert_eq!(buf.as_ref(), b"get foo\r\n");
 
         let second = parse_request(&mut buf).unwrap().unwrap();
-        assert_eq!(
-            second,
-            Parsed::One(get(b"foo"))
-        );
+        assert_eq!(second, Parsed::One(get(b"foo")));
         assert!(buf.is_empty());
     }
 
