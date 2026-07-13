@@ -150,7 +150,10 @@ mod tests {
         .await;
         let client = Client::connect(addr).await.unwrap();
 
-        assert_eq!(hit_data(client.send(get(b"foo")).await.unwrap()).as_ref(), b"bar");
+        assert_eq!(
+            hit_data(client.send(get(b"foo")).await.unwrap()).as_ref(),
+            b"bar"
+        );
     }
 
     #[tokio::test]

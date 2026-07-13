@@ -111,9 +111,7 @@ async fn main() {
         let stop = Arc::clone(&stop);
         let total = Arc::clone(&total);
         handles.push(tokio::spawn(async move {
-            let mut stream = TcpStream::connect(&addr)
-                .await
-                .expect("connect to target");
+            let mut stream = TcpStream::connect(&addr).await.expect("connect to target");
             stream.set_nodelay(true).expect("nodelay");
 
             let mut read_buf = vec![0u8; 64 * 1024];
@@ -176,9 +174,7 @@ async fn main() {
     );
     println!("requests={requests} batches={}", all_samples.len());
     println!("throughput: {:.0} rps ({:.2} M/s)", rps, rps / 1.0e6);
-    println!(
-        "batch latency (depth={depth}): p50={p50}us p99={p99}us p99.9={p999}us"
-    );
+    println!("batch latency (depth={depth}): p50={p50}us p99={p99}us p99.9={p999}us");
     println!("per-request p50 (batch/depth): {per_req_p50:.2}us");
     println!("----------------------------------------------------------------");
 }

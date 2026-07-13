@@ -259,7 +259,10 @@ fn parse_error_names(names: Vec<Value>) -> Result<Vec<FailoverErrorKind>, String
         .into_iter()
         .map(|value| match value {
             Value::String(name) => name.parse::<FailoverErrorKind>(),
-            other => Err(format!("failover error name must be a string, got {}", other)),
+            other => Err(format!(
+                "failover error name must be a string, got {}",
+                other
+            )),
         })
         .collect()
 }
@@ -268,12 +271,20 @@ fn parse_failover_policy(map: &mut Map<String, Value>) -> Result<FailoverPolicyC
     let mut obj = match map.remove("failover_policy") {
         None => return Ok(FailoverPolicyConfig::InOrder),
         Some(Value::Object(obj)) => obj,
-        Some(other) => return Err(format!("`failover_policy` must be an object, got {}", other)),
+        Some(other) => {
+            return Err(format!(
+                "`failover_policy` must be an object, got {}",
+                other
+            ))
+        }
     };
     let policy_type = match obj.remove("type") {
         Some(Value::String(s)) => s,
         Some(other) => {
-            return Err(format!("`failover_policy.type` must be a string, got {}", other))
+            return Err(format!(
+                "`failover_policy.type` must be a string, got {}",
+                other
+            ))
         }
         None => return Err("`failover_policy` object missing `type`".to_string()),
     };
@@ -352,7 +363,8 @@ mod tests {
 
     #[test]
     fn object_form_pool_route_with_object_pool_name() {
-        let r = route_handle(r#"{ "type": "PoolRoute", "pool": { "name": "foo", "servers": [] } }"#);
+        let r =
+            route_handle(r#"{ "type": "PoolRoute", "pool": { "name": "foo", "servers": [] } }"#);
         assert_eq!(
             r,
             RouteHandleConfig::PoolRoute {
@@ -502,7 +514,10 @@ mod tests {
 
     #[test]
     fn failover_error_kind_parses_canonical_names() {
-        assert_eq!("timeout".parse::<FailoverErrorKind>(), Ok(FailoverErrorKind::Timeout));
+        assert_eq!(
+            "timeout".parse::<FailoverErrorKind>(),
+            Ok(FailoverErrorKind::Timeout)
+        );
         assert_eq!(
             "protocol_error".parse::<FailoverErrorKind>(),
             Ok(FailoverErrorKind::Protocol)
@@ -515,8 +530,14 @@ mod tests {
 
     #[test]
     fn failover_error_kind_accepts_aliases() {
-        assert_eq!("connect_error".parse::<FailoverErrorKind>(), Ok(FailoverErrorKind::Io));
-        assert_eq!("io_error".parse::<FailoverErrorKind>(), Ok(FailoverErrorKind::Io));
+        assert_eq!(
+            "connect_error".parse::<FailoverErrorKind>(),
+            Ok(FailoverErrorKind::Io)
+        );
+        assert_eq!(
+            "io_error".parse::<FailoverErrorKind>(),
+            Ok(FailoverErrorKind::Io)
+        );
         assert_eq!(
             "server_error".parse::<FailoverErrorKind>(),
             Ok(FailoverErrorKind::ServerError)
@@ -536,7 +557,9 @@ mod tests {
 
     #[test]
     fn failover_route_parses_children_and_defaults() {
-        let r = route_handle(r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"] }"#);
+        let r = route_handle(
+            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"] }"#,
+        );
         let RouteHandleConfig::FailoverRoute {
             children,
             failover_errors,
@@ -585,7 +608,10 @@ mod tests {
         let r = route_handle(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": ["timeout", "server_error"] }"#,
         );
-        let RouteHandleConfig::FailoverRoute { failover_errors, .. } = r else {
+        let RouteHandleConfig::FailoverRoute {
+            failover_errors, ..
+        } = r
+        else {
             panic!("expected FailoverRoute");
         };
         assert_eq!(
@@ -602,7 +628,10 @@ mod tests {
         let r = route_handle(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": { "updates": [] } }"#,
         );
-        let RouteHandleConfig::FailoverRoute { failover_errors, .. } = r else {
+        let RouteHandleConfig::FailoverRoute {
+            failover_errors, ..
+        } = r
+        else {
             panic!("expected FailoverRoute");
         };
         assert_eq!(
@@ -629,7 +658,10 @@ mod tests {
         let r = route_handle(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_policy": { "type": "LeastFailuresPolicy", "max_tries": 3 } }"#,
         );
-        let RouteHandleConfig::FailoverRoute { failover_policy, .. } = r else {
+        let RouteHandleConfig::FailoverRoute {
+            failover_policy, ..
+        } = r
+        else {
             panic!("expected FailoverRoute");
         };
         assert_eq!(
