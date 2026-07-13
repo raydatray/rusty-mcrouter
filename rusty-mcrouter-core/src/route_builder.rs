@@ -163,13 +163,15 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
 
         for server in &pool_config.servers {
             // todo - this is an eager connect and will fail if any backend is down, this should become lazy
-            let backend = self.factory.connect(server.as_str()).await.map_err(|source| {
-                BuildError::ConnectFailed {
+            let backend = self
+                .factory
+                .connect(server.as_str())
+                .await
+                .map_err(|source| BuildError::ConnectFailed {
                     pool: pool_name.to_string(),
                     server: server.clone(),
                     source,
-                }
-            })?;
+                })?;
             destinations.push(Rc::new(DestinationRoute::<F::Backend>::new(backend)));
         }
 
@@ -206,9 +208,11 @@ fn build_selector(hash: &HashConfig, n: usize) -> Result<Box<dyn Selector>> {
 fn build_failover_errors(cfg: &FailoverErrorsConfig) -> FailoverErrors {
     match cfg {
         FailoverErrorsConfig::Default => FailoverErrors::default(),
-        FailoverErrorsConfig::All(kinds) => {
-            FailoverErrors::new(Some(kinds.clone()), Some(kinds.clone()), Some(kinds.clone()))
-        }
+        FailoverErrorsConfig::All(kinds) => FailoverErrors::new(
+            Some(kinds.clone()),
+            Some(kinds.clone()),
+            Some(kinds.clone()),
+        ),
         FailoverErrorsConfig::PerOp {
             gets,
             updates,

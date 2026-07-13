@@ -142,14 +142,20 @@ mod tests {
             backend(NetError::WorkerClosed { worker: 0 }),
         ];
         for case in &cases {
-            assert!(!is_failover_error(case), "expected no failover for {case:?}");
+            assert!(
+                !is_failover_error(case),
+                "expected no failover for {case:?}"
+            );
         }
     }
 
     #[test]
     fn classify_maps_each_surface_to_its_kind() {
         assert_eq!(classify(&timeout()), Some(FailoverErrorKind::Timeout));
-        assert_eq!(classify(&server_error()), Some(FailoverErrorKind::ServerError));
+        assert_eq!(
+            classify(&server_error()),
+            Some(FailoverErrorKind::ServerError)
+        );
         assert_eq!(classify(&miss()), None);
     }
 

@@ -53,7 +53,9 @@ async fn start_stack() -> Stack {
     let backend_addr = spawn_mock_memcached().await;
 
     let mut seed = TcpStream::connect(backend_addr).await.unwrap();
-    seed.write_all(b"set seeded_foo 0 0 3\r\nbar\r\n").await.unwrap();
+    seed.write_all(b"set seeded_foo 0 0 3\r\nbar\r\n")
+        .await
+        .unwrap();
     let mut buf = [0u8; 32];
     let n = seed.read(&mut buf).await.unwrap();
     assert_eq!(&buf[..n], b"STORED\r\n");
@@ -113,7 +115,10 @@ async fn set_delete_get_round_trip() {
         round_trip(fx.router_addr, b"delete me2e_d\r\n").await,
         b"DELETED\r\n"
     );
-    assert_eq!(round_trip(fx.router_addr, b"get me2e_d\r\n").await, b"END\r\n");
+    assert_eq!(
+        round_trip(fx.router_addr, b"get me2e_d\r\n").await,
+        b"END\r\n"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -123,7 +128,10 @@ async fn incr_returns_new_value() {
         round_trip(fx.router_addr, b"set me2e_n 0 0 2\r\n42\r\n").await,
         b"STORED\r\n"
     );
-    assert_eq!(round_trip(fx.router_addr, b"incr me2e_n 1\r\n").await, b"43\r\n");
+    assert_eq!(
+        round_trip(fx.router_addr, b"incr me2e_n 1\r\n").await,
+        b"43\r\n"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -139,7 +147,9 @@ async fn failover_from_failing_primary_serves_from_secondary() {
     let secondary = spawn_mock_memcached().await;
 
     let mut seed = TcpStream::connect(secondary).await.unwrap();
-    seed.write_all(b"set failover_k 0 0 6\r\nbackup\r\n").await.unwrap();
+    seed.write_all(b"set failover_k 0 0 6\r\nbackup\r\n")
+        .await
+        .unwrap();
     let mut buf = [0u8; 32];
     let n = seed.read(&mut buf).await.unwrap();
     assert_eq!(&buf[..n], b"STORED\r\n");

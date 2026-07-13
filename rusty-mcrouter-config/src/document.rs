@@ -180,9 +180,8 @@ mod tests {
 
     #[test]
     fn pools_and_route_round_trip() {
-        let doc = parse_ok(
-            r#"{ "pools": { "foo": { "servers": ["a:1"] } }, "route": "PoolRoute|foo" }"#,
-        );
+        let doc =
+            parse_ok(r#"{ "pools": { "foo": { "servers": ["a:1"] } }, "route": "PoolRoute|foo" }"#);
         assert_eq!(doc.pools.len(), 1);
         assert_eq!(doc.pools["foo"].servers, vec!["a:1"]);
         assert!(matches!(
