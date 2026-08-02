@@ -3,15 +3,15 @@
 use bytes::{Bytes, BytesMut};
 
 use crate::meta::reply_decoder::{
-    invalid_response, MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH,
+    invalid_flag, invalid_number, MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH,
 };
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_field, write_key_token, write_opaque, MetaReplyEncodeError,
 };
 use crate::meta::request_decoder::{
-    bad_command_line, flag_error, parse_opaque, recoverable_client_error, require_hint_argument,
-    resolve_key, DecodedMetaCommand, MetaRequestDecodeError, BAD_COMMAND_LINE, INVALID_FLAG,
-    MAX_LINE_TOKENS,
+    bad_argument, bad_number, capacity_error, flag_error, parse_opaque, recoverable_client_error,
+    require_hint_argument, resolve_key, DecodedMetaCommand, MetaRequestDecodeError,
+    BAD_COMMAND_LINE, INVALID_FLAG, MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
@@ -21,8 +21,8 @@ use crate::meta::tokens::{
     flags, parse_i32, parse_u32, parse_u64, require_no_argument, split_tokens, FlagBudget,
 };
 use crate::meta::{
-    wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_COMMAND_LINE_BYTES,
-    MAX_REPLY_LINE_BYTES, MAX_VALUE_BYTES,
+    wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyExpectation, MetaReplyPlan,
+    MAX_COMMAND_LINE_BYTES, MAX_REPLY_LINE_BYTES, MAX_VALUE_BYTES,
 };
 use crate::reply::{Reply, StoreReply, StoreResult};
 use crate::request::{Request, StoreMode, StoreRequest};
@@ -42,7 +42,7 @@ pub fn parse_value_length(line: &[u8]) -> Result<usize, MetaRequestDecodeError> 
     let raw_value_len = tokens
         .next()
         .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    let value_len = parse_u64(raw_value_len).map_err(bad_command_line)?;
+    let value_len = parse_u64(raw_value_len).map_err(bad_number)?;
     if value_len > (i32::MAX - 2) as u64 {
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
@@ -82,31 +82,31 @@ pub fn parse_request(
         let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 return_cas = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Cas)
-                    .map_err(bad_command_line)?;
+                    .map_err(capacity_error)?;
             }
-            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'F' => client_flags = Some(parse_u32(argument).map_err(bad_command_line)?),
+            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_number)?),
+            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_number)?),
+            b'F' => client_flags = Some(parse_u32(argument).map_err(bad_number)?),
             b'I' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 invalidate = true;
             }
             b'k' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 return_key = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Key)
-                    .map_err(bad_command_line)?;
+                    .map_err(capacity_error)?;
             }
             b'M' => {
                 mode = match argument {
@@ -118,21 +118,21 @@ pub fn parse_request(
                     _ => return Err(recoverable_client_error(BAD_COMMAND_LINE)),
                 };
             }
-            b'N' => vivify_ttl = Some(parse_i32(argument).map_err(bad_command_line)?),
+            b'N' => vivify_ttl = Some(parse_i32(argument).map_err(bad_number)?),
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
             b's' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 return_size = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Size)
-                    .map_err(bad_command_line)?;
+                    .map_err(capacity_error)?;
             }
-            b'T' => ttl = Some(parse_i32(argument).map_err(bad_command_line)?),
+            b'T' => ttl = Some(parse_i32(argument).map_err(bad_number)?),
             b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
@@ -160,7 +160,7 @@ pub fn parse_request(
 pub fn encode_request(
     request: &StoreRequest,
     out: &mut BytesMut,
-) -> Result<(), MetaRequestEncodeError> {
+) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
     if request.value.len() > MAX_VALUE_BYTES {
         return Err(MetaRequestEncodeError::ValueTooLarge {
             maximum: MAX_VALUE_BYTES,
@@ -211,7 +211,10 @@ pub fn encode_request(
     wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
     out.extend_from_slice(&request.value);
     out.extend_from_slice(b"\r\n");
-    Ok(())
+    Ok(MetaReplyExpectation::Store {
+        cas: request.return_cas,
+        size: request.return_size,
+    })
 }
 
 pub fn parse_reply(
@@ -244,10 +247,10 @@ fn parse_attributes<'a>(
     let mut result = StoreResult::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(invalid_response)?;
+        let (flag, argument) = flag.map_err(invalid_flag)?;
         match flag {
-            b'c' => result.cas = Some(parse_u64(argument).map_err(invalid_response)?),
-            b's' => result.size = Some(parse_u64(argument).map_err(invalid_response)?),
+            b'c' => result.cas = Some(parse_u64(argument).map_err(invalid_number)?),
+            b's' => result.size = Some(parse_u64(argument).map_err(invalid_number)?),
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
         }
     }

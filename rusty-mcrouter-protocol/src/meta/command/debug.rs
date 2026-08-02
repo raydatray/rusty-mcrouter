@@ -3,11 +3,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
 
-use crate::key::MAX_KEY_BYTES;
 use crate::meta::reply_decoder::{MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH};
-use crate::meta::reply_encoder::{reply_line_too_long, MetaReplyEncodeError};
+use crate::meta::reply_encoder::{encoded_key_too_long, reply_line_too_long, MetaReplyEncodeError};
 use crate::meta::request_decoder::{
-    bad_command_line, flag_error, parse_key, recoverable_client_error, require_hint_argument,
+    bad_argument, flag_error, parse_key, recoverable_client_error, require_hint_argument,
     DecodedMetaCommand, MetaRequestDecodeError, BAD_COMMAND_LINE, INVALID_FLAG,
 };
 use crate::meta::request_encoder::{
@@ -34,7 +33,7 @@ pub fn parse_request<'a>(
         let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 key_encoding = KeyEncoding::Base64;
             }
             b'P' | b'L' => require_hint_argument(argument)?,
@@ -156,11 +155,7 @@ fn write_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEn
             out.extend_from_slice(key);
         }
         KeyEncoding::Base64 => {
-            wire::write_base64_key(out, key).map_err(|_| {
-                MetaReplyEncodeError::EncodedKeyTooLong {
-                    maximum: MAX_KEY_BYTES,
-                }
-            })?;
+            wire::write_base64_key(out, key).map_err(encoded_key_too_long)?;
         }
     }
     Ok(())

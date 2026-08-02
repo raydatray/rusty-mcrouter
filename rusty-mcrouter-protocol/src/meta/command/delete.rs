@@ -7,9 +7,9 @@ use crate::meta::reply_encoder::{
     reply_line_too_long, write_key_token, write_opaque, MetaReplyEncodeError,
 };
 use crate::meta::request_decoder::{
-    bad_command_line, flag_error, parse_opaque, recoverable_client_error, require_hint_argument,
-    resolve_key, DecodedMetaCommand, MetaRequestDecodeError, BAD_COMMAND_LINE, INVALID_FLAG,
-    MAX_LINE_TOKENS,
+    bad_argument, bad_number, capacity_error, flag_error, parse_opaque, recoverable_client_error,
+    require_hint_argument, resolve_key, DecodedMetaCommand, MetaRequestDecodeError,
+    BAD_COMMAND_LINE, INVALID_FLAG, MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
@@ -19,8 +19,8 @@ use crate::meta::tokens::{
     flags, parse_i32, parse_u32, parse_u64, require_no_argument, split_tokens, FlagBudget,
 };
 use crate::meta::{
-    wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_COMMAND_LINE_BYTES,
-    MAX_REPLY_LINE_BYTES,
+    wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyExpectation, MetaReplyPlan,
+    MAX_COMMAND_LINE_BYTES, MAX_REPLY_LINE_BYTES,
 };
 use crate::reply::{DeleteReply, Reply};
 use crate::request::{DeleteRequest, Request};
@@ -46,32 +46,32 @@ pub fn parse_request<'a>(
         let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
-            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'F' => client_flags = Some(parse_u32(argument).map_err(bad_command_line)?),
+            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_number)?),
+            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_number)?),
+            b'F' => client_flags = Some(parse_u32(argument).map_err(bad_number)?),
             b'I' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 invalidate = true;
             }
             b'k' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 return_key = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Key)
-                    .map_err(bad_command_line)?;
+                    .map_err(capacity_error)?;
             }
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
-            b'T' => ttl = Some(parse_i32(argument).map_err(bad_command_line)?),
+            b'T' => ttl = Some(parse_i32(argument).map_err(bad_number)?),
             b'x' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
+                require_no_argument(argument).map_err(bad_argument)?;
                 remove_value = true;
             }
             b'P' | b'L' => require_hint_argument(argument)?,
@@ -97,7 +97,7 @@ pub fn parse_request<'a>(
 pub fn encode_request(
     request: &DeleteRequest,
     out: &mut BytesMut,
-) -> Result<(), MetaRequestEncodeError> {
+) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
     let line_start = out.len();
     out.extend_from_slice(b"md ");
     let key_is_base64 = write_backend_key(out, &request.key)?;
@@ -125,7 +125,7 @@ pub fn encode_request(
     }
 
     wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
-    Ok(())
+    Ok(MetaReplyExpectation::Delete)
 }
 
 pub fn parse_reply(line: &[u8]) -> Result<Reply, MetaReplyDecodeError> {

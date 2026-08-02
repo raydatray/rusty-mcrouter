@@ -25,7 +25,7 @@ pub use reply_decoder::{
     MetaReplyDecodeError, MetaReplyDecoder, MAX_DEBUG_FIELDS, MAX_REPLY_LINE_BYTES,
     MAX_REPLY_VALUE_BYTES,
 };
-pub use reply_encoder::{MetaReplyEncodeError, MetaReplyEncoder, ReplyEncodeStatus};
+pub use reply_encoder::{MetaReplyEncodeError, MetaReplyEncoder};
 pub use reply_expectation::{GetSuccessShape, MetaReplyExpectation};
 pub use reply_plan::{
     KeyEncoding, MetaOutputOrder, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan,

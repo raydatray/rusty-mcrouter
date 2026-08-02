@@ -4,7 +4,9 @@ use thiserror::Error;
 use crate::reply::{ErrorReply, Reply};
 
 use super::command;
-use super::tokens::{find_line, parse_usize, split_tokens, FindLine};
+use super::tokens::{
+    find_line, parse_usize, split_tokens, BadNumber, FindLine, FlagError, UnexpectedArgument,
+};
 use super::{GetSuccessShape, MetaReplyExpectation};
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
@@ -92,7 +94,7 @@ fn expected_value_length(
     let length = split_tokens(line)
         .nth(1)
         .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-        .and_then(|raw| parse_usize(raw).map_err(invalid_response))?;
+        .and_then(|raw| parse_usize(raw).map_err(invalid_number))?;
     if length > MAX_REPLY_VALUE_BYTES {
         return Err(MetaReplyDecodeError::ValueTooLarge {
             maximum: MAX_REPLY_VALUE_BYTES,
@@ -175,9 +177,19 @@ pub fn framed_value(
     value.ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
 }
 
-/// Maps any token-level failure to the one reply-decode error: a
+/// Every token-level failure maps to the one reply-decode error: a
 /// misbehaving backend gets no diagnostics, just a torn-down connection.
-pub fn invalid_response<E>(_: E) -> MetaReplyDecodeError {
+pub fn invalid_number(_: BadNumber) -> MetaReplyDecodeError {
+    MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
+}
+
+/// See [`invalid_number`].
+pub fn invalid_argument(_: UnexpectedArgument) -> MetaReplyDecodeError {
+    MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
+}
+
+/// See [`invalid_number`].
+pub fn invalid_flag(_: FlagError) -> MetaReplyDecodeError {
     MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
 }
 

@@ -16,13 +16,14 @@ impl MetaReplyEncoder {
         Self
     }
 
-    /// Appends one frontend reply. On error, `out` is unchanged.
+    /// Appends one frontend reply. A quiet plan may suppress the reply
+    /// entirely, leaving `out` untouched. On error, `out` is unchanged.
     pub fn encode(
         &self,
         reply: &Reply,
         plan: &MetaReplyPlan,
         out: &mut BytesMut,
-    ) -> Result<ReplyEncodeStatus, MetaReplyEncodeError> {
+    ) -> Result<(), MetaReplyEncodeError> {
         if matches!(
             (reply, plan.quiet),
             (Reply::Get(GetReply::Miss), MetaQuietPolicy::SuppressMiss)
@@ -39,7 +40,7 @@ impl MetaReplyEncoder {
                     MetaQuietPolicy::SuppressSuccess
                 )
         ) {
-            return Ok(ReplyEncodeStatus::Suppressed);
+            return Ok(());
         }
 
         let checkpoint = out.len();
@@ -54,18 +55,12 @@ impl MetaReplyEncoder {
         if result.is_err() {
             out.truncate(checkpoint);
         }
-        result.map(|()| ReplyEncodeStatus::Written)
+        result
     }
 
     pub fn encode_noop(&self, out: &mut BytesMut) {
         out.extend_from_slice(b"MN\r\n");
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReplyEncodeStatus {
-    Written,
-    Suppressed,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -151,11 +146,7 @@ pub fn write_key_token(
     match plan.key_encoding {
         KeyEncoding::Text => out.extend_from_slice(key),
         KeyEncoding::Base64 => {
-            wire::write_base64_key(out, key).map_err(|_| {
-                MetaReplyEncodeError::EncodedKeyTooLong {
-                    maximum: MAX_KEY_BYTES,
-                }
-            })?;
+            wire::write_base64_key(out, key).map_err(encoded_key_too_long)?;
             wire::write_bare_flag(out, b'b');
         }
     }
@@ -202,6 +193,12 @@ pub fn write_i64_field(
     }
 }
 
+pub fn encoded_key_too_long(_: wire::EncodedKeyTooLong) -> MetaReplyEncodeError {
+    MetaReplyEncodeError::EncodedKeyTooLong {
+        maximum: MAX_KEY_BYTES,
+    }
+}
+
 pub fn reply_line_too_long(error: wire::LineTooLong) -> MetaReplyEncodeError {
     MetaReplyEncodeError::FrameTooLarge {
         maximum: error.maximum,
@@ -229,13 +226,10 @@ mod tests {
         reply_plan
     }
 
-    fn encode(
-        reply: &Reply,
-        plan: &MetaReplyPlan,
-    ) -> Result<(ReplyEncodeStatus, BytesMut), MetaReplyEncodeError> {
+    fn encode(reply: &Reply, plan: &MetaReplyPlan) -> Result<BytesMut, MetaReplyEncodeError> {
         let mut out = BytesMut::new();
-        let status = MetaReplyEncoder::new().encode(reply, plan, &mut out)?;
-        Ok((status, out))
+        MetaReplyEncoder::new().encode(reply, plan, &mut out)?;
+        Ok(out)
     }
 
     #[test]
@@ -255,10 +249,7 @@ mod tests {
 
         assert_eq!(
             encode(&reply, &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"HD Otag s3 t-1 c42 f7 h1 l9 kkey X W\r\n"[..]),
-            )
+            BytesMut::from(&b"HD Otag s3 t-1 c42 f7 h1 l9 kkey X W\r\n"[..])
         );
     }
 
@@ -273,10 +264,7 @@ mod tests {
 
         assert_eq!(
             encode(&reply, &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"VA 3 c42\r\nfoo\r\n"[..]),
-            )
+            BytesMut::from(&b"VA 3 c42\r\nfoo\r\n"[..])
         );
     }
 
@@ -290,10 +278,7 @@ mod tests {
 
         assert_eq!(
             encode(&reply, &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"HD Otag s3 c42 kkey\r\n"[..]),
-            )
+            BytesMut::from(&b"HD Otag s3 c42 kkey\r\n"[..])
         );
     }
 
@@ -301,18 +286,12 @@ mod tests {
     fn suppresses_only_successful_quiet_store_reply() {
         let plan = plan(b"ms key 3 q Otag\r\nfoo\r\n");
         let success = Reply::Store(StoreReply::Success(StoreResult::default()));
-        assert_eq!(
-            encode(&success, &plan).unwrap(),
-            (ReplyEncodeStatus::Suppressed, BytesMut::new())
-        );
+        assert_eq!(encode(&success, &plan).unwrap(), BytesMut::new());
 
         let failure = Reply::Store(StoreReply::NotStored(StoreResult::default()));
         assert_eq!(
             encode(&failure, &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"NS Otag\r\n"[..]),
-            )
+            BytesMut::from(&b"NS Otag\r\n"[..])
         );
     }
 
@@ -340,7 +319,7 @@ mod tests {
         ] {
             assert_eq!(
                 encode(&Reply::Delete(reply), &plan).unwrap(),
-                (ReplyEncodeStatus::Written, BytesMut::from(expected))
+                BytesMut::from(expected)
             );
         }
     }
@@ -350,14 +329,11 @@ mod tests {
         let plan = plan(b"md key q Otag\r\n");
         assert_eq!(
             encode(&Reply::Delete(DeleteReply::Success), &plan).unwrap(),
-            (ReplyEncodeStatus::Suppressed, BytesMut::new())
+            BytesMut::new()
         );
         assert_eq!(
             encode(&Reply::Delete(DeleteReply::NotFound), &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"NF Otag\r\n"[..]),
-            )
+            BytesMut::from(&b"NF Otag\r\n"[..])
         );
     }
 
@@ -371,10 +347,7 @@ mod tests {
         }));
         assert_eq!(
             encode(&header, &header_plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"HD Otag t-1 c42 kkey\r\n"[..]),
-            )
+            BytesMut::from(&b"HD Otag t-1 c42 kkey\r\n"[..])
         );
 
         let value_plan = plan(b"ma key v c\r\n");
@@ -385,10 +358,7 @@ mod tests {
         }));
         assert_eq!(
             encode(&value, &value_plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"VA 20 c43\r\n18446744073709551615\r\n"[..]),
-            )
+            BytesMut::from(&b"VA 20 c43\r\n18446744073709551615\r\n"[..])
         );
     }
 
@@ -403,10 +373,7 @@ mod tests {
 
         assert_eq!(
             encode(&reply, &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"EX Otag c41 kkey\r\n"[..]),
-            )
+            BytesMut::from(&b"EX Otag c41 kkey\r\n"[..])
         );
     }
 
@@ -414,18 +381,12 @@ mod tests {
     fn suppresses_only_successful_quiet_arithmetic_reply() {
         let plan = plan(b"ma key q Otag\r\n");
         let success = Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult::default()));
-        assert_eq!(
-            encode(&success, &plan).unwrap(),
-            (ReplyEncodeStatus::Suppressed, BytesMut::new())
-        );
+        assert_eq!(encode(&success, &plan).unwrap(), BytesMut::new());
 
         let failure = Reply::Arithmetic(ArithmeticReply::NotFound(ArithmeticResult::default()));
         assert_eq!(
             encode(&failure, &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"NF Otag\r\n"[..]),
-            )
+            BytesMut::from(&b"NF Otag\r\n"[..])
         );
     }
 
@@ -449,7 +410,7 @@ mod tests {
 
         assert_eq!(
             MetaReplyEncoder::new().encode(&Reply::Get(GetReply::Miss), &plan, &mut out),
-            Ok(ReplyEncodeStatus::Suppressed)
+            Ok(())
         );
         assert_eq!(out, b"existing".as_slice());
     }
@@ -460,10 +421,7 @@ mod tests {
 
         assert_eq!(
             encode(&Reply::Get(GetReply::Miss), &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"EN Otag kkey\r\n"[..]),
-            )
+            BytesMut::from(&b"EN Otag kkey\r\n"[..])
         );
     }
 
@@ -473,10 +431,7 @@ mod tests {
 
         assert_eq!(
             encode(&Reply::Get(GetReply::Miss), &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"EN ka2V5 b\r\n"[..]),
-            )
+            BytesMut::from(&b"EN ka2V5 b\r\n"[..])
         );
     }
 
@@ -490,10 +445,7 @@ mod tests {
                 &plan,
             )
             .unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"CLIENT_ERROR bad command\r\n"[..]),
-            )
+            BytesMut::from(&b"CLIENT_ERROR bad command\r\n"[..])
         );
     }
 
@@ -544,14 +496,11 @@ mod tests {
         }));
         assert_eq!(
             encode(&hit, &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"ME key exp=60 fetch=yes\r\n"[..]),
-            )
+            BytesMut::from(&b"ME key exp=60 fetch=yes\r\n"[..])
         );
         assert_eq!(
             encode(&Reply::Debug(DebugReply::Miss), &plan).unwrap(),
-            (ReplyEncodeStatus::Written, BytesMut::from(&b"EN\r\n"[..]),)
+            BytesMut::from(&b"EN\r\n"[..])
         );
     }
 
@@ -562,10 +511,7 @@ mod tests {
 
         assert_eq!(
             encode(&reply, &plan).unwrap(),
-            (
-                ReplyEncodeStatus::Written,
-                BytesMut::from(&b"ME a2V5\r\n"[..]),
-            )
+            BytesMut::from(&b"ME a2V5\r\n"[..])
         );
     }
 
@@ -626,7 +572,7 @@ mod tests {
         let mut frontend_output = BytesMut::new();
         assert_eq!(
             MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(ReplyEncodeStatus::Written)
+            Ok(())
         );
         assert_eq!(frontend_output, b"VA 3 Otag c42\r\nfoo\r\n".as_slice());
     }
@@ -663,7 +609,7 @@ mod tests {
         let mut frontend_output = BytesMut::new();
         assert_eq!(
             MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(ReplyEncodeStatus::Written)
+            Ok(())
         );
         assert_eq!(
             frontend_output,
@@ -702,7 +648,7 @@ mod tests {
         let mut frontend_output = BytesMut::new();
         assert_eq!(
             MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(ReplyEncodeStatus::Written)
+            Ok(())
         );
         assert_eq!(
             frontend_output,
@@ -741,7 +687,7 @@ mod tests {
         let mut frontend_output = BytesMut::new();
         assert_eq!(
             MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(ReplyEncodeStatus::Written)
+            Ok(())
         );
         assert_eq!(
             frontend_output,
@@ -780,7 +726,7 @@ mod tests {
         let mut frontend_output = BytesMut::new();
         assert_eq!(
             MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(ReplyEncodeStatus::Written)
+            Ok(())
         );
         assert_eq!(
             frontend_output,
