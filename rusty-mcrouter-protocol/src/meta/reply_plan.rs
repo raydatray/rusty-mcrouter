@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use crate::bounded::BoundedList;
+use crate::bounded_list::BoundedList;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MetaReplyPlan {

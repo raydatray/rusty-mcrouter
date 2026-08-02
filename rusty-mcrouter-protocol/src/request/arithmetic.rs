@@ -1,4 +1,4 @@
-use crate::{bounded::BoundedList, key::Key};
+use crate::{bounded_list::BoundedList, key::Key};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArithmeticRequest {

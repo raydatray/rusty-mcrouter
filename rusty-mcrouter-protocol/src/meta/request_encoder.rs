@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::BytesMut;
 use thiserror::Error;
 
@@ -10,9 +9,7 @@ use crate::{
     },
 };
 
-use super::{GetSuccessShape, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES, MAX_VALUE_BYTES};
-
-const MAX_BASE64_KEY_BYTES: usize = MAX_KEY_BYTES.div_ceil(3) * 4;
+use super::{wire, GetSuccessShape, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES, MAX_VALUE_BYTES};
 
 #[derive(Debug, Default)]
 pub struct MetaRequestEncoder;
@@ -82,28 +79,28 @@ fn encode_get(
     let key_is_base64 = write_key(out, &request.key)?;
 
     if key_is_base64 {
-        write_bare_flag(out, b'b');
+        wire::write_bare_flag(out, b'b');
     }
 
     // Direct fields use canonical order. Only the temporal program has
     // request-order semantics in memcached.
     if request.return_value {
-        write_bare_flag(out, b'v');
+        wire::write_bare_flag(out, b'v');
     }
     if request.return_client_flags {
-        write_bare_flag(out, b'f');
+        wire::write_bare_flag(out, b'f');
     }
     if request.return_cas {
-        write_bare_flag(out, b'c');
+        wire::write_bare_flag(out, b'c');
     }
     if request.return_size {
-        write_bare_flag(out, b's');
+        wire::write_bare_flag(out, b's');
     }
     if request.return_hit_state {
-        write_bare_flag(out, b'h');
+        wire::write_bare_flag(out, b'h');
     }
     if request.return_last_access {
-        write_bare_flag(out, b'l');
+        wire::write_bare_flag(out, b'l');
     }
     if let Some(cas) = request.check_cas {
         write_u64_flag(out, b'C', cas);
@@ -112,24 +109,19 @@ fn encode_get(
         write_u64_flag(out, b'E', cas);
     }
     if request.no_lru_bump {
-        write_bare_flag(out, b'u');
+        wire::write_bare_flag(out, b'u');
     }
 
     for instruction in request.temporal.iter() {
         match instruction {
             GetTemporalInstruction::Vivify(ttl) => write_i32_flag(out, b'N', *ttl),
             GetTemporalInstruction::UpdateTtl(ttl) => write_i32_flag(out, b'T', *ttl),
-            GetTemporalInstruction::ReturnTtl => write_bare_flag(out, b't'),
+            GetTemporalInstruction::ReturnTtl => wire::write_bare_flag(out, b't'),
             GetTemporalInstruction::WinForRecache(ttl) => write_i32_flag(out, b'R', *ttl),
         }
     }
 
-    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
-        return Err(MetaRequestEncodeError::FrameTooLarge {
-            maximum: MAX_COMMAND_LINE_BYTES,
-        });
-    }
-    out.extend_from_slice(b"\r\n");
+    finish_line(out, line_start)?;
     Ok(match (request.return_value, request.check_cas.is_some()) {
         (false, _) => GetSuccessShape::Header,
         (true, false) => GetSuccessShape::Value,
@@ -148,16 +140,16 @@ fn encode_store(request: &StoreRequest, out: &mut BytesMut) -> Result<(), MetaRe
     out.extend_from_slice(b"ms ");
     let key_is_base64 = write_key(out, &request.key)?;
     out.extend_from_slice(b" ");
-    write_u64(out, request.value.len() as u64);
+    wire::write_u64(out, request.value.len() as u64);
 
     if key_is_base64 {
-        write_bare_flag(out, b'b');
+        wire::write_bare_flag(out, b'b');
     }
     if request.return_cas {
-        write_bare_flag(out, b'c');
+        wire::write_bare_flag(out, b'c');
     }
     if request.return_size {
-        write_bare_flag(out, b's');
+        wire::write_bare_flag(out, b's');
     }
     if let Some(cas) = request.compare_cas {
         write_u64_flag(out, b'C', cas);
@@ -169,7 +161,7 @@ fn encode_store(request: &StoreRequest, out: &mut BytesMut) -> Result<(), MetaRe
         write_u64_flag(out, b'F', u64::from(flags));
     }
     if request.invalidate {
-        write_bare_flag(out, b'I');
+        wire::write_bare_flag(out, b'I');
     }
     if let Some(ttl) = request.ttl {
         write_i32_flag(out, b'T', ttl);
@@ -185,12 +177,7 @@ fn encode_store(request: &StoreRequest, out: &mut BytesMut) -> Result<(), MetaRe
         write_i32_flag(out, b'N', ttl);
     }
 
-    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
-        return Err(MetaRequestEncodeError::FrameTooLarge {
-            maximum: MAX_COMMAND_LINE_BYTES,
-        });
-    }
-    out.extend_from_slice(b"\r\n");
+    finish_line(out, line_start)?;
     out.extend_from_slice(&request.value);
     out.extend_from_slice(b"\r\n");
     Ok(())
@@ -205,7 +192,7 @@ fn encode_delete(
     let key_is_base64 = write_key(out, &request.key)?;
 
     if key_is_base64 {
-        write_bare_flag(out, b'b');
+        wire::write_bare_flag(out, b'b');
     }
     if let Some(cas) = request.compare_cas {
         write_u64_flag(out, b'C', cas);
@@ -217,21 +204,16 @@ fn encode_delete(
         write_u64_flag(out, b'F', u64::from(flags));
     }
     if request.invalidate {
-        write_bare_flag(out, b'I');
+        wire::write_bare_flag(out, b'I');
     }
     if let Some(ttl) = request.ttl {
         write_i32_flag(out, b'T', ttl);
     }
     if request.remove_value {
-        write_bare_flag(out, b'x');
+        wire::write_bare_flag(out, b'x');
     }
 
-    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
-        return Err(MetaRequestEncodeError::FrameTooLarge {
-            maximum: MAX_COMMAND_LINE_BYTES,
-        });
-    }
-    out.extend_from_slice(b"\r\n");
+    finish_line(out, line_start)?;
     Ok(())
 }
 
@@ -244,13 +226,13 @@ fn encode_arithmetic(
     let key_is_base64 = write_key(out, &request.key)?;
 
     if key_is_base64 {
-        write_bare_flag(out, b'b');
+        wire::write_bare_flag(out, b'b');
     }
     if request.return_value {
-        write_bare_flag(out, b'v');
+        wire::write_bare_flag(out, b'v');
     }
     if request.return_cas {
-        write_bare_flag(out, b'c');
+        wire::write_bare_flag(out, b'c');
     }
     if let Some(cas) = request.compare_cas {
         write_u64_flag(out, b'C', cas);
@@ -271,16 +253,11 @@ fn encode_arithmetic(
         match instruction {
             ArithmeticTemporalInstruction::Vivify(ttl) => write_i32_flag(out, b'N', *ttl),
             ArithmeticTemporalInstruction::UpdateTtl(ttl) => write_i32_flag(out, b'T', *ttl),
-            ArithmeticTemporalInstruction::ReturnTtl => write_bare_flag(out, b't'),
+            ArithmeticTemporalInstruction::ReturnTtl => wire::write_bare_flag(out, b't'),
         }
     }
 
-    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
-        return Err(MetaRequestEncodeError::FrameTooLarge {
-            maximum: MAX_COMMAND_LINE_BYTES,
-        });
-    }
-    out.extend_from_slice(b"\r\n");
+    finish_line(out, line_start)?;
     Ok(())
 }
 
@@ -292,14 +269,9 @@ fn encode_debug(
     out.extend_from_slice(b"me ");
     let key_is_base64 = write_key(out, &request.key)?;
     if key_is_base64 {
-        write_bare_flag(out, b'b');
+        wire::write_bare_flag(out, b'b');
     }
-    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
-        return Err(MetaRequestEncodeError::FrameTooLarge {
-            maximum: MAX_COMMAND_LINE_BYTES,
-        });
-    }
-    out.extend_from_slice(b"\r\n");
+    finish_line(out, line_start)?;
 
     Ok(MetaReplyExpectation::Debug {
         key: request.key.clone_without_routing_prefix(),
@@ -317,18 +289,13 @@ fn write_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeErr
         return Ok(false);
     }
 
-    let mut encoded = [0; MAX_BASE64_KEY_BYTES];
-    let encoded_len = STANDARD.encode_slice(key, &mut encoded).map_err(|_| {
+    let mut scratch = [0; wire::MAX_BASE64_KEY_BYTES];
+    let encoded = wire::encode_base64_key(key, &mut scratch).map_err(|_| {
         MetaRequestEncodeError::EncodedKeyTooLong {
             maximum: MAX_KEY_BYTES,
         }
     })?;
-    if encoded_len > MAX_KEY_BYTES {
-        return Err(MetaRequestEncodeError::EncodedKeyTooLong {
-            maximum: MAX_KEY_BYTES,
-        });
-    }
-    out.extend_from_slice(&encoded[..encoded_len]);
+    out.extend_from_slice(encoded);
     Ok(true)
 }
 
@@ -336,40 +303,30 @@ fn is_text_key(key: &[u8]) -> bool {
     !key.iter().any(|byte| *byte <= b' ' || *byte == 0x7f)
 }
 
-fn write_bare_flag(out: &mut BytesMut, flag: u8) {
-    out.extend_from_slice(&[b' ', flag]);
-}
-
 fn write_u64_flag(out: &mut BytesMut, flag: u8, value: u64) {
-    write_bare_flag(out, flag);
-    write_u64(out, value);
+    wire::write_bare_flag(out, flag);
+    wire::write_u64(out, value);
 }
 
 fn write_i32_flag(out: &mut BytesMut, flag: u8, value: i32) {
-    write_bare_flag(out, flag);
-    if value < 0 {
-        out.extend_from_slice(b"-");
-    }
-    write_u64(out, u64::from(value.unsigned_abs()));
+    wire::write_bare_flag(out, flag);
+    wire::write_i64(out, i64::from(value));
 }
 
 fn write_mode_flag(out: &mut BytesMut, mode: u8) {
-    write_bare_flag(out, b'M');
+    wire::write_bare_flag(out, b'M');
     out.extend_from_slice(&[mode]);
 }
 
-fn write_u64(out: &mut BytesMut, mut value: u64) {
-    let mut digits = [0; 20];
-    let mut start = digits.len();
-    loop {
-        start -= 1;
-        digits[start] = b'0' + (value % 10) as u8;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
+/// Enforces the command-line limit, then terminates the line.
+fn finish_line(out: &mut BytesMut, line_start: usize) -> Result<(), MetaRequestEncodeError> {
+    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
+        return Err(MetaRequestEncodeError::FrameTooLarge {
+            maximum: MAX_COMMAND_LINE_BYTES,
+        });
     }
-    out.extend_from_slice(&digits[start..]);
+    out.extend_from_slice(b"\r\n");
+    Ok(())
 }
 
 #[cfg(test)]

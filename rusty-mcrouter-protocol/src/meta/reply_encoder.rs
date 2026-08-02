@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 
@@ -11,11 +10,9 @@ use crate::{
 };
 
 use super::{
-    KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_DEBUG_FIELDS,
+    wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_DEBUG_FIELDS,
     MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES,
 };
-
-const MAX_BASE64_KEY_BYTES: usize = MAX_KEY_BYTES.div_ceil(3) * 4;
 
 #[derive(Debug, Default)]
 pub struct MetaReplyEncoder;
@@ -138,7 +135,7 @@ fn encode_get_hit(
             return Err(MetaReplyEncodeError::SizeMismatch);
         }
         out.extend_from_slice(b"VA ");
-        write_u64(out, value.len() as u64);
+        wire::write_u64(out, value.len() as u64);
     } else {
         out.extend_from_slice(b"HD");
     }
@@ -146,26 +143,26 @@ fn encode_get_hit(
     for token in plan.output_order.iter() {
         match token {
             MetaOutputToken::Cas => {
-                write_required_u64(out, b'c', hit.cas, "CAS")?;
+                write_field(out, b'c', hit.cas, "CAS", true)?;
             }
             MetaOutputToken::ClientFlags => {
-                write_required_u64(out, b'f', hit.client_flags.map(u64::from), "client flags")?;
+                write_field(out, b'f', hit.client_flags.map(u64::from), "client flags", true)?;
             }
             MetaOutputToken::Size => {
-                write_required_u64(out, b's', hit.size, "size")?;
+                write_field(out, b's', hit.size, "size", true)?;
             }
             MetaOutputToken::Ttl => {
-                write_required_i64(out, b't', hit.ttl, "TTL")?;
+                write_field(out, b't', hit.ttl, "TTL", true)?;
             }
             MetaOutputToken::HitState => {
                 let value = hit
                     .hit_before
                     .ok_or(MetaReplyEncodeError::MissingField("hit state"))?;
-                write_bare_flag(out, b'h');
+                wire::write_bare_flag(out, b'h');
                 out.extend_from_slice(if value { b"1" } else { b"0" });
             }
             MetaOutputToken::LastAccess => {
-                write_required_u64(out, b'l', hit.last_access_seconds, "last access")?;
+                write_field(out, b'l', hit.last_access_seconds, "last access", true)?;
             }
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
             MetaOutputToken::Key => write_key(plan, out)?,
@@ -173,13 +170,13 @@ fn encode_get_hit(
     }
 
     if hit.recache == RecacheState::AlreadyWon {
-        write_bare_flag(out, b'Z');
+        wire::write_bare_flag(out, b'Z');
     }
     if hit.stale {
-        write_bare_flag(out, b'X');
+        wire::write_bare_flag(out, b'X');
     }
     if hit.recache == RecacheState::Won {
-        write_bare_flag(out, b'W');
+        wire::write_bare_flag(out, b'W');
     }
 
     finish_line(out, line_start)?;
@@ -206,8 +203,8 @@ fn encode_store(
     out.extend_from_slice(code);
     for token in plan.output_order.iter() {
         match token {
-            MetaOutputToken::Cas => write_required_u64(out, b'c', result.cas, "CAS")?,
-            MetaOutputToken::Size => write_required_u64(out, b's', result.size, "size")?,
+            MetaOutputToken::Cas => write_field(out, b'c', result.cas, "CAS", true)?,
+            MetaOutputToken::Size => write_field(out, b's', result.size, "size", true)?,
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
             MetaOutputToken::Key => write_key(plan, out)?,
             _ => {
@@ -274,21 +271,21 @@ fn encode_arithmetic(
     let mut value_digits = [0; 20];
     let value_body = result
         .value
-        .map(|value| format_u64(value, &mut value_digits));
+        .map(|value| wire::format_u64(value, &mut value_digits));
     let line_start = out.len();
     out.extend_from_slice(code);
     if let Some(value) = value_body {
         out.extend_from_slice(b" ");
-        write_u64(out, value.len() as u64);
+        wire::write_u64(out, value.len() as u64);
     }
 
     for token in plan.output_order.iter() {
         match token {
             MetaOutputToken::Cas => {
-                write_arithmetic_u64(out, b'c', result.cas, "CAS", success)?;
+                write_field(out, b'c', result.cas, "CAS", success)?;
             }
             MetaOutputToken::Ttl => {
-                write_arithmetic_i64(out, b't', result.ttl, "TTL", success)?;
+                write_field(out, b't', result.ttl, "TTL", success)?;
             }
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
             MetaOutputToken::Key => write_key(plan, out)?,
@@ -307,44 +304,6 @@ fn encode_arithmetic(
     Ok(())
 }
 
-fn write_arithmetic_u64(
-    out: &mut BytesMut,
-    flag: u8,
-    value: Option<u64>,
-    name: &'static str,
-    required: bool,
-) -> Result<(), MetaReplyEncodeError> {
-    match value {
-        Some(value) => {
-            write_bare_flag(out, flag);
-            write_u64(out, value);
-            Ok(())
-        }
-        None if required => Err(MetaReplyEncodeError::MissingField(name)),
-        None => Ok(()),
-    }
-}
-
-fn write_arithmetic_i64(
-    out: &mut BytesMut,
-    flag: u8,
-    value: Option<i64>,
-    name: &'static str,
-    required: bool,
-) -> Result<(), MetaReplyEncodeError> {
-    match value {
-        Some(value) => {
-            write_bare_flag(out, flag);
-            if value < 0 {
-                out.extend_from_slice(b"-");
-            }
-            write_u64(out, value.unsigned_abs());
-            Ok(())
-        }
-        None if required => Err(MetaReplyEncodeError::MissingField(name)),
-        None => Ok(()),
-    }
-}
 
 fn encode_debug(
     reply: &DebugReply,
@@ -384,18 +343,13 @@ fn write_debug_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaR
             out.extend_from_slice(key);
         }
         KeyEncoding::Base64 => {
-            let mut encoded = [0; MAX_BASE64_KEY_BYTES];
-            let encoded_len = STANDARD.encode_slice(key, &mut encoded).map_err(|_| {
+            let mut scratch = [0; wire::MAX_BASE64_KEY_BYTES];
+            let encoded = wire::encode_base64_key(key, &mut scratch).map_err(|_| {
                 MetaReplyEncodeError::EncodedKeyTooLong {
                     maximum: MAX_KEY_BYTES,
                 }
             })?;
-            if encoded_len > MAX_KEY_BYTES {
-                return Err(MetaReplyEncodeError::EncodedKeyTooLong {
-                    maximum: MAX_KEY_BYTES,
-                });
-            }
-            out.extend_from_slice(&encoded[..encoded_len]);
+            out.extend_from_slice(encoded);
         }
     }
     Ok(())
@@ -465,7 +419,7 @@ fn write_opaque(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaRepl
     if opaque.is_empty() || opaque.len() > super::MAX_OPAQUE_BYTES {
         return Err(MetaReplyEncodeError::InvalidData("invalid opaque token"));
     }
-    write_bare_flag(out, b'O');
+    wire::write_bare_flag(out, b'O');
     out.extend_from_slice(opaque);
     Ok(())
 }
@@ -479,75 +433,42 @@ fn write_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEn
         return Err(MetaReplyEncodeError::InvalidData("empty external key"));
     }
 
-    write_bare_flag(out, b'k');
+    wire::write_bare_flag(out, b'k');
     match plan.key_encoding {
         KeyEncoding::Text => out.extend_from_slice(key),
         KeyEncoding::Base64 => {
-            let mut encoded = [0; MAX_BASE64_KEY_BYTES];
-            let encoded_len = STANDARD.encode_slice(key, &mut encoded).map_err(|_| {
+            let mut scratch = [0; wire::MAX_BASE64_KEY_BYTES];
+            let encoded = wire::encode_base64_key(key, &mut scratch).map_err(|_| {
                 MetaReplyEncodeError::EncodedKeyTooLong {
                     maximum: MAX_KEY_BYTES,
                 }
             })?;
-            if encoded_len > MAX_KEY_BYTES {
-                return Err(MetaReplyEncodeError::EncodedKeyTooLong {
-                    maximum: MAX_KEY_BYTES,
-                });
-            }
-            out.extend_from_slice(&encoded[..encoded_len]);
-            write_bare_flag(out, b'b');
+            out.extend_from_slice(encoded);
+            wire::write_bare_flag(out, b'b');
         }
     }
     Ok(())
 }
 
-fn write_required_u64(
+/// Writes one ` <flag><value>` reply token. A `required` projection with no
+/// value is the reply/plan mismatch this encoder exists to catch; optional
+/// fields (arithmetic failure codes) are simply omitted.
+fn write_field<T: wire::WireInt>(
     out: &mut BytesMut,
     flag: u8,
-    value: Option<u64>,
+    value: Option<T>,
     name: &'static str,
+    required: bool,
 ) -> Result<(), MetaReplyEncodeError> {
-    let value = value.ok_or(MetaReplyEncodeError::MissingField(name))?;
-    write_bare_flag(out, flag);
-    write_u64(out, value);
-    Ok(())
-}
-
-fn write_required_i64(
-    out: &mut BytesMut,
-    flag: u8,
-    value: Option<i64>,
-    name: &'static str,
-) -> Result<(), MetaReplyEncodeError> {
-    let value = value.ok_or(MetaReplyEncodeError::MissingField(name))?;
-    write_bare_flag(out, flag);
-    if value < 0 {
-        out.extend_from_slice(b"-");
-    }
-    write_u64(out, value.unsigned_abs());
-    Ok(())
-}
-
-fn write_bare_flag(out: &mut BytesMut, flag: u8) {
-    out.extend_from_slice(&[b' ', flag]);
-}
-
-fn write_u64(out: &mut BytesMut, value: u64) {
-    let mut digits = [0; 20];
-    out.extend_from_slice(format_u64(value, &mut digits));
-}
-
-fn format_u64(mut value: u64, digits: &mut [u8; 20]) -> &[u8] {
-    let mut start = digits.len();
-    loop {
-        start -= 1;
-        digits[start] = b'0' + (value % 10) as u8;
-        value /= 10;
-        if value == 0 {
-            break;
+    match value {
+        Some(value) => {
+            wire::write_bare_flag(out, flag);
+            value.write(out);
+            Ok(())
         }
+        None if required => Err(MetaReplyEncodeError::MissingField(name)),
+        None => Ok(()),
     }
-    &digits[start..]
 }
 
 fn finish_line(out: &mut BytesMut, line_start: usize) -> Result<(), MetaReplyEncodeError> {
