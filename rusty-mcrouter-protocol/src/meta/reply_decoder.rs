@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use memchr::memchr;
 use thiserror::Error;
 
-use crate::reply::{DeleteReply, ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply, StoreResult};
+use crate::reply::{ArithmeticReply, ArithmeticResult, DeleteReply, ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply, StoreResult};
 
 use super::{numbers, seen_flags::SeenFlags, GetSuccessShape, MetaReplyExpectation};
 
@@ -31,6 +31,7 @@ enum ReplyDecodeState {
 #[derive(Debug)]
 enum PendingValue {
     Get(GetHit),
+    Arithmetic(ArithmeticResult),
 }
 
 impl Default for MetaReplyDecoder {
@@ -121,6 +122,10 @@ impl MetaReplyDecoder {
                             hit.value = Some(frame.slice(..length));
                             Ok(Some(Reply::Get(GetReply::Hit(hit))))
                         }
+                        PendingValue::Arithmetic(mut result) => {
+                            result.value = Some(parse_u64(&frame[..length])?);
+                            Ok(Some(Reply::Arithmetic(ArithmeticReply::Success(result))))
+                        }
                     };
                 }
             }
@@ -158,7 +163,102 @@ fn parse_line(
         MetaReplyExpectation::Get(shape) => parse_get_line(*shape, line),
         MetaReplyExpectation::Store { cas, size } => parse_store_line(*cas, *size, line),
         MetaReplyExpectation::Delete => parse_delete_line(line),
+        MetaReplyExpectation::Arithmetic { value, cas, ttl } => {
+            parse_arithmetic_line(*value, *cas, *ttl, line)
+        }
         _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
+    }
+}
+
+fn parse_arithmetic_line(
+    expect_value: bool,
+    expect_cas: bool,
+    expect_ttl: bool,
+    line: &[u8],
+) -> Result<ParsedLine, MetaReplyDecodeError> {
+    let mut tokens = line
+        .split(|byte| *byte == b' ')
+        .filter(|token| !token.is_empty());
+    let code = tokens
+        .next()
+        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+
+    match code {
+        b"HD" => {
+            if expect_value {
+                return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
+            }
+            let result = parse_arithmetic_attributes(tokens)?;
+            validate_arithmetic_success(&result, expect_cas, expect_ttl)?;
+            Ok(ParsedLine::Reply(Reply::Arithmetic(
+                ArithmeticReply::Success(result),
+            )))
+        }
+        b"VA" => {
+            if !expect_value {
+                return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
+            }
+            let length = tokens
+                .next()
+                .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
+                .and_then(parse_usize)?;
+            if length > MAX_REPLY_VALUE_BYTES {
+                return Err(MetaReplyDecodeError::ValueTooLarge {
+                    maximum: MAX_REPLY_VALUE_BYTES,
+                });
+            }
+            let result = parse_arithmetic_attributes(tokens)?;
+            validate_arithmetic_success(&result, expect_cas, expect_ttl)?;
+            Ok(ParsedLine::Value {
+                length,
+                pending: PendingValue::Arithmetic(result),
+            })
+        }
+        b"NS" => Ok(ParsedLine::Reply(Reply::Arithmetic(
+            ArithmeticReply::NotStored(parse_arithmetic_attributes(tokens)?),
+        ))),
+        b"EX" => Ok(ParsedLine::Reply(Reply::Arithmetic(
+            ArithmeticReply::Exists(parse_arithmetic_attributes(tokens)?),
+        ))),
+        b"NF" => Ok(ParsedLine::Reply(Reply::Arithmetic(
+            ArithmeticReply::NotFound(parse_arithmetic_attributes(tokens)?),
+        ))),
+        _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
+    }
+}
+
+fn parse_arithmetic_attributes<'a>(
+    tokens: impl Iterator<Item = &'a [u8]>,
+) -> Result<ArithmeticResult, MetaReplyDecodeError> {
+    let mut result = ArithmeticResult::default();
+    let mut seen = SeenFlags::default();
+
+    for token in tokens {
+        let (&flag, argument) = token
+            .split_first()
+            .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+        if !seen.insert(flag) {
+            return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+        }
+
+        match flag {
+            b'c' => result.cas = Some(parse_u64(argument)?),
+            b't' => result.ttl = Some(parse_i64(argument)?),
+            _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
+        }
+    }
+    Ok(result)
+}
+
+fn validate_arithmetic_success(
+    result: &ArithmeticResult,
+    expect_cas: bool,
+    expect_ttl: bool,
+) -> Result<(), MetaReplyDecodeError> {
+    if (expect_cas && result.cas.is_none()) || (expect_ttl && result.ttl.is_none()) {
+        Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH))
+    } else {
+        Ok(())
     }
 }
 
@@ -413,6 +513,17 @@ mod tests {
         size: true,
     };
     const DELETE: MetaReplyExpectation = MetaReplyExpectation::Delete;
+    const ARITHMETIC_HEADER: MetaReplyExpectation = MetaReplyExpectation::Arithmetic {
+        value: false,
+        cas: false,
+        ttl: false,
+    };
+    const ARITHMETIC_VALUE_WITH_FIELDS: MetaReplyExpectation = MetaReplyExpectation::Arithmetic {
+        value: true,
+        cas: true,
+        ttl: true,
+    };
+
     fn decode(expectation: &MetaReplyExpectation, input: &[u8]) -> Reply {
         let mut decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(input);
@@ -506,6 +617,95 @@ mod tests {
             let mut decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::from(input);
             assert!(decoder.decode(&STORE, &mut src).is_err(), "input={input:?}");
+        }
+    }
+
+    #[test]
+    fn decodes_arithmetic_header_success() {
+        assert_eq!(
+            decode(&ARITHMETIC_HEADER, b"HD\r\n"),
+            Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult::default()))
+        );
+    }
+
+    #[test]
+    fn decodes_arithmetic_value_at_every_split_point() {
+        let input = b"VA 20 t-1 c42\r\n18446744073709551615\r\n";
+
+        for split in 0..=input.len() {
+            let mut decoder = MetaReplyDecoder::new();
+            let mut src = BytesMut::new();
+            src.extend_from_slice(&input[..split]);
+            if split < input.len() {
+                assert_eq!(
+                    decoder.decode(&ARITHMETIC_VALUE_WITH_FIELDS, &mut src),
+                    Ok(None),
+                    "split={split}"
+                );
+                src.extend_from_slice(&input[split..]);
+            }
+
+            assert_eq!(
+                decoder
+                    .decode(&ARITHMETIC_VALUE_WITH_FIELDS, &mut src)
+                    .unwrap()
+                    .unwrap(),
+                Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
+                    value: Some(u64::MAX),
+                    cas: Some(42),
+                    ttl: Some(-1),
+                }))
+            );
+            assert!(src.is_empty(), "split={split}");
+        }
+    }
+
+    #[test]
+    fn decodes_all_arithmetic_failures() {
+        for (input, expected) in [
+            (
+                b"NS\r\n".as_slice(),
+                ArithmeticReply::NotStored(ArithmeticResult::default()),
+            ),
+            (
+                b"EX c41\r\n".as_slice(),
+                ArithmeticReply::Exists(ArithmeticResult {
+                    cas: Some(41),
+                    ..ArithmeticResult::default()
+                }),
+            ),
+            (
+                b"NF\r\n".as_slice(),
+                ArithmeticReply::NotFound(ArithmeticResult::default()),
+            ),
+        ] {
+            assert_eq!(
+                decode(&ARITHMETIC_HEADER, input),
+                Reply::Arithmetic(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_arithmetic_shape_fields_and_value() {
+        for (expectation, input) in [
+            (&ARITHMETIC_HEADER, b"VA 1\r\n1\r\n".as_slice()),
+            (&ARITHMETIC_VALUE_WITH_FIELDS, b"HD c42 t1\r\n".as_slice()),
+            (
+                &ARITHMETIC_VALUE_WITH_FIELDS,
+                b"VA 1 c42\r\n1\r\n".as_slice(),
+            ),
+            (
+                &ARITHMETIC_VALUE_WITH_FIELDS,
+                b"VA 1 c42 t1\r\nx\r\n".as_slice(),
+            ),
+        ] {
+            let mut decoder = MetaReplyDecoder::new();
+            let mut src = BytesMut::from(input);
+            assert!(
+                decoder.decode(expectation, &mut src).is_err(),
+                "input={input:?}"
+            );
         }
     }
 
