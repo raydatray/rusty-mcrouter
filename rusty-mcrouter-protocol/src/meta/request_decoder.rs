@@ -2,13 +2,14 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 
+use crate::bounded_list::CapacityExceeded;
 use crate::key::{Key, MAX_KEY_BYTES};
 use crate::meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan};
 use crate::reply::ErrorReply;
 use crate::request::Request;
 
 use super::command;
-use super::tokens::{find_line, split_tokens, FindLine, FlagError};
+use super::tokens::{find_line, split_tokens, BadNumber, FindLine, FlagError, UnexpectedArgument};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
@@ -234,7 +235,7 @@ pub fn parse_opaque(
     reply_plan
         .output_order
         .push(MetaOutputToken::Opaque)
-        .map_err(bad_command_line)
+        .map_err(capacity_error)
 }
 
 /// Parses the key under the plan's encoding and, for `k`, retains the
@@ -259,9 +260,19 @@ pub fn flag_error(error: FlagError) -> MetaRequestDecodeError {
     }
 }
 
-/// Maps any token-level failure to memcached's generic complaint; the
-/// request decoder never gives numeric or shape diagnostics beyond it.
-pub fn bad_command_line<E>(_: E) -> MetaRequestDecodeError {
+/// A numeric flag argument that is not a decimal number of its width.
+/// memcached gives no diagnostics beyond its generic complaint.
+pub fn bad_number(_: BadNumber) -> MetaRequestDecodeError {
+    recoverable_client_error(BAD_COMMAND_LINE)
+}
+
+/// A bare flag that unexpectedly carried an argument.
+pub fn bad_argument(_: UnexpectedArgument) -> MetaRequestDecodeError {
+    recoverable_client_error(BAD_COMMAND_LINE)
+}
+
+/// More flags than the reply plan or a temporal program can hold.
+pub fn capacity_error(_: CapacityExceeded) -> MetaRequestDecodeError {
     recoverable_client_error(BAD_COMMAND_LINE)
 }
 

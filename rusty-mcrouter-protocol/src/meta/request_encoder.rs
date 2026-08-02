@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{
     key::{Key, MAX_KEY_BYTES},
-    request::{ArithmeticTemporalInstruction, Request},
+    request::Request,
 };
 
 use super::{command, wire, MetaReplyExpectation};
@@ -23,29 +23,13 @@ impl MetaRequestEncoder {
         out: &mut BytesMut,
     ) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
         let checkpoint = out.len();
-        let result =
-            match request {
-                Request::Get(request) => {
-                    command::get::encode_request(request, out).map(MetaReplyExpectation::Get)
-                }
-                Request::Store(request) => command::store::encode_request(request, out).map(|()| {
-                    MetaReplyExpectation::Store {
-                        cas: request.return_cas,
-                        size: request.return_size,
-                    }
-                }),
-                Request::Delete(request) => command::delete::encode_request(request, out)
-                    .map(|()| MetaReplyExpectation::Delete),
-                Request::Arithmetic(request) => command::arithmetic::encode_request(request, out)
-                    .map(|()| MetaReplyExpectation::Arithmetic {
-                        value: request.return_value,
-                        cas: request.return_cas,
-                        ttl: request.temporal.iter().any(|instruction| {
-                            matches!(instruction, ArithmeticTemporalInstruction::ReturnTtl)
-                        }),
-                    }),
-                Request::Debug(request) => command::debug::encode_request(request, out),
-            };
+        let result = match request {
+            Request::Get(request) => command::get::encode_request(request, out),
+            Request::Store(request) => command::store::encode_request(request, out),
+            Request::Delete(request) => command::delete::encode_request(request, out),
+            Request::Arithmetic(request) => command::arithmetic::encode_request(request, out),
+            Request::Debug(request) => command::debug::encode_request(request, out),
+        };
         if result.is_err() {
             out.truncate(checkpoint);
         }
@@ -81,9 +65,7 @@ pub fn write_backend_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequ
         return Ok(false);
     }
 
-    wire::write_base64_key(out, key).map_err(|_| MetaRequestEncodeError::EncodedKeyTooLong {
-        maximum: MAX_KEY_BYTES,
-    })?;
+    wire::write_base64_key(out, key).map_err(encoded_key_too_long)?;
     Ok(true)
 }
 
@@ -104,6 +86,12 @@ pub fn write_i32_flag(out: &mut BytesMut, flag: u8, value: i32) {
 pub fn write_mode_flag(out: &mut BytesMut, mode: u8) {
     wire::write_bare_flag(out, b'M');
     out.extend_from_slice(&[mode]);
+}
+
+fn encoded_key_too_long(_: wire::EncodedKeyTooLong) -> MetaRequestEncodeError {
+    MetaRequestEncodeError::EncodedKeyTooLong {
+        maximum: MAX_KEY_BYTES,
+    }
 }
 
 pub fn command_line_too_long(error: wire::LineTooLong) -> MetaRequestEncodeError {
