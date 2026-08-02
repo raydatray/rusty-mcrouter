@@ -1,12 +1,13 @@
 use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 
-use crate::reply::{ArithmeticReply, ArithmeticResult, ErrorReply, GetHit, GetReply, Reply};
+use crate::reply::{ErrorReply, Reply};
 
 use super::command;
-use super::line_scanner::{scan_line, LineScan};
-use super::numbers::parse_u64;
-use super::MetaReplyExpectation;
+use super::line_scanner::{find_line, FindLine};
+use super::numbers::parse_usize;
+use super::tokens::split_tokens;
+use super::{GetSuccessShape, MetaReplyExpectation};
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_REPLY_VALUE_BYTES: usize = 1024 * 1024;
@@ -15,148 +16,116 @@ pub const MAX_DEBUG_FIELDS: usize = 64;
 pub const INVALID_RESPONSE: &str = "invalid Meta backend response";
 pub const SHAPE_MISMATCH: &str = "Meta backend response does not match request";
 
-#[derive(Debug)]
-pub struct MetaReplyDecoder {
-    state: ReplyDecodeState,
-}
-
-#[derive(Debug)]
-enum ReplyDecodeState {
-    Line {
-        scanned: usize,
-    },
-    Value {
-        length: usize,
-        pending: PendingValue,
-    },
-}
-
-impl Default for ReplyDecodeState {
-    fn default() -> Self {
-        Self::Line { scanned: 0 }
-    }
-}
-
-#[derive(Debug)]
-pub enum PendingValue {
-    Get(GetHit),
-    Arithmetic(ArithmeticResult),
-}
-
-impl Default for MetaReplyDecoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// A stateless decoder: each call frames one complete reply — the line plus,
+/// for an expected `VA`, its value block — and parses it in a single pass.
+#[derive(Debug, Default)]
+pub struct MetaReplyDecoder;
 
 impl MetaReplyDecoder {
     pub const fn new() -> Self {
-        Self {
-            state: ReplyDecodeState::Line { scanned: 0 },
-        }
+        Self
     }
 
-    /// Each pass takes the state out by value and puts back whatever is
-    /// still incomplete, so no arm ever re-proves which variant it holds.
+    /// Decodes at most one complete Meta reply. `Ok(None)` means the reply
+    /// is not fully buffered yet; nothing is consumed until it is.
     pub fn decode(
-        &mut self,
+        &self,
         expectation: &MetaReplyExpectation,
         src: &mut BytesMut,
     ) -> Result<Option<Reply>, MetaReplyDecodeError> {
-        loop {
-            match std::mem::take(&mut self.state) {
-                ReplyDecodeState::Line { scanned } => {
-                    let frame = match scan_line(scanned, src, MAX_REPLY_LINE_BYTES) {
-                        LineScan::Incomplete { scanned } => {
-                            self.state = ReplyDecodeState::Line { scanned };
-                            return Ok(None);
-                        }
-                        LineScan::OverLimit => {
-                            return Err(MetaReplyDecodeError::FrameTooLarge {
-                                maximum: MAX_REPLY_LINE_BYTES,
-                            });
-                        }
-                        LineScan::Frame(frame) => frame,
-                    };
-
-                    match parse_line(expectation, &frame.bytes[..frame.line_end])? {
-                        ParsedLine::Reply(reply) => return Ok(Some(reply)),
-                        ParsedLine::Value { length, pending } => {
-                            self.state = ReplyDecodeState::Value { length, pending };
-                        }
-                    }
-                }
-                ReplyDecodeState::Value { length, pending } => {
-                    let frame_len =
-                        length
-                            .checked_add(2)
-                            .ok_or(MetaReplyDecodeError::ValueTooLarge {
-                                maximum: MAX_REPLY_VALUE_BYTES,
-                            })?;
-                    if src.len() < frame_len {
-                        self.state = ReplyDecodeState::Value { length, pending };
-                        return Ok(None);
-                    }
-                    if &src[length..frame_len] != b"\r\n" {
-                        return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-                    }
-
-                    let frame = src.split_to(frame_len).freeze();
-                    return match pending {
-                        PendingValue::Get(mut hit) => {
-                            if hit.size.is_some_and(|size| size != length as u64) {
-                                return Err(MetaReplyDecodeError::InvalidResponse(
-                                    INVALID_RESPONSE,
-                                ));
-                            }
-                            hit.value = Some(frame.slice(..length));
-                            Ok(Some(Reply::Get(GetReply::Hit(hit))))
-                        }
-                        PendingValue::Arithmetic(mut result) => {
-                            result.value =
-                                Some(parse_u64(&frame[..length]).map_err(invalid_response)?);
-                            Ok(Some(Reply::Arithmetic(ArithmeticReply::Success(result))))
-                        }
-                    };
-                }
+        let (line_end, line_frame_len) = match find_line(src, MAX_REPLY_LINE_BYTES) {
+            FindLine::Incomplete => return Ok(None),
+            FindLine::OverLimit => {
+                return Err(MetaReplyDecodeError::FrameTooLarge {
+                    maximum: MAX_REPLY_LINE_BYTES,
+                });
             }
+            FindLine::Line { end, frame_len } => (end, frame_len),
+        };
+
+        let value_length = expected_value_length(expectation, &src[..line_end])?;
+        let frame_len = match value_length {
+            Some(length) => line_frame_len + length + 2,
+            None => line_frame_len,
+        };
+        if src.len() < frame_len {
+            return Ok(None);
         }
+
+        let frame = src.split_to(frame_len).freeze();
+        let value = match value_length {
+            Some(length) => {
+                if &frame[frame_len - 2..] != b"\r\n" {
+                    return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+                }
+                Some(frame.slice(line_frame_len..line_frame_len + length))
+            }
+            None => None,
+        };
+        parse_line(expectation, &frame[..line_end], value).map(Some)
     }
 
     pub fn decode_eof(&self, src: &BytesMut) -> Result<(), MetaReplyDecodeError> {
-        match self.state {
-            ReplyDecodeState::Line { .. } if src.is_empty() => Ok(()),
-            _ => Err(MetaReplyDecodeError::UnexpectedEof),
+        if src.is_empty() {
+            Ok(())
+        } else {
+            Err(MetaReplyDecodeError::UnexpectedEof)
         }
     }
 }
 
-pub enum ParsedLine {
-    Reply(Reply),
-    Value {
-        length: usize,
-        pending: PendingValue,
-    },
+/// Pre-parses the `VA <length>` token so framing can wait for the complete
+/// value block — but only when `expectation` allows a value reply. For
+/// header-only expectations a bogus backend `VA` fails in the command parser
+/// immediately, without waiting for a body that may never arrive.
+fn expected_value_length(
+    expectation: &MetaReplyExpectation,
+    line: &[u8],
+) -> Result<Option<usize>, MetaReplyDecodeError> {
+    let value_allowed = match expectation {
+        MetaReplyExpectation::Get(shape) => *shape != GetSuccessShape::Header,
+        MetaReplyExpectation::Arithmetic { value, .. } => *value,
+        _ => false,
+    };
+    if !value_allowed || !line.starts_with(b"VA ") {
+        return Ok(None);
+    }
+
+    let length = split_tokens(line)
+        .nth(1)
+        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
+        .and_then(|raw| parse_usize(raw).map_err(invalid_response))?;
+    if length > MAX_REPLY_VALUE_BYTES {
+        return Err(MetaReplyDecodeError::ValueTooLarge {
+            maximum: MAX_REPLY_VALUE_BYTES,
+        });
+    }
+    Ok(Some(length))
 }
 
+/// Parses one complete reply: the line and, when framing sized one from the
+/// line's `VA` length token, its value.
 fn parse_line(
     expectation: &MetaReplyExpectation,
     line: &[u8],
-) -> Result<ParsedLine, MetaReplyDecodeError> {
+    value: Option<Bytes>,
+) -> Result<Reply, MetaReplyDecodeError> {
     if let Some(error) = parse_error_reply(line)? {
-        return Ok(ParsedLine::Reply(Reply::Error(error)));
+        return Ok(Reply::Error(error));
     }
     if line.first() == Some(&b' ') {
         return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
     }
 
     match expectation {
-        MetaReplyExpectation::Get(shape) => command::get::parse_reply(*shape, line),
+        MetaReplyExpectation::Get(shape) => command::get::parse_reply(*shape, line, value),
         MetaReplyExpectation::Store { cas, size } => command::store::parse_reply(*cas, *size, line),
         MetaReplyExpectation::Delete => command::delete::parse_reply(line),
-        MetaReplyExpectation::Arithmetic { value, cas, ttl } => {
-            command::arithmetic::parse_reply(*value, *cas, *ttl, line)
-        }
+        MetaReplyExpectation::Arithmetic {
+            value: expect_value,
+            cas,
+            ttl,
+        } => command::arithmetic::parse_reply(*expect_value, *cas, *ttl, line, value),
         MetaReplyExpectation::Debug { key } => command::debug::parse_reply(key, line),
     }
 }
@@ -218,9 +187,9 @@ pub enum MetaReplyDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::GetSuccessShape;
     use crate::reply::{
-        DebugField, DebugHit, DebugReply, DeleteReply, RecacheState, StoreReply, StoreResult,
+        ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, DeleteReply, GetHit,
+        GetReply, RecacheState, StoreReply, StoreResult,
     };
 
     const HEADER: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Header);
@@ -248,7 +217,7 @@ mod tests {
     };
 
     fn decode(expectation: &MetaReplyExpectation, input: &[u8]) -> Reply {
-        let mut decoder = MetaReplyDecoder::new();
+        let decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(input);
         let reply = decoder.decode(expectation, &mut src).unwrap().unwrap();
         assert!(src.is_empty());
@@ -372,7 +341,7 @@ mod tests {
             b"ME key =value\r\n".as_slice(),
             b"EN extra\r\n".as_slice(),
         ] {
-            let mut decoder = MetaReplyDecoder::new();
+            let decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::from(input);
             assert!(
                 decoder.decode(&expectation, &mut src).is_err(),
@@ -396,7 +365,7 @@ mod tests {
 
         let mut rejected = accepted[..accepted.len() - 2].to_vec();
         rejected.extend_from_slice(b" extra=v\r\n");
-        let mut decoder = MetaReplyDecoder::new();
+        let decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(rejected.as_slice());
         assert_eq!(
             decoder.decode(&expectation, &mut src),
@@ -465,7 +434,7 @@ mod tests {
         let input = b"VA 20 t-1 c42\r\n18446744073709551615\r\n";
 
         for split in 0..=input.len() {
-            let mut decoder = MetaReplyDecoder::new();
+            let decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::new();
             src.extend_from_slice(&input[..split]);
             if split < input.len() {
@@ -532,7 +501,7 @@ mod tests {
                 b"VA 1 c42 t1\r\nx\r\n".as_slice(),
             ),
         ] {
-            let mut decoder = MetaReplyDecoder::new();
+            let decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::from(input);
             assert!(
                 decoder.decode(expectation, &mut src).is_err(),
@@ -544,7 +513,7 @@ mod tests {
     #[test]
     fn rejects_invalid_delete_codes_and_attributes() {
         for input in [b"EN\r\n".as_slice(), b"HD c1\r\n".as_slice()] {
-            let mut decoder = MetaReplyDecoder::new();
+            let decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::from(input);
             assert!(
                 decoder.decode(&DELETE, &mut src).is_err(),
@@ -566,7 +535,7 @@ mod tests {
 
     #[test]
     fn rejects_store_reply_missing_expected_fields() {
-        let mut decoder = MetaReplyDecoder::new();
+        let decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(&b"HD c42\r\n"[..]);
 
         assert_eq!(
@@ -582,7 +551,7 @@ mod tests {
             b"HD f1\r\n".as_slice(),
             b"HD c1 c2\r\n".as_slice(),
         ] {
-            let mut decoder = MetaReplyDecoder::new();
+            let decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::from(input);
             assert!(decoder.decode(&STORE, &mut src).is_err(), "input={input:?}");
         }
@@ -611,7 +580,7 @@ mod tests {
         let input = b"VA 5 c42 s5\r\na\0b\nc\r\n";
 
         for split in 0..=input.len() {
-            let mut decoder = MetaReplyDecoder::new();
+            let decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::new();
             src.extend_from_slice(&input[..split]);
             if split < input.len() {
@@ -648,7 +617,7 @@ mod tests {
             (&HEADER, b"VA 1\r\nx\r\n".as_slice()),
             (&VALUE, b"HD\r\n".as_slice()),
         ] {
-            let mut decoder = MetaReplyDecoder::new();
+            let decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::from(input);
             assert_eq!(
                 decoder.decode(expectation, &mut src),
@@ -682,7 +651,7 @@ mod tests {
             b"HD W Z\r\n".as_slice(),
             b"VA nope\r\n".as_slice(),
         ] {
-            let mut decoder = MetaReplyDecoder::new();
+            let decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::from(input);
             assert_eq!(
                 decoder.decode(&CONDITIONAL, &mut src),
@@ -691,7 +660,7 @@ mod tests {
             );
         }
 
-        let mut decoder = MetaReplyDecoder::new();
+        let decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(&b"VA 1\r\nx\nx"[..]);
         assert_eq!(
             decoder.decode(&VALUE, &mut src),
@@ -701,7 +670,7 @@ mod tests {
 
     #[test]
     fn validates_value_size_attribute() {
-        let mut decoder = MetaReplyDecoder::new();
+        let decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(&b"VA 3 s4\r\nfoo\r\n"[..]);
 
         assert_eq!(
@@ -712,7 +681,7 @@ mod tests {
 
     #[test]
     fn rejects_oversized_values_before_waiting_for_body() {
-        let mut decoder = MetaReplyDecoder::new();
+        let decoder = MetaReplyDecoder::new();
         let input = format!("VA {}\r\n", MAX_REPLY_VALUE_BYTES + 1);
         let mut src = BytesMut::from(input.as_bytes());
 
@@ -726,7 +695,7 @@ mod tests {
 
     #[test]
     fn eof_rejects_partial_line_or_value() {
-        let mut decoder = MetaReplyDecoder::new();
+        let decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(&b"HD c"[..]);
         assert_eq!(decoder.decode(&HEADER, &mut src), Ok(None));
         assert_eq!(
@@ -734,7 +703,7 @@ mod tests {
             Err(MetaReplyDecodeError::UnexpectedEof)
         );
 
-        let mut decoder = MetaReplyDecoder::new();
+        let decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(&b"VA 3\r\nfo"[..]);
         assert_eq!(decoder.decode(&VALUE, &mut src), Ok(None));
         assert_eq!(

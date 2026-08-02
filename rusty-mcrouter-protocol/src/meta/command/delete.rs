@@ -3,9 +3,7 @@
 use bytes::{Bytes, BytesMut};
 
 use crate::meta::numbers::{parse_i32, parse_u32, parse_u64};
-use crate::meta::reply_decoder::{
-    MetaReplyDecodeError, ParsedLine, INVALID_RESPONSE, SHAPE_MISMATCH,
-};
+use crate::meta::reply_decoder::{MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH};
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_key_token, write_opaque, MetaReplyEncodeError,
 };
@@ -139,7 +137,7 @@ pub fn encode_request(
     Ok(())
 }
 
-pub fn parse_reply(line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
+pub fn parse_reply(line: &[u8]) -> Result<Reply, MetaReplyDecodeError> {
     let mut tokens = split_tokens(line);
     let code = tokens
         .next()
@@ -155,7 +153,7 @@ pub fn parse_reply(line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
         b"NF" => DeleteReply::NotFound,
         _ => return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
     };
-    Ok(ParsedLine::Reply(Reply::Delete(reply)))
+    Ok(Reply::Delete(reply))
 }
 
 pub fn encode_reply(

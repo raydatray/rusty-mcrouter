@@ -4,9 +4,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
 
 use crate::key::MAX_KEY_BYTES;
-use crate::meta::reply_decoder::{
-    MetaReplyDecodeError, ParsedLine, INVALID_RESPONSE, SHAPE_MISMATCH,
-};
+use crate::meta::reply_decoder::{MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH};
 use crate::meta::reply_encoder::{reply_line_too_long, MetaReplyEncodeError};
 use crate::meta::request_decoder::{
     bad_command_line, flag_error, parse_key, recoverable_client_error, require_hint_argument,
@@ -74,14 +72,14 @@ pub fn encode_request(
     })
 }
 
-pub fn parse_reply(expected_key: &Bytes, line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
+pub fn parse_reply(expected_key: &Bytes, line: &[u8]) -> Result<Reply, MetaReplyDecodeError> {
     let mut tokens = split_tokens(line);
     match tokens.next() {
         Some(b"EN") => {
             if tokens.next().is_some() {
                 return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
             }
-            Ok(ParsedLine::Reply(Reply::Debug(DebugReply::Miss)))
+            Ok(Reply::Debug(DebugReply::Miss))
         }
         Some(b"ME") => {
             let returned_key = tokens
@@ -115,9 +113,7 @@ pub fn parse_reply(expected_key: &Bytes, line: &[u8]) -> Result<ParsedLine, Meta
                     value: Bytes::copy_from_slice(&token[separator + 1..]),
                 });
             }
-            Ok(ParsedLine::Reply(Reply::Debug(DebugReply::Hit(DebugHit {
-                fields,
-            }))))
+            Ok(Reply::Debug(DebugReply::Hit(DebugHit { fields })))
         }
         _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
     }

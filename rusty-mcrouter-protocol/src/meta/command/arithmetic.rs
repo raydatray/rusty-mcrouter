@@ -2,10 +2,9 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::meta::numbers::{parse_i32, parse_i64, parse_u64, parse_usize};
+use crate::meta::numbers::{parse_i32, parse_i64, parse_u64};
 use crate::meta::reply_decoder::{
-    invalid_response, MetaReplyDecodeError, ParsedLine, PendingValue, INVALID_RESPONSE,
-    SHAPE_MISMATCH,
+    invalid_response, MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH,
 };
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_field, write_key_token, write_opaque, MetaReplyEncodeError,
@@ -21,7 +20,7 @@ use crate::meta::request_encoder::{
 use crate::meta::tokens::{flags, require_no_argument, split_tokens, FlagBudget};
 use crate::meta::{
     wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_COMMAND_LINE_BYTES,
-    MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES,
+    MAX_REPLY_LINE_BYTES,
 };
 use crate::reply::{ArithmeticReply, ArithmeticResult, Reply};
 use crate::request::{
@@ -191,7 +190,8 @@ pub fn parse_reply(
     expect_cas: bool,
     expect_ttl: bool,
     line: &[u8],
-) -> Result<ParsedLine, MetaReplyDecodeError> {
+    value: Option<Bytes>,
+) -> Result<Reply, MetaReplyDecodeError> {
     let mut tokens = split_tokens(line);
     let code = tokens
         .next()
@@ -204,38 +204,32 @@ pub fn parse_reply(
             }
             let result = parse_attributes(tokens)?;
             validate_success(&result, expect_cas, expect_ttl)?;
-            Ok(ParsedLine::Reply(Reply::Arithmetic(
-                ArithmeticReply::Success(result),
-            )))
+            Ok(Reply::Arithmetic(ArithmeticReply::Success(result)))
         }
         b"VA" => {
             if !expect_value {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
-            let length = tokens
-                .next()
-                .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-                .and_then(|raw| parse_usize(raw).map_err(invalid_response))?;
-            if length > MAX_REPLY_VALUE_BYTES {
-                return Err(MetaReplyDecodeError::ValueTooLarge {
-                    maximum: MAX_REPLY_VALUE_BYTES,
-                });
+            // Framing validated the length token and sized `value` from it.
+            if tokens.next().is_none() {
+                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
             }
-            let result = parse_attributes(tokens)?;
+            let Some(value) = value else {
+                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+            };
+            let mut result = parse_attributes(tokens)?;
             validate_success(&result, expect_cas, expect_ttl)?;
-            Ok(ParsedLine::Value {
-                length,
-                pending: PendingValue::Arithmetic(result),
-            })
+            result.value = Some(parse_u64(&value).map_err(invalid_response)?);
+            Ok(Reply::Arithmetic(ArithmeticReply::Success(result)))
         }
-        b"NS" => Ok(ParsedLine::Reply(Reply::Arithmetic(
-            ArithmeticReply::NotStored(parse_attributes(tokens)?),
+        b"NS" => Ok(Reply::Arithmetic(ArithmeticReply::NotStored(
+            parse_attributes(tokens)?,
         ))),
-        b"EX" => Ok(ParsedLine::Reply(Reply::Arithmetic(
-            ArithmeticReply::Exists(parse_attributes(tokens)?),
+        b"EX" => Ok(Reply::Arithmetic(ArithmeticReply::Exists(
+            parse_attributes(tokens)?,
         ))),
-        b"NF" => Ok(ParsedLine::Reply(Reply::Arithmetic(
-            ArithmeticReply::NotFound(parse_attributes(tokens)?),
+        b"NF" => Ok(Reply::Arithmetic(ArithmeticReply::NotFound(
+            parse_attributes(tokens)?,
         ))),
         _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
     }
