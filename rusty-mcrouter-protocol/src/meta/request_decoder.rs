@@ -9,8 +9,8 @@ use crate::reply::ErrorReply;
 use crate::{
     meta::{KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan},
     request::{
-        GetRequest, GetTemporalInstruction, GetTemporalInstructions, Request, StoreMode,
-        StoreRequest,
+        DeleteRequest, GetRequest, GetTemporalInstruction, GetTemporalInstructions, Request,
+        StoreMode, StoreRequest,
     },
 };
 
@@ -251,6 +251,7 @@ fn parse_command(
         .filter(|token| !token.is_empty());
     match tokens.next() {
         Some(b"mg") => parse_get(tokens, key_frame),
+        Some(b"md") => parse_delete(tokens, key_frame),
         _ => Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error)),
     }
 }
@@ -558,6 +559,103 @@ fn parse_store_fields<'a>(
     })
 }
 
+fn parse_delete<'a>(
+    mut tokens: impl Iterator<Item = &'a [u8]>,
+    key_frame: Option<&Bytes>,
+) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
+    let raw_key = tokens
+        .next()
+        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+    let mut compare_cas = None;
+    let mut override_cas = None;
+    let mut client_flags = None;
+    let mut invalidate = false;
+    let mut ttl = None;
+    let mut remove_value = false;
+    let mut reply_plan = MetaReplyPlan::default();
+    let mut seen = SeenFlags::default();
+    let mut flag_count = 0;
+    let mut return_key = false;
+
+    for token in tokens {
+        flag_count += 1;
+        // 20 line tokens minus `md` and the key. Unreachable today (only 12
+        // distinct valid md flags exist), kept for the same reason as `ms`.
+        if flag_count > MAX_LINE_TOKENS - 2 {
+            return Err(recoverable_client_error(OPTIONS_FLAGS_TOO_LONG));
+        }
+
+        let (&flag, argument) = token
+            .split_first()
+            .ok_or_else(|| recoverable_client_error(INVALID_FLAG))?;
+        if !flag.is_ascii_alphabetic() {
+            return Err(recoverable_client_error(INVALID_FLAG));
+        }
+        if !seen.insert(flag) {
+            return Err(recoverable_client_error(DUPLICATE_FLAG));
+        }
+
+        match flag {
+            b'b' => {
+                require_no_argument(argument)?;
+                reply_plan.key_encoding = KeyEncoding::Base64;
+            }
+            b'C' => compare_cas = Some(parse_u64(argument)?),
+            b'E' => override_cas = Some(parse_u64(argument)?),
+            b'F' => client_flags = Some(parse_u32(argument)?),
+            b'I' => {
+                require_no_argument(argument)?;
+                invalidate = true;
+            }
+            b'k' => {
+                require_no_argument(argument)?;
+                return_key = true;
+                push_output(&mut reply_plan, MetaOutputToken::Key)?;
+            }
+            b'O' => {
+                if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
+                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
+                }
+                reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
+                push_output(&mut reply_plan, MetaOutputToken::Opaque)?;
+            }
+            b'q' => {
+                require_no_argument(argument)?;
+                reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
+            }
+            b'T' => ttl = Some(parse_i32(argument)?),
+            b'x' => {
+                require_no_argument(argument)?;
+                remove_value = true;
+            }
+            b'P' | b'L' => {
+                if argument.is_empty() {
+                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
+                }
+            }
+            _ => return Err(recoverable_client_error(INVALID_FLAG)),
+        }
+    }
+
+    let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
+    if return_key {
+        reply_plan.external_key = Some(key.clone_bytes());
+    }
+
+    Ok(DecodedMetaCommand::Request {
+        request: Request::Delete(DeleteRequest {
+            key,
+            compare_cas,
+            override_cas,
+            client_flags,
+            invalidate,
+            ttl,
+            remove_value,
+        }),
+        reply_plan,
+    })
+}
+
 fn parse_key(
     raw: &[u8],
     encoding: KeyEncoding,
@@ -858,6 +956,110 @@ mod tests {
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
         assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+    }
+
+    #[test]
+    fn decodes_basic_delete() {
+        let DecodedMetaCommand::Request {
+            request: Request::Delete(request),
+            reply_plan,
+        } = decode(b"md key\r\n")
+        else {
+            panic!("expected delete request");
+        };
+
+        assert_eq!(request.key.as_bytes(), b"key");
+        assert_eq!(request.compare_cas, None);
+        assert_eq!(request.override_cas, None);
+        assert_eq!(request.client_flags, None);
+        assert!(!request.invalidate);
+        assert_eq!(request.ttl, None);
+        assert!(!request.remove_value);
+        assert_eq!(reply_plan, MetaReplyPlan::default());
+    }
+
+    #[test]
+    fn separates_delete_semantics_from_frontend_reply_plan() {
+        let DecodedMetaCommand::Request {
+            request: Request::Delete(request),
+            reply_plan,
+        } = decode(b"md key C42 E43 F7 I k Otag q T60 x Pproxy Lpath/\r\n")
+        else {
+            panic!("expected delete request");
+        };
+
+        assert_eq!(request.compare_cas, Some(42));
+        assert_eq!(request.override_cas, Some(43));
+        assert_eq!(request.client_flags, Some(7));
+        assert!(request.invalidate);
+        assert_eq!(request.ttl, Some(60));
+        assert!(request.remove_value);
+        assert_eq!(reply_plan.quiet, MetaQuietPolicy::SuppressSuccess);
+        assert_eq!(reply_plan.opaque.as_deref(), Some(b"tag".as_slice()));
+        assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+        assert_eq!(
+            reply_plan.output_order.iter().copied().collect::<Vec<_>>(),
+            vec![MetaOutputToken::Key, MetaOutputToken::Opaque]
+        );
+    }
+
+    #[test]
+    fn decodes_delete_at_every_split_point() {
+        let input = b"md /region/cluster/key Otag C42 I T60\r\n";
+
+        for split in 0..=input.len() {
+            let mut decoder = MetaRequestDecoder::new();
+            let mut src = BytesMut::new();
+            src.extend_from_slice(&input[..split]);
+            if split < input.len() {
+                assert_eq!(decoder.decode(&mut src), Ok(None), "split={split}");
+                src.extend_from_slice(&input[split..]);
+            }
+
+            let DecodedMetaCommand::Request {
+                request: Request::Delete(request),
+                reply_plan,
+            } = decoder.decode(&mut src).unwrap().unwrap()
+            else {
+                panic!("expected delete request at split={split}");
+            };
+            assert_eq!(request.key.as_bytes(), b"/region/cluster/key");
+            assert_eq!(request.compare_cas, Some(42));
+            assert!(request.invalidate);
+            assert_eq!(reply_plan.opaque.as_deref(), Some(b"tag".as_slice()));
+            assert!(src.is_empty(), "split={split}");
+        }
+    }
+
+    #[test]
+    fn normalizes_base64_delete_key() {
+        let DecodedMetaCommand::Request {
+            request: Request::Delete(request),
+            reply_plan,
+        } = decode(b"md a2V5 b k\r\n")
+        else {
+            panic!("expected delete request");
+        };
+
+        assert_eq!(request.key.as_bytes(), b"key");
+        assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
+        assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+    }
+
+    #[test]
+    fn rejects_invalid_delete_flags() {
+        assert_eq!(
+            decode_error(b"md key I I\r\n"),
+            recoverable_client_error(DUPLICATE_FLAG)
+        );
+        assert_eq!(
+            decode_error(b"md key v\r\n"),
+            recoverable_client_error(INVALID_FLAG)
+        );
+        assert_eq!(
+            decode_error(b"md key Cnope\r\n"),
+            recoverable_client_error(BAD_COMMAND_LINE)
+        );
     }
 
     #[test]
