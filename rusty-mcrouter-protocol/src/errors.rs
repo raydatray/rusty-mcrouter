@@ -8,9 +8,3 @@ pub enum KeyError {
     #[error("key is {actual} bytes, exceeding the {maximum}-byte limit")]
     TooLong { actual: usize, maximum: usize },
 }
-
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum ParseError {
-    #[error("too many flags")]
-    TooManyFlags,
-}
