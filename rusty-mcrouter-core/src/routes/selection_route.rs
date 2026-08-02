@@ -36,74 +36,42 @@ impl Route for SelectionRoute {
     }
 }
 
+/// mcrouter hashes on the key with the `/region/cluster/` routing prefix
+/// removed and everything from the `|#|` "hash stop" onward excluded; both
+/// rules live in [`rusty_mcrouter_protocol::Key`].
 fn routing_key(req: &Request) -> &[u8] {
-    let key = match req {
-        Request::Get { key }
-        | Request::Set { key, .. }
-        | Request::Delete { key }
-        | Request::Add { key, .. }
-        | Request::Replace { key, .. }
-        | Request::Append { key, .. }
-        | Request::Prepend { key, .. }
-        | Request::Incr { key, .. }
-        | Request::Decr { key, .. }
-        | Request::Touch { key, .. } => &key[..],
-    };
-    hash_stop(key)
-}
-
-/// mcrouter excludes everything from the `|#|` "hash stop" onward from the
-/// routing key
-/// - routing-prefix stripping is deferred until prefix routing
-fn hash_stop(key: &[u8]) -> &[u8] {
-    const MARKER: &[u8] = b"|#|";
-    match key
-        .windows(MARKER.len())
-        .position(|window| window == MARKER)
-    {
-        Some(pos) => &key[..pos],
-        None => key,
-    }
+    req.key().routing_key()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
+    use crate::test_support::{req_delete, req_get};
 
     #[test]
     fn routing_key_extracts_single_key() {
-        let req = Request::Delete {
-            key: Bytes::from_static(b"user:1"),
-        };
-        assert_eq!(routing_key(&req), b"user:1");
+        assert_eq!(routing_key(&req_delete(b"user:1")), b"user:1");
     }
 
     #[test]
     fn routing_key_cuts_at_hash_stop() {
-        let req = Request::Delete {
-            key: Bytes::from_static(b"user:1|#|debuginfo"),
-        };
-        assert_eq!(routing_key(&req), b"user:1");
+        assert_eq!(routing_key(&req_delete(b"user:1|#|debuginfo")), b"user:1");
+    }
+
+    #[test]
+    fn routing_key_strips_the_routing_prefix() {
+        // `/region/cluster/key` and `key` must land on the same child.
+        assert_eq!(
+            routing_key(&req_get(b"/region/cluster/user:1")),
+            routing_key(&req_get(b"user:1"))
+        );
     }
 
     #[test]
     fn routing_key_hash_stop_makes_suffix_irrelevant() {
-        // key and key|#|suffix must produce the same routing key
-        let plain = Request::Get {
-            key: Bytes::from_static(b"user:1"),
-        };
-        let suffixed = Request::Get {
-            key: Bytes::from_static(b"user:1|#|x"),
-        };
-        assert_eq!(routing_key(&plain), routing_key(&suffixed));
-    }
-
-    #[test]
-    fn hash_stop_handles_marker_edges() {
-        assert_eq!(hash_stop(b"abc"), b"abc"); // no marker
-        assert_eq!(hash_stop(b"a|#|b"), b"a"); // marker mid
-        assert_eq!(hash_stop(b"|#|b"), b""); // marker at start -> empty prefix
-        assert_eq!(hash_stop(b"a|#|"), b"a"); // marker at end
+        assert_eq!(
+            routing_key(&req_get(b"user:1")),
+            routing_key(&req_get(b"user:1|#|x"))
+        );
     }
 }
