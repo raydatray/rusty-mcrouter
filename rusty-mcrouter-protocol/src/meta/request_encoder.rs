@@ -4,10 +4,10 @@ use thiserror::Error;
 
 use crate::{
     key::{Key, MAX_KEY_BYTES},
-    request::{GetRequest, GetTemporalInstruction, Request},
+    request::{GetRequest, GetTemporalInstruction, Request, StoreMode, StoreRequest},
 };
 
-use super::{GetSuccessShape, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES};
+use super::{GetSuccessShape, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES, MAX_VALUE_BYTES};
 
 const MAX_BASE64_KEY_BYTES: usize = MAX_KEY_BYTES.div_ceil(3) * 4;
 
@@ -28,6 +28,12 @@ impl MetaRequestEncoder {
         let checkpoint = out.len();
         let result = match request {
             Request::Get(request) => encode_get(request, out).map(MetaReplyExpectation::Get),
+            Request::Store(request) => {
+                encode_store(request, out).map(|()| MetaReplyExpectation::Store {
+                    cas: request.return_cas,
+                    size: request.return_size,
+                })
+            }
             _ => Err(MetaRequestEncodeError::UnsupportedRequest),
         };
         if result.is_err() {
@@ -47,6 +53,9 @@ pub enum MetaRequestEncodeError {
 
     #[error("base64-encoded backend key exceeds the {maximum}-byte limit")]
     EncodedKeyTooLong { maximum: usize },
+
+    #[error("Meta request value exceeds the {maximum}-byte limit")]
+    ValueTooLarge { maximum: usize },
 
     #[error("Meta request exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
@@ -116,6 +125,65 @@ fn encode_get(
     })
 }
 
+fn encode_store(request: &StoreRequest, out: &mut BytesMut) -> Result<(), MetaRequestEncodeError> {
+    if request.value.len() > MAX_VALUE_BYTES {
+        return Err(MetaRequestEncodeError::ValueTooLarge {
+            maximum: MAX_VALUE_BYTES,
+        });
+    }
+
+    let line_start = out.len();
+    out.extend_from_slice(b"ms ");
+    let key_is_base64 = write_key(out, &request.key)?;
+    out.extend_from_slice(b" ");
+    write_u64(out, request.value.len() as u64);
+
+    if key_is_base64 {
+        write_bare_flag(out, b'b');
+    }
+    if request.return_cas {
+        write_bare_flag(out, b'c');
+    }
+    if request.return_size {
+        write_bare_flag(out, b's');
+    }
+    if let Some(cas) = request.compare_cas {
+        write_u64_flag(out, b'C', cas);
+    }
+    if let Some(cas) = request.override_cas {
+        write_u64_flag(out, b'E', cas);
+    }
+    if let Some(flags) = request.client_flags {
+        write_u64_flag(out, b'F', u64::from(flags));
+    }
+    if request.invalidate {
+        write_bare_flag(out, b'I');
+    }
+    if let Some(ttl) = request.ttl {
+        write_i32_flag(out, b'T', ttl);
+    }
+    match request.mode {
+        StoreMode::Set => {}
+        StoreMode::Add => write_mode_flag(out, b'E'),
+        StoreMode::Replace => write_mode_flag(out, b'R'),
+        StoreMode::Append => write_mode_flag(out, b'A'),
+        StoreMode::Prepend => write_mode_flag(out, b'P'),
+    }
+    if let Some(ttl) = request.vivify_ttl {
+        write_i32_flag(out, b'N', ttl);
+    }
+
+    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
+        return Err(MetaRequestEncodeError::FrameTooLarge {
+            maximum: MAX_COMMAND_LINE_BYTES,
+        });
+    }
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(&request.value);
+    out.extend_from_slice(b"\r\n");
+    Ok(())
+}
+
 fn write_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
     let key = key.key_without_routing_prefix();
     if key.is_empty() {
@@ -161,6 +229,11 @@ fn write_i32_flag(out: &mut BytesMut, flag: u8, value: i32) {
         out.extend_from_slice(b"-");
     }
     write_u64(out, u64::from(value.unsigned_abs()));
+}
+
+fn write_mode_flag(out: &mut BytesMut, mode: u8) {
+    write_bare_flag(out, b'M');
+    out.extend_from_slice(&[mode]);
 }
 
 fn write_u64(out: &mut BytesMut, mut value: u64) {
@@ -220,12 +293,115 @@ mod tests {
         }
     }
 
+    fn store(key: Key, value: Bytes) -> StoreRequest {
+        StoreRequest {
+            key,
+            value,
+            return_cas: false,
+            return_size: false,
+            mode: StoreMode::Set,
+            client_flags: None,
+            ttl: None,
+            compare_cas: None,
+            override_cas: None,
+            invalidate: false,
+            vivify_ttl: None,
+        }
+    }
+
     #[test]
     fn encodes_basic_get() {
         assert_eq!(
             encode(&parse(b"mg key\r\n")).unwrap(),
             b"mg key\r\n".as_slice()
         );
+    }
+
+    #[test]
+    fn encodes_basic_store() {
+        let request = parse(b"ms key 3\r\nfoo\r\n");
+        assert_eq!(encode(&request).unwrap(), b"ms key 3\r\nfoo\r\n".as_slice());
+    }
+
+    #[test]
+    fn returns_store_reply_expectation() {
+        let request = parse(b"ms key 3\r\nfoo\r\n");
+        let mut out = BytesMut::new();
+
+        assert_eq!(
+            MetaRequestEncoder::new().encode(&request, &mut out),
+            Ok(MetaReplyExpectation::Store {
+                cas: false,
+                size: false,
+            })
+        );
+    }
+
+    #[test]
+    fn strips_store_frontend_metadata_and_routing_prefix() {
+        let request = parse(
+            b"ms /region/cluster/key 3 c C42 E43 F7 I k Otag q s T60 MA N30 Pproxy Lpath/\r\nfoo\r\n",
+        );
+
+        assert_eq!(
+            encode(&request).unwrap(),
+            b"ms key 3 c s C42 E43 F7 I T60 MA N30\r\nfoo\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn encodes_store_modes_canonically() {
+        for (wire_mode, expected) in [
+            (b'S', b"ms key 0\r\n\r\n".as_slice()),
+            (b'E', b"ms key 0 ME\r\n\r\n".as_slice()),
+            (b'R', b"ms key 0 MR\r\n\r\n".as_slice()),
+            (b'A', b"ms key 0 MA\r\n\r\n".as_slice()),
+            (b'P', b"ms key 0 MP\r\n\r\n".as_slice()),
+        ] {
+            let input = [b"ms key 0 M".as_slice(), &[wire_mode], b"\r\n\r\n"].concat();
+            assert_eq!(encode(&parse(&input)).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn encodes_binary_store_key_and_value() {
+        let request = parse(b"ms AAE= 4 b\r\na\0b\n\r\n");
+
+        assert_eq!(
+            encode(&request).unwrap(),
+            b"ms AAE= 4 b\r\na\0b\n\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn rejects_unimplemented_operations_atomically() {
+        let request = Request::Debug(DebugRequest {
+            key: Key::new(Bytes::from_static(b"key")).unwrap(),
+        });
+        let mut out = BytesMut::from(&b"existing"[..]);
+
+        assert_eq!(
+            MetaRequestEncoder::new().encode(&request, &mut out),
+            Err(MetaRequestEncodeError::UnsupportedRequest)
+        );
+        assert_eq!(out, b"existing".as_slice());
+    }
+
+    #[test]
+    fn rejects_oversized_store_value_atomically() {
+        let request = Request::Store(store(
+            Key::new(Bytes::from_static(b"key")).unwrap(),
+            Bytes::from(vec![b'x'; MAX_VALUE_BYTES + 1]),
+        ));
+        let mut out = BytesMut::from(&b"existing"[..]);
+
+        assert_eq!(
+            MetaRequestEncoder::new().encode(&request, &mut out),
+            Err(MetaRequestEncodeError::ValueTooLarge {
+                maximum: MAX_VALUE_BYTES,
+            })
+        );
+        assert_eq!(out, b"existing".as_slice());
     }
 
     #[test]
@@ -324,19 +500,5 @@ mod tests {
                 maximum: MAX_KEY_BYTES,
             })
         );
-    }
-
-    #[test]
-    fn rejects_unimplemented_operations_atomically() {
-        let request = Request::Debug(DebugRequest {
-            key: Key::new(Bytes::from_static(b"key")).unwrap(),
-        });
-        let mut out = BytesMut::from(&b"existing"[..]);
-
-        assert_eq!(
-            MetaRequestEncoder::new().encode(&request, &mut out),
-            Err(MetaRequestEncodeError::UnsupportedRequest)
-        );
-        assert_eq!(out, b"existing".as_slice());
     }
 }

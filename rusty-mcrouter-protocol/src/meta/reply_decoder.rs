@@ -156,6 +156,7 @@ fn parse_line(
 
     match expectation {
         MetaReplyExpectation::Get(shape) => parse_get_line(*shape, line),
+        _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
     }
 }
 
