@@ -1,10 +1,53 @@
-//! Shared tokenization scaffolding for the Meta line parsers.
+//! Read-side primitives shared by the Meta line parsers: locating one
+//! complete line at the head of a streaming buffer, splitting it into
+//! tokens, walking flag tokens, and parsing decimal numbers.
 //!
 //! Both decoders walk space-separated tokens and treat every token after the
 //! positional ones as a single-letter flag with an inline argument. The
 //! budget/shape/duplicate validation around that walk is identical across
 //! commands; only the per-flag semantics differ, so those stay at the call
 //! sites as plain `match` arms.
+
+use std::str::FromStr;
+
+use memchr::memchr;
+
+/// The result of locating one complete line at the head of a buffer
+/// without consuming anything.
+pub(super) enum FindLine {
+    /// No terminator buffered yet; the caller should wait for more bytes.
+    Incomplete,
+    /// The complete line (or the unterminated prefix) exceeds the frame
+    /// limit. The buffer is left untouched for diagnostics.
+    OverLimit,
+    /// One complete line at the head of the buffer. `end` excludes the
+    /// `\r\n` / `\n` terminator; `frame_len` includes it.
+    Line { end: usize, frame_len: usize },
+}
+
+/// Locates the first `\n`-terminated line in `src`, bounded by `max_frame`
+/// bytes including the terminator. Pure: consumes nothing and keeps no
+/// cursor, so fragmented reads rescan the (bounded) unterminated prefix.
+pub(super) fn find_line(src: &[u8], max_frame: usize) -> FindLine {
+    let Some(newline) = memchr(b'\n', src) else {
+        if src.len() >= max_frame {
+            return FindLine::OverLimit;
+        }
+        return FindLine::Incomplete;
+    };
+
+    let frame_len = newline + 1;
+    if frame_len > max_frame {
+        return FindLine::OverLimit;
+    }
+
+    let end = if newline > 0 && src[newline - 1] == b'\r' {
+        newline - 1
+    } else {
+        newline
+    };
+    FindLine::Line { end, frame_len }
+}
 
 /// Splits one command or reply line into its non-empty tokens. Runs of
 /// spaces collapse, matching memcached's tokenizer.
@@ -74,6 +117,40 @@ pub(super) enum FlagError {
     Duplicate,
 }
 
+/// The token is not a decimal number that fits the requested width.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct BadNumber;
+
+/// Parses one decimal token. std's integer grammar — an optional sign
+/// followed by ASCII digits, overflow-checked, no whitespace — matches
+/// memcached's accepted set exactly.
+fn parse_number<T: FromStr>(raw: &[u8]) -> Result<T, BadNumber> {
+    std::str::from_utf8(raw)
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .ok_or(BadNumber)
+}
+
+pub(super) fn parse_u64(raw: &[u8]) -> Result<u64, BadNumber> {
+    parse_number(raw)
+}
+
+pub(super) fn parse_u32(raw: &[u8]) -> Result<u32, BadNumber> {
+    parse_number(raw)
+}
+
+pub(super) fn parse_usize(raw: &[u8]) -> Result<usize, BadNumber> {
+    parse_number(raw)
+}
+
+pub(super) fn parse_i32(raw: &[u8]) -> Result<i32, BadNumber> {
+    parse_number(raw)
+}
+
+pub(super) fn parse_i64(raw: &[u8]) -> Result<i64, BadNumber> {
+    parse_number(raw)
+}
+
 /// A 256-bit set tracking which flag letters appeared on a line.
 #[derive(Default)]
 struct SeenFlags([u64; 4]);
@@ -92,6 +169,32 @@ impl SeenFlags {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_lines_without_consuming() {
+        assert!(matches!(find_line(b"EN", 16), FindLine::Incomplete));
+        assert!(matches!(
+            find_line(b"EN\r\nHD", 16),
+            FindLine::Line {
+                end: 2,
+                frame_len: 4,
+            }
+        ));
+        assert!(matches!(
+            find_line(b"HD\n", 16), // bare LF accepted
+            FindLine::Line {
+                end: 2,
+                frame_len: 3,
+            }
+        ));
+    }
+
+    #[test]
+    fn enforces_the_frame_limit_inclusive_of_the_terminator() {
+        assert!(matches!(find_line(b"abc\n", 4), FindLine::Line { .. }));
+        assert!(matches!(find_line(b"abcd\n", 4), FindLine::OverLimit));
+        assert!(matches!(find_line(b"abcd", 4), FindLine::OverLimit)); // full, unterminated
+    }
 
     #[test]
     fn detects_duplicate_values_across_all_words() {
@@ -136,5 +239,24 @@ mod tests {
                 Err(FlagError::OverBudget),
             ]
         );
+    }
+
+    #[test]
+    fn parses_numeric_boundaries() {
+        assert_eq!(parse_u64(b"18446744073709551615"), Ok(u64::MAX));
+        assert_eq!(parse_u64(b"18446744073709551616"), Err(BadNumber));
+        assert_eq!(parse_u64(b"+123"), Ok(123)); // memcached accepts a bare sign
+        assert_eq!(parse_i32(b"-2147483648"), Ok(i32::MIN));
+        assert_eq!(parse_i32(b"2147483647"), Ok(i32::MAX));
+        assert_eq!(parse_i64(b"-9223372036854775808"), Ok(i64::MIN));
+        assert_eq!(parse_i64(b"9223372036854775807"), Ok(i64::MAX));
+    }
+
+    #[test]
+    fn rejects_empty_signs_and_non_digits() {
+        for raw in [b"".as_slice(), b"+", b"-", b"1x", b" 1", b"++1", b"+-1"] {
+            assert_eq!(parse_u64(raw), Err(BadNumber));
+            assert_eq!(parse_i64(raw), Err(BadNumber));
+        }
     }
 }

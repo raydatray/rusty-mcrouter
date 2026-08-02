@@ -84,24 +84,6 @@ pub(super) fn format_u64(mut value: u64, digits: &mut [u8; 20]) -> &[u8] {
     &digits[start..]
 }
 
-/// An integer a reply field can carry; lets one write path serve the
-/// unsigned and signed token forms.
-pub(super) trait WireInt: Copy {
-    fn write(self, out: &mut BytesMut);
-}
-
-impl WireInt for u64 {
-    fn write(self, out: &mut BytesMut) {
-        write_u64(out, self);
-    }
-}
-
-impl WireInt for i64 {
-    fn write(self, out: &mut BytesMut) {
-        write_i64(out, self);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

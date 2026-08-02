@@ -2,7 +2,6 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::meta::numbers::{parse_i32, parse_u32, parse_u64};
 use crate::meta::reply_decoder::{
     invalid_response, MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH,
 };
@@ -18,7 +17,9 @@ use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
     MetaRequestEncodeError,
 };
-use crate::meta::tokens::{flags, require_no_argument, split_tokens, FlagBudget};
+use crate::meta::tokens::{
+    flags, parse_i32, parse_u32, parse_u64, require_no_argument, split_tokens, FlagBudget,
+};
 use crate::meta::{
     wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_COMMAND_LINE_BYTES,
     MAX_REPLY_LINE_BYTES, MAX_VALUE_BYTES,
