@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     key::MAX_KEY_BYTES,
-    reply::{ErrorReply, GetHit, GetReply, RecacheState, Reply},
+    reply::{ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply},
 };
 
 use super::{
@@ -32,6 +32,10 @@ impl MetaReplyEncoder {
         if matches!(
             (reply, plan.quiet),
             (Reply::Get(GetReply::Miss), MetaQuietPolicy::SuppressMiss)
+                | (
+                    Reply::Store(StoreReply::Success(_)),
+                    MetaQuietPolicy::SuppressSuccess
+                )
         ) {
             return Ok(ReplyEncodeStatus::Suppressed);
         }
@@ -39,6 +43,7 @@ impl MetaReplyEncoder {
         let checkpoint = out.len();
         let result = match reply {
             Reply::Get(reply) => encode_get(reply, plan, out),
+            Reply::Store(reply) => encode_store(reply, plan, out),
             Reply::Error(reply) => encode_error(reply, out),
             _ => Err(MetaReplyEncodeError::UnsupportedReply),
         };
@@ -173,6 +178,36 @@ fn encode_get_hit(
         out.extend_from_slice(b"\r\n");
     }
     Ok(())
+}
+
+fn encode_store(
+    reply: &StoreReply,
+    plan: &MetaReplyPlan,
+    out: &mut BytesMut,
+) -> Result<(), MetaReplyEncodeError> {
+    let (code, result) = match reply {
+        StoreReply::Success(result) => (b"HD".as_slice(), result),
+        StoreReply::NotStored(result) => (b"NS".as_slice(), result),
+        StoreReply::Exists(result) => (b"EX".as_slice(), result),
+        StoreReply::NotFound(result) => (b"NF".as_slice(), result),
+    };
+
+    let line_start = out.len();
+    out.extend_from_slice(code);
+    for token in plan.output_order.iter() {
+        match token {
+            MetaOutputToken::Cas => write_required_u64(out, b'c', result.cas, "CAS")?,
+            MetaOutputToken::Size => write_required_u64(out, b's', result.size, "size")?,
+            MetaOutputToken::Opaque => write_opaque(plan, out)?,
+            MetaOutputToken::Key => write_key(plan, out)?,
+            _ => {
+                return Err(MetaReplyEncodeError::InvalidData(
+                    "invalid store output token",
+                ));
+            }
+        }
+    }
+    finish_line(out, line_start)
 }
 
 fn encode_error(reply: &ErrorReply, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
@@ -310,7 +345,7 @@ mod tests {
     use super::*;
     use crate::{
         meta::{DecodedMetaCommand, MetaReplyDecoder, MetaRequestDecoder, MetaRequestEncoder},
-        reply::{DebugHit, DebugReply},
+        reply::{DebugHit, DebugReply, StoreResult},
     };
 
     fn plan(input: &[u8]) -> MetaReplyPlan {
@@ -373,6 +408,55 @@ mod tests {
                 BytesMut::from(&b"VA 3 c42\r\nfoo\r\n"[..]),
             )
         );
+    }
+
+    #[test]
+    fn encodes_store_reply_in_frontend_order() {
+        let plan = plan(b"ms key 3 Otag s c k\r\nfoo\r\n");
+        let reply = Reply::Store(StoreReply::Success(StoreResult {
+            cas: Some(42),
+            size: Some(3),
+        }));
+
+        assert_eq!(
+            encode(&reply, &plan).unwrap(),
+            (
+                ReplyEncodeStatus::Written,
+                BytesMut::from(&b"HD Otag s3 c42 kkey\r\n"[..]),
+            )
+        );
+    }
+
+    #[test]
+    fn suppresses_only_successful_quiet_store_reply() {
+        let plan = plan(b"ms key 3 q Otag\r\nfoo\r\n");
+        let success = Reply::Store(StoreReply::Success(StoreResult::default()));
+        assert_eq!(
+            encode(&success, &plan).unwrap(),
+            (ReplyEncodeStatus::Suppressed, BytesMut::new())
+        );
+
+        let failure = Reply::Store(StoreReply::NotStored(StoreResult::default()));
+        assert_eq!(
+            encode(&failure, &plan).unwrap(),
+            (
+                ReplyEncodeStatus::Written,
+                BytesMut::from(&b"NS Otag\r\n"[..]),
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_store_reply_missing_projected_fields_atomically() {
+        let plan = plan(b"ms key 3 c s\r\nfoo\r\n");
+        let reply = Reply::Store(StoreReply::Success(StoreResult::default()));
+        let mut out = BytesMut::from(&b"existing"[..]);
+
+        assert_eq!(
+            MetaReplyEncoder::new().encode(&reply, &plan, &mut out),
+            Err(MetaReplyEncodeError::MissingField("CAS"))
+        );
+        assert_eq!(out, b"existing".as_slice());
     }
 
     #[test]
@@ -512,5 +596,45 @@ mod tests {
             Ok(ReplyEncodeStatus::Written)
         );
         assert_eq!(frontend_output, b"VA 3 Otag c42\r\nfoo\r\n".as_slice());
+    }
+
+    #[test]
+    fn completes_store_vertical_slice() {
+        let mut request_decoder = MetaRequestDecoder::new();
+        let mut frontend_input =
+            BytesMut::from(&b"ms /region/cluster/key 3 Otag s c k\r\nfoo\r\n"[..]);
+        let DecodedMetaCommand::Request {
+            request,
+            reply_plan,
+        } = request_decoder
+            .decode(&mut frontend_input)
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected request");
+        };
+
+        let mut backend_output = BytesMut::new();
+        let expectation = MetaRequestEncoder::new()
+            .encode(&request, &mut backend_output)
+            .unwrap();
+        assert_eq!(backend_output, b"ms key 3 c s\r\nfoo\r\n".as_slice());
+
+        let mut reply_decoder = MetaReplyDecoder::new();
+        let mut backend_input = BytesMut::from(&b"HD c42 s3\r\n"[..]);
+        let reply = reply_decoder
+            .decode(&expectation, &mut backend_input)
+            .unwrap()
+            .unwrap();
+
+        let mut frontend_output = BytesMut::new();
+        assert_eq!(
+            MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
+            Ok(ReplyEncodeStatus::Written)
+        );
+        assert_eq!(
+            frontend_output,
+            b"HD Otag s3 c42 k/region/cluster/key\r\n".as_slice()
+        );
     }
 }
