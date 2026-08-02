@@ -1,13 +1,10 @@
-use thiserror::Error;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundedList<T, const N: usize> {
     items: [Option<T>; N],
     len: u8,
 }
 
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-#[error("bounded list capacity exceeded")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapacityExceeded;
 
 impl<T, const N: usize> Default for BoundedList<T, N> {

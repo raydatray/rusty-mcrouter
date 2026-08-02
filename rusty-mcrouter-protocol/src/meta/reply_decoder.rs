@@ -19,6 +19,21 @@ pub const SHAPE_MISMATCH: &str = "Meta backend response does not match request";
 #[derive(Debug, Default)]
 pub struct MetaReplyDecoder;
 
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum MetaReplyDecodeError {
+    #[error("Meta reply frame exceeds the {maximum}-byte limit")]
+    FrameTooLarge { maximum: usize },
+
+    #[error("Meta reply value exceeds the {maximum}-byte limit")]
+    ValueTooLarge { maximum: usize },
+
+    #[error("{0}")]
+    InvalidResponse(&'static str),
+
+    #[error("backend connection ended with a partial Meta reply")]
+    UnexpectedEof,
+}
+
 impl MetaReplyDecoder {
     pub const fn new() -> Self {
         Self
@@ -189,21 +204,6 @@ pub fn invalid_argument(_: UnexpectedArgument) -> MetaReplyDecodeError {
 /// See [`invalid_number`].
 pub fn invalid_flag(_: FlagError) -> MetaReplyDecodeError {
     MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
-}
-
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum MetaReplyDecodeError {
-    #[error("Meta reply frame exceeds the {maximum}-byte limit")]
-    FrameTooLarge { maximum: usize },
-
-    #[error("Meta reply value exceeds the {maximum}-byte limit")]
-    ValueTooLarge { maximum: usize },
-
-    #[error("{0}")]
-    InvalidResponse(&'static str),
-
-    #[error("backend connection ended with a partial Meta reply")]
-    UnexpectedEof,
 }
 
 #[cfg(test)]

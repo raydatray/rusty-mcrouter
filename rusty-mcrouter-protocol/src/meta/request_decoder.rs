@@ -60,6 +60,29 @@ struct Swallow {
     reply: ErrorReply,
 }
 
+/// an error produced while incrementally decoding a frontend Meta command
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum MetaRequestDecodeError {
+    /// one complete malformed command was consumed. the session should encode
+    /// this reply and may continue decoding the connection.
+    #[error("recoverable Meta request error")]
+    Recoverable(ErrorReply),
+
+    /// frame alignment is not trustworthy. the session must close the
+    /// connection rather than attempt to decode another command.
+    #[error(transparent)]
+    Fatal(#[from] FatalDecodeError),
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum FatalDecodeError {
+    #[error("Meta frame exceeds the {maximum}-byte limit")]
+    FrameTooLarge { maximum: usize },
+
+    #[error("connection ended with a partial Meta frame")]
+    UnexpectedEof,
+}
+
 impl MetaRequestDecoder {
     pub const fn new() -> Self {
         Self { swallow: None }
@@ -282,29 +305,6 @@ pub fn capacity_error(_: CapacityExceeded) -> MetaRequestDecodeError {
 
 pub fn recoverable_client_error(message: &'static [u8]) -> MetaRequestDecodeError {
     MetaRequestDecodeError::Recoverable(ErrorReply::Client(Some(Bytes::from_static(message))))
-}
-
-/// an error produced while incrementally decoding a frontend Meta command
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum MetaRequestDecodeError {
-    /// one complete malformed command was consumed. the session should encode
-    /// this reply and may continue decoding the connection.
-    #[error("recoverable Meta request error")]
-    Recoverable(ErrorReply),
-
-    /// frame alignment is not trustworthy. the session must close the
-    /// connection rather than attempt to decode another command.
-    #[error(transparent)]
-    Fatal(#[from] FatalDecodeError),
-}
-
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum FatalDecodeError {
-    #[error("Meta frame exceeds the {maximum}-byte limit")]
-    FrameTooLarge { maximum: usize },
-
-    #[error("connection ended with a partial Meta frame")]
-    UnexpectedEof,
 }
 
 #[cfg(test)]

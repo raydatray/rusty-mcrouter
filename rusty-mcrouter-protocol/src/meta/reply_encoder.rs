@@ -10,13 +10,32 @@ use crate::reply::{ArithmeticReply, DeleteReply, ErrorReply, GetReply, Reply, St
 #[derive(Debug, Default)]
 pub struct MetaReplyEncoder;
 
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum MetaReplyEncodeError {
+    #[error("get reply is missing requested {0}")]
+    MissingField(&'static str),
+
+    #[error("get reply value and size token disagree")]
+    SizeMismatch,
+
+    #[error("Meta reply value exceeds the {maximum}-byte limit")]
+    ValueTooLarge { maximum: usize },
+
+    #[error("base64-encoded response key exceeds the {maximum}-byte limit")]
+    EncodedKeyTooLong { maximum: usize },
+
+    #[error("invalid Meta reply data: {0}")]
+    InvalidData(&'static str),
+
+    #[error("Meta reply exceeds the {maximum}-byte line limit")]
+    FrameTooLarge { maximum: usize },
+}
+
 impl MetaReplyEncoder {
     pub const fn new() -> Self {
         Self
     }
 
-    /// Appends one frontend reply. A quiet plan may suppress the reply
-    /// entirely, leaving `out` untouched. On error, `out` is unchanged.
     pub fn encode(
         &self,
         reply: &Reply,
@@ -60,27 +79,6 @@ impl MetaReplyEncoder {
     pub fn encode_noop(&self, out: &mut BytesMut) {
         out.extend_from_slice(b"MN\r\n");
     }
-}
-
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum MetaReplyEncodeError {
-    #[error("get reply is missing requested {0}")]
-    MissingField(&'static str),
-
-    #[error("get reply value and size token disagree")]
-    SizeMismatch,
-
-    #[error("Meta reply value exceeds the {maximum}-byte limit")]
-    ValueTooLarge { maximum: usize },
-
-    #[error("base64-encoded response key exceeds the {maximum}-byte limit")]
-    EncodedKeyTooLong { maximum: usize },
-
-    #[error("invalid Meta reply data: {0}")]
-    InvalidData(&'static str),
-
-    #[error("Meta reply exceeds the {maximum}-byte line limit")]
-    FrameTooLarge { maximum: usize },
 }
 
 fn encode_error(reply: &ErrorReply, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {

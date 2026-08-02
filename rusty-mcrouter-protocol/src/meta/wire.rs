@@ -13,7 +13,7 @@ use crate::key::MAX_KEY_BYTES;
 /// A base64-encoded key may expand up to 4/3ths of the raw key cap.
 const MAX_BASE64_KEY_BYTES: usize = MAX_KEY_BYTES.div_ceil(3) * 4;
 
-/// The encoded key exceeds the wire's key-length cap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EncodedKeyTooLong;
 
 /// Base64-encodes `key` and appends it to `out`, enforcing that the encoded
