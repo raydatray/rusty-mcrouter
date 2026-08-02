@@ -9,8 +9,8 @@ use crate::reply::{
 
 use super::command;
 use super::line_scanner::{scan_line, LineScan};
-use super::numbers::{parse_i64, parse_u64, parse_usize};
-use super::tokens::{flags, split_tokens, FlagBudget};
+use super::numbers::parse_u64;
+use super::tokens::split_tokens;
 use super::MetaReplyExpectation;
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
@@ -160,7 +160,7 @@ fn parse_line(
         MetaReplyExpectation::Store { cas, size } => command::store::parse_reply(*cas, *size, line),
         MetaReplyExpectation::Delete => command::delete::parse_reply(line),
         MetaReplyExpectation::Arithmetic { value, cas, ttl } => {
-            parse_arithmetic_line(*value, *cas, *ttl, line)
+            command::arithmetic::parse_reply(*value, *cas, *ttl, line)
         }
         MetaReplyExpectation::Debug { key } => parse_debug_line(key, line),
     }
@@ -212,89 +212,6 @@ fn parse_debug_line(expected_key: &Bytes, line: &[u8]) -> Result<ParsedLine, Met
             }))))
         }
         _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
-    }
-}
-
-fn parse_arithmetic_line(
-    expect_value: bool,
-    expect_cas: bool,
-    expect_ttl: bool,
-    line: &[u8],
-) -> Result<ParsedLine, MetaReplyDecodeError> {
-    let mut tokens = split_tokens(line);
-    let code = tokens
-        .next()
-        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
-
-    match code {
-        b"HD" => {
-            if expect_value {
-                return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
-            }
-            let result = parse_arithmetic_attributes(tokens)?;
-            validate_arithmetic_success(&result, expect_cas, expect_ttl)?;
-            Ok(ParsedLine::Reply(Reply::Arithmetic(
-                ArithmeticReply::Success(result),
-            )))
-        }
-        b"VA" => {
-            if !expect_value {
-                return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
-            }
-            let length = tokens
-                .next()
-                .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-                .and_then(|raw| parse_usize(raw).map_err(invalid_response))?;
-            if length > MAX_REPLY_VALUE_BYTES {
-                return Err(MetaReplyDecodeError::ValueTooLarge {
-                    maximum: MAX_REPLY_VALUE_BYTES,
-                });
-            }
-            let result = parse_arithmetic_attributes(tokens)?;
-            validate_arithmetic_success(&result, expect_cas, expect_ttl)?;
-            Ok(ParsedLine::Value {
-                length,
-                pending: PendingValue::Arithmetic(result),
-            })
-        }
-        b"NS" => Ok(ParsedLine::Reply(Reply::Arithmetic(
-            ArithmeticReply::NotStored(parse_arithmetic_attributes(tokens)?),
-        ))),
-        b"EX" => Ok(ParsedLine::Reply(Reply::Arithmetic(
-            ArithmeticReply::Exists(parse_arithmetic_attributes(tokens)?),
-        ))),
-        b"NF" => Ok(ParsedLine::Reply(Reply::Arithmetic(
-            ArithmeticReply::NotFound(parse_arithmetic_attributes(tokens)?),
-        ))),
-        _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
-    }
-}
-
-fn parse_arithmetic_attributes<'a>(
-    tokens: impl Iterator<Item = &'a [u8]>,
-) -> Result<ArithmeticResult, MetaReplyDecodeError> {
-    let mut result = ArithmeticResult::default();
-
-    for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(invalid_response)?;
-        match flag {
-            b'c' => result.cas = Some(parse_u64(argument).map_err(invalid_response)?),
-            b't' => result.ttl = Some(parse_i64(argument).map_err(invalid_response)?),
-            _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
-        }
-    }
-    Ok(result)
-}
-
-fn validate_arithmetic_success(
-    result: &ArithmeticResult,
-    expect_cas: bool,
-    expect_ttl: bool,
-) -> Result<(), MetaReplyDecodeError> {
-    if (expect_cas && result.cas.is_none()) || (expect_ttl && result.ttl.is_none()) {
-        Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH))
-    } else {
-        Ok(())
     }
 }
 

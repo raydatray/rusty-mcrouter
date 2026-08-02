@@ -5,16 +5,12 @@ use thiserror::Error;
 use crate::key::{Key, MAX_KEY_BYTES};
 use crate::reply::ErrorReply;
 use crate::{
-    meta::{KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan},
-    request::{
-        ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction,
-        ArithmeticTemporalInstructions, DebugRequest, Request, StoreMode, StoreRequest,
-    },
+    meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan},
+    request::{DebugRequest, Request, StoreMode, StoreRequest},
 };
 
 use super::command;
 use super::line_scanner::{scan_line, LineScan};
-use super::numbers::{parse_i32, parse_u64};
 use super::tokens::{flags, require_no_argument, split_tokens, FlagBudget, FlagError};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
@@ -230,123 +226,10 @@ fn parse_command(
     match tokens.next() {
         Some(b"mg") => command::get::parse_request(tokens, key_frame),
         Some(b"md") => command::delete::parse_request(tokens, key_frame),
-        Some(b"ma") => parse_arithmetic(tokens, key_frame),
+        Some(b"ma") => command::arithmetic::parse_request(tokens, key_frame),
         Some(b"me") => parse_debug(tokens, key_frame),
         _ => Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error)),
     }
-}
-
-fn parse_arithmetic<'a>(
-    mut tokens: impl Iterator<Item = &'a [u8]>,
-    key_frame: Option<&Bytes>,
-) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
-    let raw_key = tokens
-        .next()
-        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    let mut return_value = false;
-    let mut return_cas = false;
-    let mut mode = ArithmeticMode::Increment;
-    let mut delta = 1;
-    let mut initial_value = None;
-    let mut compare_cas = None;
-    let mut override_cas = None;
-    let mut temporal = ArithmeticTemporalInstructions::default();
-    let mut reply_plan = MetaReplyPlan::default();
-    let mut return_key = false;
-
-    // `ma` has no upstream token budget. The loop still terminates quickly:
-    // non-alphabetic or repeated flags error out, so at most 52 distinct
-    // letters are ever processed.
-    for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
-            b'b' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                reply_plan.key_encoding = KeyEncoding::Base64;
-            }
-            b'c' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_cas = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Cas)
-                    .map_err(bad_command_line)?;
-            }
-            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'D' => delta = parse_u64(argument).map_err(bad_command_line)?,
-            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'J' => initial_value = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'k' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_key = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Key)
-                    .map_err(bad_command_line)?;
-            }
-            b'M' => {
-                mode = match argument {
-                    b"I" | b"+" => ArithmeticMode::Increment,
-                    b"D" | b"-" => ArithmeticMode::Decrement,
-                    _ => return Err(recoverable_client_error(BAD_COMMAND_LINE)),
-                };
-            }
-            b'N' => temporal
-                .push(ArithmeticTemporalInstruction::Vivify(
-                    parse_i32(argument).map_err(bad_command_line)?,
-                ))
-                .map_err(bad_command_line)?,
-            b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
-            b'q' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
-            }
-            b't' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                temporal
-                    .push(ArithmeticTemporalInstruction::ReturnTtl)
-                    .map_err(bad_command_line)?;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Ttl)
-                    .map_err(bad_command_line)?;
-            }
-            b'T' => temporal
-                .push(ArithmeticTemporalInstruction::UpdateTtl(
-                    parse_i32(argument).map_err(bad_command_line)?,
-                ))
-                .map_err(bad_command_line)?,
-            b'v' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_value = true;
-            }
-            b'P' | b'L' => require_hint_argument(argument)?,
-            _ => return Err(recoverable_client_error(INVALID_FLAG)),
-        }
-    }
-
-    let has_vivify = temporal
-        .iter()
-        .any(|instruction| matches!(instruction, ArithmeticTemporalInstruction::Vivify(_)));
-    if initial_value.is_some() && !has_vivify {
-        return Err(recoverable_client_error(BAD_COMMAND_LINE));
-    }
-
-    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
-    Ok(DecodedMetaCommand::Request {
-        request: Request::Arithmetic(ArithmeticRequest {
-            key,
-            return_value,
-            return_cas,
-            mode,
-            delta,
-            initial_value,
-            compare_cas,
-            override_cas,
-            temporal,
-        }),
-        reply_plan,
-    })
 }
 
 fn parse_debug<'a>(
@@ -512,7 +395,8 @@ pub enum FatalDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::GetTemporalInstruction;
+    use crate::meta::MetaQuietPolicy;
+    use crate::request::{ArithmeticMode, ArithmeticTemporalInstruction, GetTemporalInstruction};
 
     fn decode(input: &[u8]) -> DecodedMetaCommand {
         let mut decoder = MetaRequestDecoder::new();
