@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 
 use crate::errors::ParseError;
@@ -7,7 +7,10 @@ use crate::key::{Key, MAX_KEY_BYTES};
 use crate::reply::ErrorReply;
 use crate::{
     meta::{KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan},
-    request::{GetRequest, GetTemporalInstruction, GetTemporalInstructions, Request},
+    request::{
+        GetRequest, GetTemporalInstruction, GetTemporalInstructions, Request, StoreMode,
+        StoreRequest,
+    },
 };
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
@@ -20,6 +23,8 @@ const MAX_RETAINED_KEY_BUFFER: usize = 64 * 1024;
 const BAD_COMMAND_LINE: &[u8] = b"bad command line format";
 const INVALID_FLAG: &[u8] = b"invalid flag";
 const DUPLICATE_FLAG: &[u8] = b"duplicate flag";
+const BAD_DATA_CHUNK: &[u8] = b"bad data chunk";
+const OBJECT_TOO_LARGE: &[u8] = b"object too large for cache";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodedMetaCommand {
@@ -38,6 +43,29 @@ pub struct MetaRequestDecoder {
 #[derive(Debug)]
 enum RequestDecodeState {
     Command { scanned: usize },
+    StoreBody(StoreHeader),
+    Swallow { remaining: usize, reply: ErrorReply },
+}
+
+#[derive(Debug)]
+struct StoreHeader {
+    key: Key,
+    value_len: usize,
+    return_cas: bool,
+    return_size: bool,
+    mode: StoreMode,
+    client_flags: Option<u32>,
+    ttl: Option<i32>,
+    compare_cas: Option<u64>,
+    override_cas: Option<u64>,
+    invalidate: bool,
+    vivify_ttl: Option<i32>,
+    reply_plan: MetaReplyPlan,
+}
+
+enum ParsedStoreHeader {
+    Ready(StoreHeader),
+    Swallow { remaining: usize, reply: ErrorReply },
 }
 
 impl Default for MetaRequestDecoder {
@@ -62,7 +90,15 @@ impl MetaRequestDecoder {
         &mut self,
         src: &mut BytesMut,
     ) -> Result<Option<DecodedMetaCommand>, MetaRequestDecodeError> {
-        let RequestDecodeState::Command { scanned } = &mut self.state;
+        match self.state {
+            RequestDecodeState::StoreBody(_) => return self.decode_store_body(src),
+            RequestDecodeState::Swallow { .. } => return self.swallow(src),
+            RequestDecodeState::Command { .. } => {}
+        }
+
+        let RequestDecodeState::Command { scanned } = &mut self.state else {
+            unreachable!();
+        };
         if *scanned > src.len() {
             // Incomplete input should retain its prefix, but avoid indexing a
             // stale cursor if a caller replaces the buffer unexpectedly.
@@ -103,15 +139,88 @@ impl MetaRequestDecoder {
         let frame = src.split_to(frame_len).freeze();
         *scanned = 0;
         let key_frame = retain_key_frame.then_some(&frame);
-        parse_command(&frame[..line_end], key_frame).map(Some)
+        let line = &frame[..line_end];
+        if line == b"ms" || line.starts_with(b"ms ") {
+            match parse_store(line, key_frame)? {
+                ParsedStoreHeader::Ready(header) => {
+                    self.state = RequestDecodeState::StoreBody(header);
+                }
+                ParsedStoreHeader::Swallow { remaining, reply } => {
+                    self.state = RequestDecodeState::Swallow { remaining, reply };
+                }
+            }
+            return self.decode(src);
+        }
+        parse_command(line, key_frame).map(Some)
     }
 
     pub fn decode_eof(&self, src: &BytesMut) -> Result<(), MetaRequestDecodeError> {
-        if src.is_empty() {
-            Ok(())
-        } else {
-            Err(FatalDecodeError::UnexpectedEof.into())
+        match self.state {
+            RequestDecodeState::Command { .. } if src.is_empty() => Ok(()),
+            _ => Err(FatalDecodeError::UnexpectedEof.into()),
         }
+    }
+
+    fn decode_store_body(
+        &mut self,
+        src: &mut BytesMut,
+    ) -> Result<Option<DecodedMetaCommand>, MetaRequestDecodeError> {
+        let RequestDecodeState::StoreBody(header) = &self.state else {
+            unreachable!();
+        };
+        let frame_len = header.value_len + 2;
+        if src.len() < frame_len {
+            return Ok(None);
+        }
+
+        let frame = src.split_to(frame_len).freeze();
+        let RequestDecodeState::StoreBody(header) =
+            std::mem::replace(&mut self.state, RequestDecodeState::Command { scanned: 0 })
+        else {
+            unreachable!();
+        };
+        if &frame[header.value_len..] != b"\r\n" {
+            return Err(recoverable_client_error(BAD_DATA_CHUNK));
+        }
+        let value = frame.slice(..header.value_len);
+        Ok(Some(DecodedMetaCommand::Request {
+            request: Request::Store(StoreRequest {
+                key: header.key,
+                value,
+                return_cas: header.return_cas,
+                return_size: header.return_size,
+                mode: header.mode,
+                client_flags: header.client_flags,
+                ttl: header.ttl,
+                compare_cas: header.compare_cas,
+                override_cas: header.override_cas,
+                invalidate: header.invalidate,
+                vivify_ttl: header.vivify_ttl,
+            }),
+            reply_plan: header.reply_plan,
+        }))
+    }
+
+    fn swallow(
+        &mut self,
+        src: &mut BytesMut,
+    ) -> Result<Option<DecodedMetaCommand>, MetaRequestDecodeError> {
+        let RequestDecodeState::Swallow { remaining, .. } = &mut self.state else {
+            unreachable!();
+        };
+        let consumed = (*remaining).min(src.len());
+        src.advance(consumed);
+        *remaining -= consumed;
+        if *remaining != 0 {
+            return Ok(None);
+        }
+
+        let RequestDecodeState::Swallow { reply, .. } =
+            std::mem::replace(&mut self.state, RequestDecodeState::Command { scanned: 0 })
+        else {
+            unreachable!();
+        };
+        Err(MetaRequestDecodeError::Recoverable(reply))
     }
 }
 
@@ -282,6 +391,162 @@ fn parse_get<'a>(
     })
 }
 
+fn parse_store(
+    line: &[u8],
+    key_frame: Option<&Bytes>,
+) -> Result<ParsedStoreHeader, MetaRequestDecodeError> {
+    let mut tokens = line
+        .split(|byte| *byte == b' ')
+        .filter(|token| !token.is_empty());
+    if tokens.next() != Some(b"ms".as_slice()) {
+        return Err(recoverable_client_error(BAD_COMMAND_LINE));
+    }
+    let raw_key = tokens
+        .next()
+        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+    let raw_value_len = tokens
+        .next()
+        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+    let value_len_u64 = parse_u64(raw_value_len)?;
+    if value_len_u64 > (i32::MAX - 2) as u64 {
+        return Err(recoverable_client_error(BAD_COMMAND_LINE));
+    }
+    let value_len = value_len_u64 as usize;
+    let remaining = value_len + 2;
+    if value_len > MAX_VALUE_BYTES {
+        return Ok(ParsedStoreHeader::Swallow {
+            remaining,
+            reply: ErrorReply::Server(Some(Bytes::from_static(OBJECT_TOO_LARGE))),
+        });
+    }
+
+    let parsed = parse_store_fields(raw_key, tokens, key_frame, value_len);
+    match parsed {
+        Ok(header) => Ok(ParsedStoreHeader::Ready(header)),
+        Err(MetaRequestDecodeError::Recoverable(reply)) => {
+            Ok(ParsedStoreHeader::Swallow { remaining, reply })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_store_fields<'a>(
+    raw_key: &[u8],
+    tokens: impl Iterator<Item = &'a [u8]>,
+    key_frame: Option<&Bytes>,
+    value_len: usize,
+) -> Result<StoreHeader, MetaRequestDecodeError> {
+    let mut return_cas = false;
+    let mut return_size = false;
+    let mut mode = StoreMode::Set;
+    let mut client_flags = None;
+    let mut ttl = None;
+    let mut compare_cas = None;
+    let mut override_cas = None;
+    let mut invalidate = false;
+    let mut vivify_ttl = None;
+    let mut reply_plan = MetaReplyPlan::default();
+    let mut seen = [false; 256];
+    let mut flag_count = 0;
+    let mut return_key = false;
+
+    for token in tokens {
+        flag_count += 1;
+        if flag_count > MAX_FLAGS {
+            return Err(recoverable_client_error(BAD_COMMAND_LINE));
+        }
+
+        let (&flag, argument) = token
+            .split_first()
+            .ok_or_else(|| recoverable_client_error(INVALID_FLAG))?;
+        if !flag.is_ascii_alphabetic() {
+            return Err(recoverable_client_error(INVALID_FLAG));
+        }
+        if seen[flag as usize] {
+            return Err(recoverable_client_error(DUPLICATE_FLAG));
+        }
+        seen[flag as usize] = true;
+
+        match flag {
+            b'b' => {
+                require_no_argument(argument)?;
+                reply_plan.key_encoding = KeyEncoding::Base64;
+            }
+            b'c' => {
+                require_no_argument(argument)?;
+                return_cas = true;
+                push_output(&mut reply_plan, MetaOutputToken::Cas)?;
+            }
+            b'C' => compare_cas = Some(parse_u64(argument)?),
+            b'E' => override_cas = Some(parse_u64(argument)?),
+            b'F' => client_flags = Some(parse_u32(argument)?),
+            b'I' => {
+                require_no_argument(argument)?;
+                invalidate = true;
+            }
+            b'k' => {
+                require_no_argument(argument)?;
+                return_key = true;
+                push_output(&mut reply_plan, MetaOutputToken::Key)?;
+            }
+            b'M' => {
+                mode = match argument {
+                    b"S" => StoreMode::Set,
+                    b"E" => StoreMode::Add,
+                    b"R" => StoreMode::Replace,
+                    b"A" => StoreMode::Append,
+                    b"P" => StoreMode::Prepend,
+                    _ => return Err(recoverable_client_error(BAD_COMMAND_LINE)),
+                };
+            }
+            b'N' => vivify_ttl = Some(parse_i32(argument)?),
+            b'O' => {
+                if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
+                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
+                }
+                reply_plan.opaque = Some(Bytes::copy_from_slice(argument));
+                push_output(&mut reply_plan, MetaOutputToken::Opaque)?;
+            }
+            b'q' => {
+                require_no_argument(argument)?;
+                reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
+            }
+            b's' => {
+                require_no_argument(argument)?;
+                return_size = true;
+                push_output(&mut reply_plan, MetaOutputToken::Size)?;
+            }
+            b'T' => ttl = Some(parse_i32(argument)?),
+            b'P' | b'L' => {
+                if argument.is_empty() {
+                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
+                }
+            }
+            _ => return Err(recoverable_client_error(INVALID_FLAG)),
+        }
+    }
+
+    let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
+    if return_key {
+        reply_plan.external_key = Some(Bytes::copy_from_slice(key.as_bytes()));
+    }
+
+    Ok(StoreHeader {
+        key,
+        value_len,
+        return_cas,
+        return_size,
+        mode,
+        client_flags,
+        ttl,
+        compare_cas,
+        override_cas,
+        invalidate,
+        vivify_ttl,
+        reply_plan,
+    })
+}
+
 fn parse_key(
     raw: &[u8],
     encoding: KeyEncoding,
@@ -329,6 +594,10 @@ fn require_no_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
 }
 
 fn parse_u64(raw: &[u8]) -> Result<u64, MetaRequestDecodeError> {
+    parse_number(raw)
+}
+
+fn parse_u32(raw: &[u8]) -> Result<u32, MetaRequestDecodeError> {
     parse_number(raw)
 }
 
@@ -492,6 +761,236 @@ mod tests {
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
         assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+    }
+
+    #[test]
+    fn decodes_basic_store() {
+        let DecodedMetaCommand::Request {
+            request: Request::Store(request),
+            reply_plan,
+        } = decode(b"ms key 3\r\nfoo\r\n")
+        else {
+            panic!("expected store request");
+        };
+
+        assert_eq!(request.key.as_bytes(), b"key");
+        assert_eq!(request.value, b"foo".as_slice());
+        assert_eq!(request.mode, StoreMode::Set);
+        assert_eq!(request.client_flags, None);
+        assert_eq!(request.ttl, None);
+        assert_eq!(request.compare_cas, None);
+        assert_eq!(request.override_cas, None);
+        assert!(!request.invalidate);
+        assert_eq!(request.vivify_ttl, None);
+        assert!(!request.return_cas);
+        assert!(!request.return_size);
+        assert_eq!(reply_plan, MetaReplyPlan::default());
+    }
+
+    #[test]
+    fn separates_store_semantics_from_frontend_reply_plan() {
+        let DecodedMetaCommand::Request {
+            request: Request::Store(request),
+            reply_plan,
+        } = decode(b"ms key 3 c C42 E43 F7 I k Otag q s T60 MA N30 Pproxy Lpath/\r\nfoo\r\n")
+        else {
+            panic!("expected store request");
+        };
+
+        assert_eq!(request.mode, StoreMode::Append);
+        assert_eq!(request.client_flags, Some(7));
+        assert_eq!(request.ttl, Some(60));
+        assert_eq!(request.compare_cas, Some(42));
+        assert_eq!(request.override_cas, Some(43));
+        assert!(request.invalidate);
+        assert_eq!(request.vivify_ttl, Some(30));
+        assert!(request.return_cas);
+        assert!(request.return_size);
+
+        assert_eq!(reply_plan.quiet, MetaQuietPolicy::SuppressSuccess);
+        assert_eq!(reply_plan.opaque.as_deref(), Some(b"tag".as_slice()));
+        assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+        assert_eq!(
+            reply_plan.output_order.iter().copied().collect::<Vec<_>>(),
+            vec![
+                MetaOutputToken::Cas,
+                MetaOutputToken::Key,
+                MetaOutputToken::Opaque,
+                MetaOutputToken::Size,
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_all_store_modes() {
+        for (wire_mode, expected) in [
+            (b'S', StoreMode::Set),
+            (b'E', StoreMode::Add),
+            (b'R', StoreMode::Replace),
+            (b'A', StoreMode::Append),
+            (b'P', StoreMode::Prepend),
+        ] {
+            let input = [b"ms key 0 M".as_slice(), &[wire_mode], b"\r\n\r\n"].concat();
+            let DecodedMetaCommand::Request {
+                request: Request::Store(request),
+                ..
+            } = decode(&input)
+            else {
+                panic!("expected store request");
+            };
+            assert_eq!(request.mode, expected);
+        }
+    }
+
+    #[test]
+    fn normalizes_base64_store_key() {
+        let DecodedMetaCommand::Request {
+            request: Request::Store(request),
+            reply_plan,
+        } = decode(b"ms a2V5 1 b k\r\nx\r\n")
+        else {
+            panic!("expected store request");
+        };
+
+        assert_eq!(request.key.as_bytes(), b"key");
+        assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
+        assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+    }
+
+    #[test]
+    fn decodes_binary_store_payload_at_every_split_point() {
+        let input = b"ms key 6\r\na\r\nb\0c\r\n";
+
+        for split in 0..=input.len() {
+            let mut decoder = MetaRequestDecoder::new();
+            let mut src = BytesMut::new();
+            src.extend_from_slice(&input[..split]);
+            if split < input.len() {
+                assert_eq!(decoder.decode(&mut src), Ok(None), "split={split}");
+                src.extend_from_slice(&input[split..]);
+            }
+
+            let DecodedMetaCommand::Request {
+                request: Request::Store(request),
+                ..
+            } = decoder.decode(&mut src).unwrap().unwrap()
+            else {
+                panic!("expected store request at split={split}");
+            };
+            assert_eq!(request.value, b"a\r\nb\0c".as_slice());
+            assert!(src.is_empty(), "split={split}");
+        }
+    }
+
+    #[test]
+    fn decodes_empty_store_value() {
+        let DecodedMetaCommand::Request {
+            request: Request::Store(request),
+            ..
+        } = decode(b"ms key 0\r\n\r\n")
+        else {
+            panic!("expected store request");
+        };
+
+        assert!(request.value.is_empty());
+    }
+
+    #[test]
+    fn malformed_store_terminator_is_consumed_and_recoverable() {
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(&b"ms key 3\r\nfooXXmn\r\n"[..]);
+
+        assert_eq!(
+            decoder.decode(&mut src),
+            Err(recoverable_client_error(BAD_DATA_CHUNK))
+        );
+        assert_eq!(src, b"mn\r\n".as_slice());
+        assert_eq!(decoder.decode(&mut src), Ok(Some(DecodedMetaCommand::NoOp)));
+    }
+
+    #[test]
+    fn invalid_store_header_swallows_declared_body() {
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(&b"ms key 3 z\r\nfoo\r\nmn\r\n"[..]);
+
+        assert_eq!(
+            decoder.decode(&mut src),
+            Err(recoverable_client_error(INVALID_FLAG))
+        );
+        assert_eq!(src, b"mn\r\n".as_slice());
+    }
+
+    #[test]
+    fn invalid_store_header_swallows_fragmented_body_incrementally() {
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(&b"ms key 3 z\r\nf"[..]);
+
+        assert_eq!(decoder.decode(&mut src), Ok(None));
+        assert!(src.is_empty());
+        assert!(matches!(
+            decoder.state,
+            RequestDecodeState::Swallow { remaining: 4, .. }
+        ));
+
+        src.extend_from_slice(b"oo\r\nmn\r\n");
+        assert_eq!(
+            decoder.decode(&mut src),
+            Err(recoverable_client_error(INVALID_FLAG))
+        );
+        assert_eq!(src, b"mn\r\n".as_slice());
+    }
+
+    #[test]
+    fn malformed_store_length_does_not_swallow_following_command() {
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(&b"ms key nope\r\nmn\r\n"[..]);
+
+        assert_eq!(
+            decoder.decode(&mut src),
+            Err(recoverable_client_error(BAD_COMMAND_LINE))
+        );
+        assert_eq!(src, b"mn\r\n".as_slice());
+    }
+
+    #[test]
+    fn oversized_store_swallows_body_before_server_error() {
+        let value_len = MAX_VALUE_BYTES + 1;
+        let mut input = format!("ms key {value_len}\r\n").into_bytes();
+        input.extend(std::iter::repeat(b'x').take(value_len));
+        input.extend_from_slice(b"\r\nmn\r\n");
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(input.as_slice());
+
+        assert_eq!(
+            decoder.decode(&mut src),
+            Err(MetaRequestDecodeError::Recoverable(ErrorReply::Server(
+                Some(Bytes::from_static(OBJECT_TOO_LARGE))
+            )))
+        );
+        assert_eq!(src, b"mn\r\n".as_slice());
+    }
+
+    #[test]
+    fn eof_rejects_partial_store_body_or_swallow() {
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(&b"ms key 3\r\nfo"[..]);
+        assert_eq!(decoder.decode(&mut src), Ok(None));
+        assert_eq!(
+            decoder.decode_eof(&src),
+            Err(MetaRequestDecodeError::Fatal(
+                FatalDecodeError::UnexpectedEof
+            ))
+        );
+
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(&b"ms key 3 z\r\nf"[..]);
+        assert_eq!(decoder.decode(&mut src), Ok(None));
+        assert_eq!(
+            decoder.decode_eof(&src),
+            Err(MetaRequestDecodeError::Fatal(
+                FatalDecodeError::UnexpectedEof
+            ))
+        );
     }
 
     #[test]
