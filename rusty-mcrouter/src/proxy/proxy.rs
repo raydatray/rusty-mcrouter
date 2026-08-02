@@ -2,12 +2,15 @@ use std::rc::Rc;
 
 use bytes::Bytes;
 use rusty_mcrouter_core::DynRoute;
+use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::Reply;
 use tokio::sync::mpsc;
 
 use crate::proxy::message::{ProxyMessage, ProxyRequest};
 
 pub struct Proxy {
+    // todo - stats/logging will read this; kept for the thread-mode work
+    #[allow(dead_code)]
     pub id: usize,
     pub route: Rc<dyn DynRoute>,
     pub rx: mpsc::Receiver<ProxyMessage>,
@@ -27,10 +30,11 @@ impl Proxy {
 
     pub fn spawn_request(route: Rc<dyn DynRoute>, req: ProxyRequest) {
         tokio::task::spawn_local(async move {
-            let reply = route
-                .route_dyn(req.request)
-                .await
-                .unwrap_or_else(|_| Reply::ServerError(Bytes::from_static(b"backend unavailable")));
+            let reply = route.route_dyn(req.request).await.unwrap_or_else(|_| {
+                Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
+                    b"backend unavailable",
+                ))))
+            });
 
             let _ = req.reply_tx.send(reply);
         });
@@ -40,10 +44,11 @@ impl Proxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
     use rusty_mcrouter_core::{DestinationRoute, Route};
     use rusty_mcrouter_net::testing::MockBackend;
     use rusty_mcrouter_net::{NetError, TimeoutPhase};
-    use rusty_mcrouter_protocol::Request;
+    use rusty_mcrouter_protocol::meta::{DecodedMetaCommand, MetaRequestDecoder};
     use tokio::sync::oneshot;
     use tokio::task::LocalSet;
 
@@ -54,13 +59,16 @@ mod tests {
         }))
         .into_dyn();
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let req = ProxyRequest {
-            request: Request::Get {
-                key: Bytes::from_static(b"foo"),
-            },
-            reply_tx,
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(&b"mg foo v\r\n"[..]);
+        let DecodedMetaCommand::Request { request, .. } =
+            decoder.decode(&mut src).unwrap().unwrap()
+        else {
+            panic!("expected request");
         };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let req = ProxyRequest { request, reply_tx };
 
         let reply = LocalSet::new()
             .run_until(async move {
@@ -71,7 +79,9 @@ mod tests {
 
         assert_eq!(
             reply,
-            Reply::ServerError(Bytes::from_static(b"backend unavailable"))
+            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
+                b"backend unavailable"
+            ))))
         );
     }
 }

@@ -3,6 +3,8 @@ use tokio::sync::oneshot;
 
 pub enum ProxyMessage {
     Request(ProxyRequest),
+    // todo - graceful shutdown: only ProxyHandle::shutdown constructs this
+    #[allow(dead_code)]
     Shutdown,
 }
 
