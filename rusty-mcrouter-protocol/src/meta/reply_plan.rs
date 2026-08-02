@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use crate::errors::ParseError;
+use crate::bounded::BoundedList;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MetaReplyPlan {
@@ -26,30 +26,8 @@ pub enum KeyEncoding {
     Base64, // b
 }
 
-// `mg` has at most eight unique client-visible output tokens.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct MetaOutputOrder {
-    tokens: [Option<MetaOutputToken>; 8],
-    len: u8,
-}
-
-impl MetaOutputOrder {
-    pub(crate) fn push(&mut self, token: MetaOutputToken) -> Result<(), ParseError> {
-        let slot = self
-            .tokens
-            .get_mut(usize::from(self.len))
-            .ok_or(ParseError::TooManyFlags)?;
-        *slot = Some(token);
-        self.len += 1;
-        Ok(())
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &MetaOutputToken> {
-        self.tokens[..usize::from(self.len)]
-            .iter()
-            .map(|token| token.as_ref().expect("dense output order"))
-    }
-}
+/// `mg` has at most eight distinct client-visible output tokens.
+pub type MetaOutputOrder = BoundedList<MetaOutputToken, 8>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetaOutputToken {
@@ -61,48 +39,4 @@ pub enum MetaOutputToken {
     LastAccess,  // l
     Opaque,      // O<token>
     Key,         // k
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn output_order_preserves_insertion_order() {
-        let mut order = MetaOutputOrder::default();
-        order.push(MetaOutputToken::Opaque).unwrap();
-        order.push(MetaOutputToken::Size).unwrap();
-        order.push(MetaOutputToken::Cas).unwrap();
-
-        assert_eq!(
-            order.iter().copied().collect::<Vec<_>>(),
-            vec![
-                MetaOutputToken::Opaque,
-                MetaOutputToken::Size,
-                MetaOutputToken::Cas,
-            ]
-        );
-    }
-
-    #[test]
-    fn output_order_rejects_more_than_eight_tokens() {
-        let mut order = MetaOutputOrder::default();
-        for token in [
-            MetaOutputToken::Cas,
-            MetaOutputToken::ClientFlags,
-            MetaOutputToken::Size,
-            MetaOutputToken::Ttl,
-            MetaOutputToken::HitState,
-            MetaOutputToken::LastAccess,
-            MetaOutputToken::Opaque,
-            MetaOutputToken::Key,
-        ] {
-            order.push(token).unwrap();
-        }
-
-        assert_eq!(
-            order.push(MetaOutputToken::Cas),
-            Err(ParseError::TooManyFlags)
-        );
-    }
 }

@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 
-use crate::errors::ParseError;
+use crate::bounded::CapacityExceeded;
 use crate::key::{Key, MAX_KEY_BYTES};
 use crate::reply::ErrorReply;
 use crate::{
@@ -816,7 +816,7 @@ fn push_output(
         .map_err(parse_capacity_error)
 }
 
-fn parse_capacity_error(_: ParseError) -> MetaRequestDecodeError {
+fn parse_capacity_error(_: CapacityExceeded) -> MetaRequestDecodeError {
     recoverable_client_error(BAD_COMMAND_LINE)
 }
 
