@@ -15,7 +15,8 @@ use crate::{
     },
 };
 
-use super::{numbers, seen_flags::SeenFlags};
+use super::numbers;
+use super::tokens::{flags, split_tokens, FlagBudget, FlagError};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
@@ -247,9 +248,7 @@ fn parse_command(
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
 
-    let mut tokens = line
-        .split(|byte| *byte == b' ')
-        .filter(|token| !token.is_empty());
+    let mut tokens = split_tokens(line);
     match tokens.next() {
         Some(b"mg") => parse_get(tokens, key_frame),
         Some(b"md") => parse_delete(tokens, key_frame),
@@ -277,27 +276,11 @@ fn parse_get<'a>(
     let mut no_lru_bump = false;
     let mut temporal = GetTemporalInstructions::default();
     let mut reply_plan = MetaReplyPlan::default();
-    let mut seen = SeenFlags::default();
-    let mut flag_count = 0;
     let mut return_key = false;
 
-    for token in tokens {
-        flag_count += 1;
-        // 20 line tokens minus `mg` and the key.
-        if flag_count > MAX_LINE_TOKENS - 2 {
-            return Err(recoverable_client_error(OPTIONS_FLAGS_TOO_LONG));
-        }
-
-        let (&flag, argument) = token
-            .split_first()
-            .ok_or_else(|| recoverable_client_error(INVALID_FLAG))?;
-        if !flag.is_ascii_alphabetic() {
-            return Err(recoverable_client_error(INVALID_FLAG));
-        }
-        if !seen.insert(flag) {
-            return Err(recoverable_client_error(DUPLICATE_FLAG));
-        }
-
+    // 20 line tokens minus `mg` and the key.
+    for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 2)) {
+        let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
                 require_no_argument(argument)?;
@@ -329,13 +312,7 @@ fn parse_get<'a>(
                 return_last_access = true;
                 push_output(&mut reply_plan, MetaOutputToken::LastAccess)?;
             }
-            b'O' => {
-                if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-                reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
-                push_output(&mut reply_plan, MetaOutputToken::Opaque)?;
-            }
+            b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
             b'q' => {
                 require_no_argument(argument)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressMiss;
@@ -371,20 +348,12 @@ fn parse_get<'a>(
                 &mut temporal,
                 GetTemporalInstruction::UpdateTtl(parse_i32(argument)?),
             )?,
-            b'P' | b'L' => {
-                if argument.is_empty() {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-            }
+            b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
     }
 
-    let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
-    if return_key {
-        reply_plan.external_key = Some(key.clone_bytes());
-    }
-
+    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
     Ok(DecodedMetaCommand::Request {
         request: Request::Get(GetRequest {
             key,
@@ -407,9 +376,7 @@ fn parse_store(
     line: &[u8],
     key_frame: Option<&Bytes>,
 ) -> Result<ParsedStoreHeader, MetaRequestDecodeError> {
-    let mut tokens = line
-        .split(|byte| *byte == b' ')
-        .filter(|token| !token.is_empty());
+    let mut tokens = split_tokens(line);
     if tokens.next() != Some(b"ms".as_slice()) {
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
@@ -458,30 +425,14 @@ fn parse_store_fields<'a>(
     let mut invalidate = false;
     let mut vivify_ttl = None;
     let mut reply_plan = MetaReplyPlan::default();
-    let mut seen = SeenFlags::default();
-    let mut flag_count = 0;
     let mut return_key = false;
 
-    for token in tokens {
-        flag_count += 1;
-        // 20 line tokens minus `ms`, the key, and the datalen. Unreachable
-        // today (only 16 distinct valid ms flags exist, and duplicates are
-        // rejected), but kept so the budget survives future flag leniency.
-        // Raised here rather than in `parse_store` so the body is swallowed.
-        if flag_count > MAX_LINE_TOKENS - 3 {
-            return Err(recoverable_client_error(OPTIONS_FLAGS_TOO_LONG));
-        }
-
-        let (&flag, argument) = token
-            .split_first()
-            .ok_or_else(|| recoverable_client_error(INVALID_FLAG))?;
-        if !flag.is_ascii_alphabetic() {
-            return Err(recoverable_client_error(INVALID_FLAG));
-        }
-        if !seen.insert(flag) {
-            return Err(recoverable_client_error(DUPLICATE_FLAG));
-        }
-
+    // 20 line tokens minus `ms`, the key, and the datalen. Unreachable today
+    // (only 16 distinct valid ms flags exist, and duplicates are rejected),
+    // but kept so the budget survives future flag leniency. Raised here
+    // rather than in `parse_store` so the body is swallowed.
+    for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 3)) {
+        let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
                 require_no_argument(argument)?;
@@ -515,13 +466,7 @@ fn parse_store_fields<'a>(
                 };
             }
             b'N' => vivify_ttl = Some(parse_i32(argument)?),
-            b'O' => {
-                if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-                reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
-                push_output(&mut reply_plan, MetaOutputToken::Opaque)?;
-            }
+            b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
             b'q' => {
                 require_no_argument(argument)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
@@ -532,20 +477,12 @@ fn parse_store_fields<'a>(
                 push_output(&mut reply_plan, MetaOutputToken::Size)?;
             }
             b'T' => ttl = Some(parse_i32(argument)?),
-            b'P' | b'L' => {
-                if argument.is_empty() {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-            }
+            b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
     }
 
-    let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
-    if return_key {
-        reply_plan.external_key = Some(key.clone_bytes());
-    }
-
+    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
     Ok(StoreHeader {
         key,
         value_len,
@@ -576,28 +513,12 @@ fn parse_delete<'a>(
     let mut ttl = None;
     let mut remove_value = false;
     let mut reply_plan = MetaReplyPlan::default();
-    let mut seen = SeenFlags::default();
-    let mut flag_count = 0;
     let mut return_key = false;
 
-    for token in tokens {
-        flag_count += 1;
-        // 20 line tokens minus `md` and the key. Unreachable today (only 12
-        // distinct valid md flags exist), kept for the same reason as `ms`.
-        if flag_count > MAX_LINE_TOKENS - 2 {
-            return Err(recoverable_client_error(OPTIONS_FLAGS_TOO_LONG));
-        }
-
-        let (&flag, argument) = token
-            .split_first()
-            .ok_or_else(|| recoverable_client_error(INVALID_FLAG))?;
-        if !flag.is_ascii_alphabetic() {
-            return Err(recoverable_client_error(INVALID_FLAG));
-        }
-        if !seen.insert(flag) {
-            return Err(recoverable_client_error(DUPLICATE_FLAG));
-        }
-
+    // 20 line tokens minus `md` and the key. Unreachable today (only 12
+    // distinct valid md flags exist), kept for the same reason as `ms`.
+    for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 2)) {
+        let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
                 require_no_argument(argument)?;
@@ -631,20 +552,12 @@ fn parse_delete<'a>(
                 require_no_argument(argument)?;
                 remove_value = true;
             }
-            b'P' | b'L' => {
-                if argument.is_empty() {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-            }
+            b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
     }
 
-    let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
-    if return_key {
-        reply_plan.external_key = Some(key.clone_bytes());
-    }
-
+    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
     Ok(DecodedMetaCommand::Request {
         request: Request::Delete(DeleteRequest {
             key,
@@ -675,23 +588,13 @@ fn parse_arithmetic<'a>(
     let mut override_cas = None;
     let mut temporal = ArithmeticTemporalInstructions::default();
     let mut reply_plan = MetaReplyPlan::default();
-    let mut seen = SeenFlags::default();
     let mut return_key = false;
 
     // `ma` has no upstream token budget. The loop still terminates quickly:
     // non-alphabetic or repeated flags error out, so at most 52 distinct
     // letters are ever processed.
-    for token in tokens {
-        let (&flag, argument) = token
-            .split_first()
-            .ok_or_else(|| recoverable_client_error(INVALID_FLAG))?;
-        if !flag.is_ascii_alphabetic() {
-            return Err(recoverable_client_error(INVALID_FLAG));
-        }
-        if !seen.insert(flag) {
-            return Err(recoverable_client_error(DUPLICATE_FLAG));
-        }
-
+    for flag in flags(tokens, FlagBudget::Unlimited) {
+        let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
                 require_no_argument(argument)?;
@@ -722,13 +625,7 @@ fn parse_arithmetic<'a>(
                 &mut temporal,
                 ArithmeticTemporalInstruction::Vivify(parse_i32(argument)?),
             )?,
-            b'O' => {
-                if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-                reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
-                push_output(&mut reply_plan, MetaOutputToken::Opaque)?;
-            }
+            b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
             b'q' => {
                 require_no_argument(argument)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
@@ -746,11 +643,7 @@ fn parse_arithmetic<'a>(
                 require_no_argument(argument)?;
                 return_value = true;
             }
-            b'P' | b'L' => {
-                if argument.is_empty() {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-            }
+            b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
     }
@@ -762,11 +655,7 @@ fn parse_arithmetic<'a>(
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
 
-    let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
-    if return_key {
-        reply_plan.external_key = Some(key.clone_bytes());
-    }
-
+    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
     Ok(DecodedMetaCommand::Request {
         request: Request::Arithmetic(ArithmeticRequest {
             key,
@@ -791,30 +680,16 @@ fn parse_debug<'a>(
         .next()
         .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
     let mut key_encoding = KeyEncoding::Text;
-    let mut seen = SeenFlags::default();
 
     // `me` has no upstream token budget; see the `ma` note on termination.
-    for token in tokens {
-        let (&flag, argument) = token
-            .split_first()
-            .ok_or_else(|| recoverable_client_error(INVALID_FLAG))?;
-        if !flag.is_ascii_alphabetic() {
-            return Err(recoverable_client_error(INVALID_FLAG));
-        }
-        if !seen.insert(flag) {
-            return Err(recoverable_client_error(DUPLICATE_FLAG));
-        }
-
+    for flag in flags(tokens, FlagBudget::Unlimited) {
+        let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
                 require_no_argument(argument)?;
                 key_encoding = KeyEncoding::Base64;
             }
-            b'P' | b'L' => {
-                if argument.is_empty() {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-            }
+            b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
     }
@@ -876,6 +751,53 @@ fn require_no_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
         Ok(())
     } else {
         Err(recoverable_client_error(BAD_COMMAND_LINE))
+    }
+}
+
+/// `P` and `L` are proxy hints that carry no cache semantics; they are
+/// validated (argument required) and dropped on every command.
+fn require_hint_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
+    if argument.is_empty() {
+        Err(recoverable_client_error(BAD_COMMAND_LINE))
+    } else {
+        Ok(())
+    }
+}
+
+/// `O<token>`: retain the opaque for the local reply and record its output
+/// position. Never forwarded to the backend.
+fn parse_opaque(
+    argument: &[u8],
+    key_frame: Option<&Bytes>,
+    reply_plan: &mut MetaReplyPlan,
+) -> Result<(), MetaRequestDecodeError> {
+    if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
+        return Err(recoverable_client_error(BAD_COMMAND_LINE));
+    }
+    reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
+    push_output(reply_plan, MetaOutputToken::Opaque)
+}
+
+/// Parses the key under the plan's encoding and, for `k`, retains the
+/// client-visible form for the local reply.
+fn resolve_key(
+    raw_key: &[u8],
+    key_frame: Option<&Bytes>,
+    return_key: bool,
+    reply_plan: &mut MetaReplyPlan,
+) -> Result<Key, MetaRequestDecodeError> {
+    let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
+    if return_key {
+        reply_plan.external_key = Some(key.clone_bytes());
+    }
+    Ok(key)
+}
+
+fn flag_error(error: FlagError) -> MetaRequestDecodeError {
+    match error {
+        FlagError::OverBudget => recoverable_client_error(OPTIONS_FLAGS_TOO_LONG),
+        FlagError::InvalidToken => recoverable_client_error(INVALID_FLAG),
+        FlagError::Duplicate => recoverable_client_error(DUPLICATE_FLAG),
     }
 }
 

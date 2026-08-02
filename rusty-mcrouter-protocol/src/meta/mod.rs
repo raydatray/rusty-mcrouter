@@ -5,7 +5,7 @@ mod reply_expectation;
 mod reply_plan;
 mod request_decoder;
 mod request_encoder;
-mod seen_flags;
+mod tokens;
 
 pub use reply_decoder::{
     MetaReplyDecodeError, MetaReplyDecoder, MAX_DEBUG_FIELDS, MAX_REPLY_LINE_BYTES,
