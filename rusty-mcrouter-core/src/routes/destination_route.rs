@@ -22,11 +22,11 @@ impl<B: Backend> Route for DestinationRoute<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{req_get, req_store};
     use bytes::Bytes;
     use rusty_mcrouter_net::testing::MockBackend;
     use rusty_mcrouter_net::{NetError, TimeoutPhase};
     use rusty_mcrouter_protocol::reply::{ErrorReply, GetHit, GetReply, StoreReply, StoreResult};
+    use rusty_mcrouter_protocol::test_support::{get, store};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -37,18 +37,18 @@ mod tests {
         })));
         let route = DestinationRoute::<MockBackend>::new(backend.clone());
 
-        let reply = route.route(req_get(b"foo")).await.unwrap();
+        let reply = route.route(get(b"foo")).await.unwrap();
         let Reply::Get(GetReply::Hit(hit)) = reply else {
             panic!("expected a get hit");
         };
         assert_eq!(hit.value.as_deref(), Some(b"bar".as_slice()));
-        assert_eq!(backend.received(), vec![req_get(b"foo")]);
+        assert_eq!(backend.received(), vec![get(b"foo")]);
     }
 
     #[tokio::test]
     async fn returns_miss_reply_on_miss() {
         let route = DestinationRoute::<MockBackend>::new(MockBackend::miss());
-        let reply = route.route(req_get(b"foo")).await.unwrap();
+        let reply = route.route(get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
@@ -57,7 +57,7 @@ mod tests {
         let backend = MockBackend::failing(NetError::Desync("bad reply"));
         let route = DestinationRoute::<MockBackend>::new(backend);
 
-        let result = route.route(req_get(b"foo")).await;
+        let result = route.route(get(b"foo")).await;
         assert!(matches!(result, Err(RouteError::Backend(_))));
     }
 
@@ -68,7 +68,7 @@ mod tests {
         });
         let route = DestinationRoute::<MockBackend>::new(backend);
 
-        let result = route.route(req_get(b"foo")).await;
+        let result = route.route(get(b"foo")).await;
         assert!(matches!(
             result,
             Err(RouteError::Backend(NetError::Timeout {
@@ -83,7 +83,7 @@ mod tests {
         let backend = MockBackend::replying(stored.clone());
         let route = DestinationRoute::<MockBackend>::new(backend.clone());
 
-        let req = req_store(b"foo", b"bar");
+        let req = store(b"foo", b"bar");
         let reply = route.route(req.clone()).await.unwrap();
         assert_eq!(reply, stored);
         assert_eq!(backend.received(), vec![req]);
@@ -94,7 +94,7 @@ mod tests {
         let server_error = Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"oom"))));
         let route =
             DestinationRoute::<MockBackend>::new(MockBackend::replying(server_error.clone()));
-        let reply = route.route(req_get(b"foo")).await.unwrap();
+        let reply = route.route(get(b"foo")).await.unwrap();
         assert_eq!(reply, server_error);
     }
 
@@ -103,7 +103,7 @@ mod tests {
         let route = Arc::new(DestinationRoute::<MockBackend>::new(MockBackend::miss()));
 
         let route_clone = Arc::clone(&route);
-        let result = tokio::spawn(async move { route_clone.route(req_get(b"foo")).await })
+        let result = tokio::spawn(async move { route_clone.route(get(b"foo")).await })
             .await
             .unwrap();
 
@@ -117,11 +117,11 @@ mod tests {
 
         let r1 = {
             let route = Arc::clone(&route);
-            tokio::spawn(async move { route.route(req_get(b"a")).await })
+            tokio::spawn(async move { route.route(get(b"a")).await })
         };
         let r2 = {
             let route = Arc::clone(&route);
-            tokio::spawn(async move { route.route(req_get(b"b")).await })
+            tokio::spawn(async move { route.route(get(b"b")).await })
         };
 
         let (a, b) = tokio::join!(r1, r2);

@@ -18,4 +18,5 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "macros", "time"] }
 
 [dev-dependencies]
+rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol", features = ["testing"] }
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -60,21 +60,13 @@ mod tests {
     use super::*;
     use crate::failover::InOrderPolicy;
     use crate::routes::{DestinationRoute, RouteError};
-    use crate::test_support::{req_get, req_store};
     use bytes::Bytes;
     use rusty_mcrouter_net::testing::MockBackend;
     use rusty_mcrouter_net::{NetError, TimeoutPhase};
     use rusty_mcrouter_protocol::reply::{
         ArithmeticReply, ArithmeticResult, ErrorReply, GetReply, StoreReply, StoreResult,
     };
-
-    fn get() -> Request {
-        req_get(b"k")
-    }
-
-    fn set() -> Request {
-        req_store(b"k", b"v")
-    }
+    use rusty_mcrouter_protocol::test_support::{get, store};
 
     fn numeric(value: u64) -> Reply {
         Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
@@ -117,7 +109,7 @@ mod tests {
             let backup = MockBackend::replying(numeric(1));
             let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
-            assert_eq!(route.route(get()).await.unwrap(), numeric(1));
+            assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(1));
             assert_eq!(primary.received().len(), 1);
             assert_eq!(backup.received().len(), 1);
         }
@@ -129,7 +121,7 @@ mod tests {
         let backup = MockBackend::replying(numeric(1));
         let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
-        assert_eq!(route.route(get()).await.unwrap(), numeric(1));
+        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(1));
         assert_eq!(backup.received().len(), 1);
     }
 
@@ -140,7 +132,7 @@ mod tests {
         let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
         assert_eq!(
-            route.route(get()).await.unwrap(),
+            route.route(get(b"k")).await.unwrap(),
             Reply::Get(GetReply::Miss)
         );
         assert!(backup.received().is_empty());
@@ -153,7 +145,7 @@ mod tests {
         let c = MockBackend::replying(numeric(3));
         let route = in_order(vec![dest(a.clone()), dest(b.clone()), dest(c.clone())]);
 
-        assert_eq!(route.route(get()).await.unwrap(), numeric(2));
+        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(2));
         assert_eq!(a.received().len(), 1);
         assert_eq!(b.received().len(), 1);
         assert!(c.received().is_empty());
@@ -165,14 +157,14 @@ mod tests {
             dest(MockBackend::failing(timeout())),
             dest(MockBackend::replying(server_error(b"x"))),
         ]);
-        assert_eq!(route.route(get()).await.unwrap(), server_error(b"x"));
+        assert_eq!(route.route(get(b"k")).await.unwrap(), server_error(b"x"));
 
         let route = in_order(vec![
             dest(MockBackend::failing(timeout())),
             dest(MockBackend::failing(timeout())),
         ]);
         assert!(matches!(
-            route.route(get()).await,
+            route.route(get(b"k")).await,
             Err(RouteError::Backend(NetError::Timeout { .. }))
         ));
     }
@@ -181,12 +173,12 @@ mod tests {
     async fn single_child_has_no_backup() {
         let only = MockBackend::replying(numeric(1));
         let route = in_order(vec![dest(only.clone())]);
-        assert_eq!(route.route(get()).await.unwrap(), numeric(1));
+        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(1));
         assert_eq!(only.received().len(), 1);
 
         let route = in_order(vec![dest(MockBackend::failing(timeout()))]);
         assert!(matches!(
-            route.route(get()).await,
+            route.route(get(b"k")).await,
             Err(RouteError::Backend(NetError::Timeout { .. }))
         ));
     }
@@ -210,7 +202,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            route.route(set()).await,
+            route.route(store(b"k", b"v")).await,
             Err(RouteError::Backend(NetError::Timeout { .. }))
         ));
         assert!(backup.received().is_empty());

@@ -44,11 +44,10 @@ impl Proxy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
     use rusty_mcrouter_core::{DestinationRoute, Route};
     use rusty_mcrouter_net::testing::MockBackend;
     use rusty_mcrouter_net::{NetError, TimeoutPhase};
-    use rusty_mcrouter_protocol::meta::{DecodedMetaCommand, MetaRequestDecoder};
+    use rusty_mcrouter_protocol::test_support::get;
     use tokio::sync::oneshot;
     use tokio::task::LocalSet;
 
@@ -59,16 +58,11 @@ mod tests {
         }))
         .into_dyn();
 
-        let mut decoder = MetaRequestDecoder::new();
-        let mut src = BytesMut::from(&b"mg foo v\r\n"[..]);
-        let DecodedMetaCommand::Request { request, .. } =
-            decoder.decode(&mut src).unwrap().unwrap()
-        else {
-            panic!("expected request");
-        };
-
         let (reply_tx, reply_rx) = oneshot::channel();
-        let req = ProxyRequest { request, reply_tx };
+        let req = ProxyRequest {
+            request: get(b"foo"),
+            reply_tx,
+        };
 
         let reply = LocalSet::new()
             .run_until(async move {

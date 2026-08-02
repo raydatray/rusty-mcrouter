@@ -75,25 +75,10 @@ impl Client {
 mod tests {
     use super::*;
     use crate::testing::{scripted_backend, Step};
-    use bytes::{Bytes, BytesMut};
-    use rusty_mcrouter_protocol::meta::{DecodedMetaCommand, MetaRequestDecoder};
+    use bytes::Bytes;
     use rusty_mcrouter_protocol::reply::GetReply;
+    use rusty_mcrouter_protocol::test_support::{get, request};
     use rusty_mcrouter_protocol::Reply;
-
-    fn parse_request(input: &[u8]) -> Request {
-        let mut decoder = MetaRequestDecoder::new();
-        let mut src = BytesMut::from(input);
-        let DecodedMetaCommand::Request { request, .. } =
-            decoder.decode(&mut src).unwrap().unwrap()
-        else {
-            panic!("expected request");
-        };
-        request
-    }
-
-    fn get(key: &'static [u8]) -> Request {
-        parse_request(&[b"mg ", key, b" v\r\n"].concat())
-    }
 
     fn hit_data(reply: Reply) -> Bytes {
         let Reply::Get(GetReply::Hit(hit)) = reply else {
@@ -194,7 +179,7 @@ mod tests {
         let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]).await;
         let client = Client::connect(addr).await.unwrap();
 
-        let bad = parse_request(b"mg /region/cluster/ v\r\n");
+        let bad = request(b"mg /region/cluster/ v\r\n");
         assert!(matches!(client.send(bad).await, Err(NetError::Encode(_))));
 
         assert_eq!(
@@ -265,7 +250,7 @@ mod tests {
         let mut big = b"ms k 1048576\r\n".to_vec();
         big.extend_from_slice(&vec![b'x'; 1024 * 1024]);
         big.extend_from_slice(b"\r\n");
-        let store = parse_request(&big);
+        let store = request(&big);
 
         let results = tokio::join!(
             client.send(store.clone()),

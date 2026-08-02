@@ -51,20 +51,23 @@ impl FailoverPolicy for LeastFailuresPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::req_get;
+    use rusty_mcrouter_protocol::test_support::get;
 
-    fn req() -> Request {
-        req_get(b"k")
+    fn request() -> Request {
+        get(b"k")
     }
 
     #[test]
     fn in_order_yields_backups_in_config_order() {
-        assert_eq!(InOrderPolicy.failover_order(&req(), 4), vec![1, 2, 3]);
+        assert_eq!(InOrderPolicy.failover_order(&request(), 4), vec![1, 2, 3]);
     }
 
     #[test]
     fn in_order_single_child_has_no_backups() {
-        assert_eq!(InOrderPolicy.failover_order(&req(), 1), Vec::<usize>::new());
+        assert_eq!(
+            InOrderPolicy.failover_order(&request(), 1),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
@@ -72,25 +75,25 @@ mod tests {
         let policy = InOrderPolicy;
         policy.record_outcome(1, true);
         policy.record_outcome(2, false);
-        assert_eq!(policy.failover_order(&req(), 3), vec![1, 2]);
+        assert_eq!(policy.failover_order(&request(), 3), vec![1, 2]);
     }
 
     #[test]
     fn least_failures_starts_in_config_order() {
         let policy = LeastFailuresPolicy::new(4, 4);
-        assert_eq!(policy.failover_order(&req(), 4), vec![1, 2, 3]);
+        assert_eq!(policy.failover_order(&request(), 4), vec![1, 2, 3]);
     }
 
     #[test]
     fn least_failures_never_includes_the_primary() {
         let policy = LeastFailuresPolicy::new(3, 3);
-        assert!(!policy.failover_order(&req(), 3).contains(&0));
+        assert!(!policy.failover_order(&request(), 3).contains(&0));
     }
 
     #[test]
     fn least_failures_caps_at_max_tries() {
         let policy = LeastFailuresPolicy::new(5, 2);
-        assert_eq!(policy.failover_order(&req(), 5).len(), 1);
+        assert_eq!(policy.failover_order(&request(), 5).len(), 1);
     }
 
     #[test]
@@ -99,7 +102,7 @@ mod tests {
         policy.record_outcome(1, true);
         policy.record_outcome(1, true);
         policy.record_outcome(2, true);
-        assert_eq!(policy.failover_order(&req(), 4), vec![3, 2, 1]);
+        assert_eq!(policy.failover_order(&request(), 4), vec![3, 2, 1]);
     }
 
     #[test]
@@ -108,6 +111,6 @@ mod tests {
         policy.record_outcome(1, true);
         policy.record_outcome(1, true);
         policy.record_outcome(1, false);
-        assert_eq!(policy.failover_order(&req(), 3), vec![1, 2]);
+        assert_eq!(policy.failover_order(&request(), 3), vec![1, 2]);
     }
 }
