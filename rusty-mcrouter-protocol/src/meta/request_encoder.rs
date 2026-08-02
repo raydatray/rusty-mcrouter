@@ -8,12 +8,26 @@ use crate::request::Request;
 #[derive(Debug, Default)]
 pub struct MetaRequestEncoder;
 
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum MetaRequestEncodeError {
+    #[error("backend key is empty after removing its routing prefix")]
+    EmptyBackendKey,
+
+    #[error("base64-encoded backend key exceeds the {maximum}-byte limit")]
+    EncodedKeyTooLong { maximum: usize },
+
+    #[error("Meta request value exceeds the {maximum}-byte limit")]
+    ValueTooLarge { maximum: usize },
+
+    #[error("Meta request exceeds the {maximum}-byte line limit")]
+    FrameTooLarge { maximum: usize },
+}
+
 impl MetaRequestEncoder {
     pub const fn new() -> Self {
         Self
     }
 
-    /// Appends one loud backend request. On error, `out` is unchanged.
     pub fn encode(
         &self,
         request: &Request,
@@ -32,21 +46,6 @@ impl MetaRequestEncoder {
         }
         result
     }
-}
-
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum MetaRequestEncodeError {
-    #[error("backend key is empty after removing its routing prefix")]
-    EmptyBackendKey,
-
-    #[error("base64-encoded backend key exceeds the {maximum}-byte limit")]
-    EncodedKeyTooLong { maximum: usize },
-
-    #[error("Meta request value exceeds the {maximum}-byte limit")]
-    ValueTooLarge { maximum: usize },
-
-    #[error("Meta request exceeds the {maximum}-byte line limit")]
-    FrameTooLarge { maximum: usize },
 }
 
 /// Writes the backend form of `key`: the routing prefix is stripped, and a
