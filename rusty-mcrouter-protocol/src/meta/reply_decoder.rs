@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use memchr::memchr;
 use thiserror::Error;
 
-use crate::reply::{ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply, StoreResult};
+use crate::reply::{DeleteReply, ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply, StoreResult};
 
 use super::{numbers, seen_flags::SeenFlags, GetSuccessShape, MetaReplyExpectation};
 
@@ -157,8 +157,30 @@ fn parse_line(
     match expectation {
         MetaReplyExpectation::Get(shape) => parse_get_line(*shape, line),
         MetaReplyExpectation::Store { cas, size } => parse_store_line(*cas, *size, line),
+        MetaReplyExpectation::Delete => parse_delete_line(line),
         _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
     }
+}
+
+fn parse_delete_line(line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
+    let mut tokens = line
+        .split(|byte| *byte == b' ')
+        .filter(|token| !token.is_empty());
+    let code = tokens
+        .next()
+        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+    if tokens.next().is_some() {
+        return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+    }
+
+    let reply = match code {
+        b"HD" => DeleteReply::Success,
+        b"NS" => DeleteReply::NotStored,
+        b"EX" => DeleteReply::Exists,
+        b"NF" => DeleteReply::NotFound,
+        _ => return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
+    };
+    Ok(ParsedLine::Reply(Reply::Delete(reply)))
 }
 
 fn parse_get_line(shape: GetSuccessShape, line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
@@ -390,6 +412,7 @@ mod tests {
         cas: true,
         size: true,
     };
+    const DELETE: MetaReplyExpectation = MetaReplyExpectation::Delete;
     fn decode(expectation: &MetaReplyExpectation, input: &[u8]) -> Reply {
         let mut decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(input);
@@ -440,6 +463,18 @@ mod tests {
     }
 
     #[test]
+    fn decodes_all_delete_outcomes() {
+        for (input, expected) in [
+            (b"HD\r\n".as_slice(), DeleteReply::Success),
+            (b"NS\r\n".as_slice(), DeleteReply::NotStored),
+            (b"EX\r\n".as_slice(), DeleteReply::Exists),
+            (b"NF\r\n".as_slice(), DeleteReply::NotFound),
+        ] {
+            assert_eq!(decode(&DELETE, input), Reply::Delete(expected));
+        }
+    }
+
+    #[test]
     fn decodes_store_attributes_in_any_order() {
         assert_eq!(
             decode(&STORE_WITH_FIELDS, b"HD s3 c42\r\n"),
@@ -471,6 +506,18 @@ mod tests {
             let mut decoder = MetaReplyDecoder::new();
             let mut src = BytesMut::from(input);
             assert!(decoder.decode(&STORE, &mut src).is_err(), "input={input:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_delete_codes_and_attributes() {
+        for input in [b"EN\r\n".as_slice(), b"HD c1\r\n".as_slice()] {
+            let mut decoder = MetaReplyDecoder::new();
+            let mut src = BytesMut::from(input);
+            assert!(
+                decoder.decode(&DELETE, &mut src).is_err(),
+                "input={input:?}"
+            );
         }
     }
 
