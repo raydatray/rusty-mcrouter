@@ -4,7 +4,10 @@ use thiserror::Error;
 
 use crate::{
     key::{Key, MAX_KEY_BYTES},
-    request::{DeleteRequest, GetRequest, GetTemporalInstruction, Request, StoreMode, StoreRequest},
+    request::{
+        ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction, DeleteRequest,
+        GetRequest, GetTemporalInstruction, Request, StoreMode, StoreRequest,
+    },
 };
 
 use super::{GetSuccessShape, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES, MAX_VALUE_BYTES};
@@ -36,6 +39,15 @@ impl MetaRequestEncoder {
             }
             Request::Delete(request) => {
                 encode_delete(request, out).map(|()| MetaReplyExpectation::Delete)
+            }
+            Request::Arithmetic(request) => {
+                encode_arithmetic(request, out).map(|()| MetaReplyExpectation::Arithmetic {
+                    value: request.return_value,
+                    cas: request.return_cas,
+                    ttl: request.temporal.iter().any(|instruction| {
+                        matches!(instruction, ArithmeticTemporalInstruction::ReturnTtl)
+                    }),
+                })
             }
             _ => Err(MetaRequestEncodeError::UnsupportedRequest),
         };
@@ -226,6 +238,55 @@ fn encode_delete(
     Ok(())
 }
 
+fn encode_arithmetic(
+    request: &ArithmeticRequest,
+    out: &mut BytesMut,
+) -> Result<(), MetaRequestEncodeError> {
+    let line_start = out.len();
+    out.extend_from_slice(b"ma ");
+    let key_is_base64 = write_key(out, &request.key)?;
+
+    if key_is_base64 {
+        write_bare_flag(out, b'b');
+    }
+    if request.return_value {
+        write_bare_flag(out, b'v');
+    }
+    if request.return_cas {
+        write_bare_flag(out, b'c');
+    }
+    if let Some(cas) = request.compare_cas {
+        write_u64_flag(out, b'C', cas);
+    }
+    if let Some(cas) = request.override_cas {
+        write_u64_flag(out, b'E', cas);
+    }
+    if let Some(initial) = request.initial_value {
+        write_u64_flag(out, b'J', initial);
+    }
+    if request.delta != 1 {
+        write_u64_flag(out, b'D', request.delta);
+    }
+    if request.mode == ArithmeticMode::Decrement {
+        write_mode_flag(out, b'D');
+    }
+    for instruction in request.temporal.iter() {
+        match instruction {
+            ArithmeticTemporalInstruction::Vivify(ttl) => write_i32_flag(out, b'N', *ttl),
+            ArithmeticTemporalInstruction::UpdateTtl(ttl) => write_i32_flag(out, b'T', *ttl),
+            ArithmeticTemporalInstruction::ReturnTtl => write_bare_flag(out, b't'),
+        }
+    }
+
+    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
+        return Err(MetaRequestEncodeError::FrameTooLarge {
+            maximum: MAX_COMMAND_LINE_BYTES,
+        });
+    }
+    out.extend_from_slice(b"\r\n");
+    Ok(())
+}
+
 fn write_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
     let key = key.key_without_routing_prefix();
     if key.is_empty() {
@@ -366,6 +427,77 @@ mod tests {
     }
 
     #[test]
+    fn returns_arithmetic_reply_expectation() {
+        let encoder = MetaRequestEncoder::new();
+        let mut out = BytesMut::new();
+        let header = parse(b"ma key\r\n");
+        assert_eq!(
+            encoder.encode(&header, &mut out),
+            Ok(MetaReplyExpectation::Arithmetic {
+                value: false,
+                cas: false,
+                ttl: false,
+            })
+        );
+
+        out.clear();
+        let value = parse(b"ma key v\r\n");
+        assert_eq!(
+            encoder.encode(&value, &mut out),
+            Ok(MetaReplyExpectation::Arithmetic {
+                value: true,
+                cas: false,
+                ttl: false,
+            })
+        );
+    }
+
+    #[test]
+    fn strips_arithmetic_frontend_metadata_and_routing_prefix() {
+        let request = parse(
+            b"ma /region/cluster/key Otag N30 J5 D2 T60 MD q t c v k C42 E43 Pproxy Lpath/\r\n",
+        );
+
+        assert_eq!(
+            encode(&request).unwrap(),
+            b"ma key v c C42 E43 J5 D2 MD N30 T60 t\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn canonicalizes_arithmetic_modes_and_defaults() {
+        assert_eq!(
+            encode(&parse(b"ma key MI D1\r\n")).unwrap(),
+            b"ma key\r\n".as_slice()
+        );
+        assert_eq!(
+            encode(&parse(b"ma key M+\r\n")).unwrap(),
+            b"ma key\r\n".as_slice()
+        );
+        assert_eq!(
+            encode(&parse(b"ma key M-\r\n")).unwrap(),
+            b"ma key MD\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn preserves_arithmetic_temporal_order() {
+        let request = parse(b"ma key t T60 N30\r\n");
+
+        assert_eq!(
+            encode(&request).unwrap(),
+            b"ma key t T60 N30\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn base64_encodes_binary_arithmetic_key() {
+        let request = parse(b"ma AAE= b\r\n");
+
+        assert_eq!(encode(&request).unwrap(), b"ma AAE= b\r\n".as_slice());
+    }
+
+    #[test]
     fn returns_delete_reply_expectation() {
         let request = parse(b"md key\r\n");
         let mut out = BytesMut::new();
@@ -442,6 +574,12 @@ mod tests {
             encode(&request).unwrap(),
             b"ms AAE= 4 b\r\na\0b\n\r\n".as_slice()
         );
+    }
+
+    #[test]
+    fn encodes_basic_arithmetic() {
+        let request = parse(b"ma key\r\n");
+        assert_eq!(encode(&request).unwrap(), b"ma key\r\n".as_slice());
     }
 
     #[test]
