@@ -51,12 +51,10 @@ impl FailoverPolicy for LeastFailuresPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
+    use crate::test_support::req_get;
 
     fn req() -> Request {
-        Request::Get {
-            key: Bytes::from_static(b"k"),
-        }
+        req_get(b"k")
     }
 
     #[test]

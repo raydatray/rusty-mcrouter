@@ -6,7 +6,7 @@ pub enum ArithmeticReply {
     NotFound(ArithmeticResult),  // NF
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ArithmeticResult {
     pub value: Option<u64>, // v, returned as the VA body
     pub cas: Option<u64>,   // c

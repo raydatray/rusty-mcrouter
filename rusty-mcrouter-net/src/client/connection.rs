@@ -2,7 +2,8 @@ use std::collections::VecDeque;
 
 use crate::{NetError, Result, TimeoutPhase};
 use bytes::BytesMut;
-use rusty_mcrouter_protocol::{parse_reply, ProtocolError, Reply};
+use rusty_mcrouter_protocol::meta::{MetaReplyDecoder, MetaReplyExpectation, MetaRequestEncoder};
+use rusty_mcrouter_protocol::Reply;
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -21,7 +22,12 @@ pub(crate) struct ClientConnection {
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
     rx: mpsc::Receiver<ClientCommand>,
-    pending: VecDeque<oneshot::Sender<Result<Reply>>>,
+    /// FIFO of in-flight requests. Meta result codes are ambiguous (`HD` may
+    /// answer a get, store, delete, or arithmetic), so each slot retains the
+    /// reply expectation derived while encoding its request.
+    pending: VecDeque<(MetaReplyExpectation, oneshot::Sender<Result<Reply>>)>,
+    encoder: MetaRequestEncoder,
+    decoder: MetaReplyDecoder,
     read_buf: BytesMut,
     write_buf: BytesMut,
     write_timeout: Option<Duration>,
@@ -42,6 +48,8 @@ impl ClientConnection {
             writer,
             rx,
             pending: VecDeque::new(),
+            encoder: MetaRequestEncoder::new(),
+            decoder: MetaReplyDecoder::new(),
             read_buf: BytesMut::with_capacity(cfg.read_buf_initial_capacity),
             write_buf: BytesMut::new(),
             write_timeout: cfg.write_timeout,
@@ -104,13 +112,15 @@ impl ClientConnection {
     // FIFO reply matching still holds. (Tier 2: vectored/zero-copy via IoSlice.)
     async fn write_batch(&mut self, first: ClientCommand) -> Result<()> {
         self.write_buf.clear();
-        first.request.serialize_into(&mut self.write_buf);
-        self.pending.push_back(first.reply_tx);
+        self.encode_command(first);
 
         // drain whatever else is already waiting, into the same write
         while let Ok(cmd) = self.rx.try_recv() {
-            cmd.request.serialize_into(&mut self.write_buf);
-            self.pending.push_back(cmd.reply_tx);
+            self.encode_command(cmd);
+        }
+        if self.write_buf.is_empty() {
+            // every drained command failed to encode; nothing hit the wire
+            return Ok(());
         }
 
         let write_timeout = self.write_timeout;
@@ -129,6 +139,18 @@ impl ClientConnection {
         Ok(())
     }
 
+    /// An encode failure (for example an empty backend key) is a per-request
+    /// error: the oneshot fails, the connection and its FIFO stay intact, and
+    /// `write_buf` is untouched because the encoder truncates on error.
+    fn encode_command(&mut self, cmd: ClientCommand) {
+        match self.encoder.encode(&cmd.request, &mut self.write_buf) {
+            Ok(expectation) => self.pending.push_back((expectation, cmd.reply_tx)),
+            Err(error) => {
+                let _ = cmd.reply_tx.send(Err(NetError::Encode(error)));
+            }
+        }
+    }
+
     fn arm_read_deadline(&mut self) {
         if let Some(dur) = self.read_idle_timeout {
             self.read_deadline = Instant::now() + dur;
@@ -136,23 +158,25 @@ impl ClientConnection {
     }
 
     fn deliver_replies(&mut self) -> Result<()> {
-        while let Some(reply) = parse_reply(&mut self.read_buf)? {
-            match self.pending.pop_front() {
-                Some(tx) => {
+        loop {
+            let Some((expectation, _)) = self.pending.front() else {
+                if self.read_buf.is_empty() {
+                    return Ok(());
+                }
+                return Err(NetError::Desync("reply bytes with no pending request"));
+            };
+            match self.decoder.decode(expectation, &mut self.read_buf)? {
+                Some(reply) => {
+                    let (_, tx) = self.pending.pop_front().expect("front checked above");
                     let _ = tx.send(Ok(reply));
                 }
-                None => {
-                    return Err(NetError::Protocol(ProtocolError::Malformed(
-                        "unexpected reply with no pending request",
-                    )));
-                }
+                None => return Ok(()),
             }
         }
-        Ok(())
     }
 
     fn fail_all_pending(&mut self, err: NetError) {
-        for tx in self.pending.drain(..) {
+        for (_, tx) in self.pending.drain(..) {
             let _ = tx.send(Err(err.clone()));
         }
     }

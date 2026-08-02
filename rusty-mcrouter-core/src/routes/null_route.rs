@@ -1,3 +1,6 @@
+use rusty_mcrouter_protocol::reply::{
+    ArithmeticReply, ArithmeticResult, DebugReply, DeleteReply, GetReply, StoreReply, StoreResult,
+};
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use super::{Result, Route};
@@ -7,16 +10,19 @@ pub struct NullRoute;
 impl Route for NullRoute {
     async fn route(&self, req: Request) -> Result<Reply> {
         Ok(match req {
-            // todo - add the other dummy replies as more request types added
-            Request::Get { .. } => Reply::Get { hits: vec![] },
-            Request::Set { .. }
-            | Request::Add { .. }
-            | Request::Replace { .. }
-            | Request::Append { .. }
-            | Request::Prepend { .. } => Reply::Stored,
-            Request::Delete { .. } => Reply::Deleted,
-            Request::Incr { .. } | Request::Decr { .. } => Reply::NotFound,
-            Request::Touch { .. } => Reply::Touched,
+            Request::Get(_) => Reply::Get(GetReply::Miss),
+            // Success with synthesized result fields so a reply plan that
+            // requested c/s still encodes; cas 0 mirrors memcached's
+            // "not a real CAS" convention on non-stores.
+            Request::Store(request) => Reply::Store(StoreReply::Success(StoreResult {
+                cas: Some(0),
+                size: Some(request.value.len() as u64),
+            })),
+            Request::Delete(_) => Reply::Delete(DeleteReply::Success),
+            Request::Arithmetic(_) => {
+                Reply::Arithmetic(ArithmeticReply::NotFound(ArithmeticResult::default()))
+            }
+            Request::Debug(_) => Reply::Debug(DebugReply::Miss),
         })
     }
 }
@@ -24,143 +30,44 @@ impl Route for NullRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
+    use crate::test_support::{req, req_delete, req_get, req_store};
 
     #[tokio::test]
     async fn returns_miss_for_get() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Get {
-                key: Bytes::from_static(b"foo"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Get { hits: vec![] });
+        let reply = NullRoute.route(req_get(b"foo")).await.unwrap();
+        assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
-    async fn returns_stored_for_set() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Set {
-                key: Bytes::from_static(b"k"),
-                flags: 0,
-                exptime: 0,
-                data: Bytes::from_static(b"v"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Stored);
+    async fn returns_synthesized_success_for_store() {
+        let reply = NullRoute.route(req_store(b"k", b"value")).await.unwrap();
+        assert_eq!(
+            reply,
+            Reply::Store(StoreReply::Success(StoreResult {
+                cas: Some(0),
+                size: Some(5),
+            }))
+        );
     }
 
     #[tokio::test]
-    async fn returns_deleted_for_delete() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Delete {
-                key: Bytes::from_static(b"k"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Deleted);
+    async fn returns_success_for_delete() {
+        let reply = NullRoute.route(req_delete(b"k")).await.unwrap();
+        assert_eq!(reply, Reply::Delete(DeleteReply::Success));
     }
 
     #[tokio::test]
-    async fn returns_stored_for_add() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Add {
-                key: Bytes::from_static(b"k"),
-                flags: 0,
-                exptime: 0,
-                data: Bytes::from_static(b"v"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Stored);
+    async fn returns_not_found_for_arithmetic() {
+        let reply = NullRoute.route(req(b"ma k v\r\n")).await.unwrap();
+        assert_eq!(
+            reply,
+            Reply::Arithmetic(ArithmeticReply::NotFound(ArithmeticResult::default()))
+        );
     }
 
     #[tokio::test]
-    async fn returns_stored_for_replace() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Replace {
-                key: Bytes::from_static(b"k"),
-                flags: 0,
-                exptime: 0,
-                data: Bytes::from_static(b"v"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Stored);
-    }
-
-    #[tokio::test]
-    async fn returns_stored_for_append() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Append {
-                key: Bytes::from_static(b"k"),
-                flags: 0,
-                exptime: 0,
-                data: Bytes::from_static(b"v"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Stored);
-    }
-
-    #[tokio::test]
-    async fn returns_stored_for_prepend() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Prepend {
-                key: Bytes::from_static(b"k"),
-                flags: 0,
-                exptime: 0,
-                data: Bytes::from_static(b"v"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Stored);
-    }
-
-    #[tokio::test]
-    async fn returns_not_found_for_incr() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Incr {
-                key: Bytes::from_static(b"k"),
-                delta: 1,
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::NotFound);
-    }
-
-    #[tokio::test]
-    async fn returns_not_found_for_decr() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Decr {
-                key: Bytes::from_static(b"k"),
-                delta: 1,
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::NotFound);
-    }
-
-    #[tokio::test]
-    async fn returns_touched_for_touch() {
-        let r = NullRoute;
-        let reply = r
-            .route(Request::Touch {
-                key: Bytes::from_static(b"k"),
-                exptime: 60,
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Touched);
+    async fn returns_miss_for_debug() {
+        let reply = NullRoute.route(req(b"me k\r\n")).await.unwrap();
+        assert_eq!(reply, Reply::Debug(DebugReply::Miss));
     }
 }

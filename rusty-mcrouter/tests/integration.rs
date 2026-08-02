@@ -1,3 +1,6 @@
+//! End-to-end tests: real memcached (Docker) behind the real binary,
+//! speaking the Meta protocol on both hops.
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -38,15 +41,27 @@ async fn fixture() -> &'static Fixture {
 
             // Pre-seed a read-only key. Tests that need fresh writes use their
             // own per-test key namespace so they're safe under parallel
-            // execution.
-            let mut conn = wait_for_tcp(backend_addr, Duration::from_secs(5)).await;
-            conn.write_all(b"set seeded_foo 0 0 3\r\nbar\r\n")
-                .await
-                .unwrap();
-            let mut buf = vec![0u8; 64];
-            let n = conn.read(&mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"STORED\r\n");
-            drop(conn);
+            // execution. The seed retries: docker's port proxy accepts TCP
+            // before memcached inside the container listens, so early
+            // connections can reset.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut conn = wait_for_tcp(backend_addr, Duration::from_secs(5)).await;
+                let seeded: std::io::Result<bool> = async {
+                    conn.write_all(b"ms seeded_foo 3\r\nbar\r\n").await?;
+                    let mut buf = [0u8; 64];
+                    let n = conn.read(&mut buf).await?;
+                    Ok(&buf[..n] == b"HD\r\n")
+                }
+                .await;
+                match seeded {
+                    Ok(true) => break,
+                    Ok(_) | Err(_) if Instant::now() < deadline => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    other => panic!("seeding backend failed: {other:?}"),
+                }
+            }
 
             let config_path = std::env::temp_dir().join(format!(
                 "rusty-mcrouter-integration-{}.json",
@@ -104,417 +119,485 @@ async fn wait_for_tcp(addr: SocketAddr, timeout: Duration) -> TcpStream {
     }
 }
 
-async fn round_trip(addr: SocketAddr, request: &[u8]) -> Vec<u8> {
+/// Writes `request` on a fresh connection and asserts it yields exactly
+/// `expected`, reassembling partial reads until the expected length arrives.
+async fn exchange(addr: SocketAddr, request: &[u8], expected: &[u8]) {
     let mut conn = TcpStream::connect(addr).await.unwrap();
     conn.write_all(request).await.unwrap();
-    let mut buf = vec![0u8; 256];
-    let n = conn.read(&mut buf).await.unwrap();
-    buf.truncate(n);
-    buf
-}
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn get_seeded_key_returns_value() {
-    let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"get seeded_foo\r\n").await;
-    assert_eq!(resp, b"VALUE seeded_foo 0 3\r\nbar\r\nEND\r\n");
-}
-
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn get_missing_key_returns_end() {
-    let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"get get_missing_key\r\n").await;
-    assert_eq!(resp, b"END\r\n");
-}
-
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn get_multi_key_returns_only_hits() {
-    let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"get seeded_foo get_multi_key_miss\r\n").await;
-    assert_eq!(resp, b"VALUE seeded_foo 0 3\r\nbar\r\nEND\r\n");
-}
-
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn set_returns_stored() {
-    let fx = fixture().await;
-    let resp = round_trip(
-        fx.router_addr,
-        b"set set_returns_stored_key 7 0 5\r\nhello\r\n",
-    )
-    .await;
-    assert_eq!(resp, b"STORED\r\n");
-}
-
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn set_then_get_round_trip() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set set_then_get_key 9 0 5\r\nworld\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get set_then_get_key\r\n").await;
-    assert_eq!(fetched, b"VALUE set_then_get_key 9 5\r\nworld\r\nEND\r\n");
-}
-
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn set_overwrites_existing_value() {
-    let fx = fixture().await;
-    let initial = round_trip(fx.router_addr, b"set set_overwrites_key 0 0 3\r\nbar\r\n").await;
-    assert_eq!(initial, b"STORED\r\n");
-
-    let updated = round_trip(
-        fx.router_addr,
-        b"set set_overwrites_key 0 0 7\r\nupdated\r\n",
-    )
-    .await;
-    assert_eq!(updated, b"STORED\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get set_overwrites_key\r\n").await;
+    let mut received = Vec::with_capacity(expected.len());
+    let read = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut chunk = [0u8; 4096];
+        while received.len() < expected.len() {
+            let n = conn.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&chunk[..n]);
+        }
+    });
+    read.await.expect("timed out waiting for reply bytes");
     assert_eq!(
-        fetched,
-        b"VALUE set_overwrites_key 0 7\r\nupdated\r\nEND\r\n"
+        received,
+        expected,
+        "request {:?}: got {:?}",
+        String::from_utf8_lossy(request),
+        String::from_utf8_lossy(&received),
     );
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn delete_existing_key_returns_deleted() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set delete_existing_key 0 0 3\r\nbar\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let deleted = round_trip(fx.router_addr, b"delete delete_existing_key\r\n").await;
-    assert_eq!(deleted, b"DELETED\r\n");
+macro_rules! docker_test {
+    ($(#[$meta:meta])* async fn $name:ident() $body:block) => {
+        #[tokio::test]
+        #[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
+        $(#[$meta])*
+        async fn $name() $body
+    };
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn delete_missing_key_returns_not_found() {
-    let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"delete delete_missing_key\r\n").await;
-    assert_eq!(resp, b"NOT_FOUND\r\n");
+docker_test! {
+    async fn get_seeded_key_returns_value() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"mg seeded_foo v\r\n", b"VA 3\r\nbar\r\n").await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn set_delete_get_round_trip() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set set_delete_get_key 0 0 5\r\nhello\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let deleted = round_trip(fx.router_addr, b"delete set_delete_get_key\r\n").await;
-    assert_eq!(deleted, b"DELETED\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get set_delete_get_key\r\n").await;
-    assert_eq!(fetched, b"END\r\n");
+docker_test! {
+    async fn get_missing_key_returns_miss() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"mg get_missing_key v\r\n", b"EN\r\n").await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn add_new_key_returns_stored() {
-    let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"add add_new_key 0 0 5\r\nhello\r\n").await;
-    assert_eq!(resp, b"STORED\r\n");
+docker_test! {
+    async fn pipelined_quiet_gets_with_noop_fence_replace_multiget() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"mg seeded_foo v q Ofirst\r\nmg get_multi_key_miss v q Osecond\r\nmn\r\n",
+            b"VA 3 Ofirst\r\nbar\r\nMN\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn add_existing_key_returns_not_stored() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set add_existing_key 0 0 5\r\nfirst\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let resp = round_trip(fx.router_addr, b"add add_existing_key 0 0 6\r\nsecond\r\n").await;
-    assert_eq!(resp, b"NOT_STORED\r\n");
+docker_test! {
+    async fn store_returns_success_with_projections() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms set_returns_stored_key 5 F7 s\r\nhello\r\n",
+            b"HD s5\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn add_then_get_round_trip() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"add add_then_get_key 7 0 5\r\nworld\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get add_then_get_key\r\n").await;
-    assert_eq!(fetched, b"VALUE add_then_get_key 7 5\r\nworld\r\nEND\r\n");
+docker_test! {
+    async fn store_then_get_round_trip() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms set_then_get_key 5 F9\r\nworld\r\n",
+            b"HD\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg set_then_get_key v f s\r\n",
+            b"VA 5 f9 s5\r\nworld\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn replace_missing_key_returns_not_stored() {
-    let fx = fixture().await;
-    let resp = round_trip(
-        fx.router_addr,
-        b"replace replace_missing_key 0 0 5\r\nhello\r\n",
-    )
-    .await;
-    assert_eq!(resp, b"NOT_STORED\r\n");
+docker_test! {
+    async fn store_overwrites_existing_value() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms set_overwrites_key 3\r\nbar\r\n", b"HD\r\n").await;
+        exchange(
+            fx.router_addr,
+            b"ms set_overwrites_key 7\r\nupdated\r\n",
+            b"HD\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg set_overwrites_key v\r\n",
+            b"VA 7\r\nupdated\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn replace_existing_key_returns_stored() {
-    let fx = fixture().await;
-    let stored = round_trip(
-        fx.router_addr,
-        b"set replace_existing_key 0 0 5\r\nfirst\r\n",
-    )
-    .await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let resp = round_trip(
-        fx.router_addr,
-        b"replace replace_existing_key 0 0 6\r\nsecond\r\n",
-    )
-    .await;
-    assert_eq!(resp, b"STORED\r\n");
+docker_test! {
+    async fn delete_existing_key_returns_success() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms delete_existing_key 3\r\nbar\r\n", b"HD\r\n").await;
+        exchange(fx.router_addr, b"md delete_existing_key\r\n", b"HD\r\n").await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn replace_changes_value() {
-    let fx = fixture().await;
-    let stored = round_trip(
-        fx.router_addr,
-        b"set replace_changes_key 0 0 5\r\nfirst\r\n",
-    )
-    .await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let replaced = round_trip(
-        fx.router_addr,
-        b"replace replace_changes_key 0 0 6\r\nsecond\r\n",
-    )
-    .await;
-    assert_eq!(replaced, b"STORED\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get replace_changes_key\r\n").await;
-    assert_eq!(
-        fetched,
-        b"VALUE replace_changes_key 0 6\r\nsecond\r\nEND\r\n"
-    );
+docker_test! {
+    async fn delete_missing_key_returns_not_found() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"md delete_missing_key\r\n", b"NF\r\n").await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn append_to_missing_key_returns_not_stored() {
-    let fx = fixture().await;
-    let resp = round_trip(
-        fx.router_addr,
-        b"append append_missing_key 0 0 3\r\nbar\r\n",
-    )
-    .await;
-    assert_eq!(resp, b"NOT_STORED\r\n");
+docker_test! {
+    async fn store_delete_get_round_trip() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms set_delete_get_key 5\r\nhello\r\n", b"HD\r\n").await;
+        exchange(fx.router_addr, b"md set_delete_get_key\r\n", b"HD\r\n").await;
+        exchange(fx.router_addr, b"mg set_delete_get_key v\r\n", b"EN\r\n").await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn append_extends_existing_value() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set append_extends_key 0 0 5\r\nhello\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let appended = round_trip(
-        fx.router_addr,
-        b"append append_extends_key 0 0 6\r\n world\r\n",
-    )
-    .await;
-    assert_eq!(appended, b"STORED\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get append_extends_key\r\n").await;
-    assert_eq!(
-        fetched,
-        b"VALUE append_extends_key 0 11\r\nhello world\r\nEND\r\n"
-    );
+docker_test! {
+    async fn add_new_key_returns_success() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms add_new_key 5 ME\r\nhello\r\n", b"HD\r\n").await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn append_keeps_original_flags_when_command_specifies_different_flags() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set append_ignores_key 7 0 5\r\nhello\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let appended = round_trip(
-        fx.router_addr,
-        b"append append_ignores_key 999 999 6\r\n world\r\n",
-    )
-    .await;
-    assert_eq!(appended, b"STORED\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get append_ignores_key\r\n").await;
-    assert_eq!(
-        fetched,
-        b"VALUE append_ignores_key 7 11\r\nhello world\r\nEND\r\n"
-    );
+docker_test! {
+    async fn add_existing_key_returns_not_stored() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms add_existing_key 5\r\nfirst\r\n", b"HD\r\n").await;
+        exchange(
+            fx.router_addr,
+            b"ms add_existing_key 6 ME\r\nsecond\r\n",
+            b"NS\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn prepend_to_missing_key_returns_not_stored() {
-    let fx = fixture().await;
-    let resp = round_trip(
-        fx.router_addr,
-        b"prepend prepend_missing_key 0 0 3\r\nbar\r\n",
-    )
-    .await;
-    assert_eq!(resp, b"NOT_STORED\r\n");
+docker_test! {
+    async fn add_then_get_round_trip() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms add_then_get_key 5 ME F7\r\nworld\r\n",
+            b"HD\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg add_then_get_key v f\r\n",
+            b"VA 5 f7\r\nworld\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn prepend_extends_existing_value() {
-    let fx = fixture().await;
-    let stored = round_trip(
-        fx.router_addr,
-        b"set prepend_extends_key 0 0 5\r\nworld\r\n",
-    )
-    .await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let prepended = round_trip(
-        fx.router_addr,
-        b"prepend prepend_extends_key 0 0 6\r\nhello \r\n",
-    )
-    .await;
-    assert_eq!(prepended, b"STORED\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get prepend_extends_key\r\n").await;
-    assert_eq!(
-        fetched,
-        b"VALUE prepend_extends_key 0 11\r\nhello world\r\nEND\r\n"
-    );
+docker_test! {
+    async fn replace_missing_key_returns_not_stored() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms replace_missing_key 5 MR\r\nhello\r\n",
+            b"NS\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn prepend_keeps_original_flags_when_command_specifies_different_flags() {
-    let fx = fixture().await;
-    let stored = round_trip(
-        fx.router_addr,
-        b"set prepend_ignores_key 7 0 5\r\nworld\r\n",
-    )
-    .await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let prepended = round_trip(
-        fx.router_addr,
-        b"prepend prepend_ignores_key 999 999 6\r\nhello \r\n",
-    )
-    .await;
-    assert_eq!(prepended, b"STORED\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get prepend_ignores_key\r\n").await;
-    assert_eq!(
-        fetched,
-        b"VALUE prepend_ignores_key 7 11\r\nhello world\r\nEND\r\n"
-    );
+docker_test! {
+    async fn replace_existing_key_returns_success() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms replace_existing_key 5\r\nfirst\r\n",
+            b"HD\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"ms replace_existing_key 6 MR\r\nsecond\r\n",
+            b"HD\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn incr_missing_key_returns_not_found() {
-    let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"incr incr_missing_key 1\r\n").await;
-    assert_eq!(resp, b"NOT_FOUND\r\n");
+docker_test! {
+    async fn replace_changes_value() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms replace_changes_key 5\r\nfirst\r\n", b"HD\r\n").await;
+        exchange(
+            fx.router_addr,
+            b"ms replace_changes_key 6 MR\r\nsecond\r\n",
+            b"HD\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg replace_changes_key v\r\n",
+            b"VA 6\r\nsecond\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn incr_existing_numeric_returns_new_value() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set incr_existing_key 0 0 2\r\n42\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let resp = round_trip(fx.router_addr, b"incr incr_existing_key 1\r\n").await;
-    assert_eq!(resp, b"43\r\n");
+docker_test! {
+    async fn append_to_missing_key_returns_not_stored() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms append_missing_key 3 MA\r\nbar\r\n",
+            b"NS\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn incr_by_delta_increments_value() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set incr_by_delta_key 0 0 1\r\n5\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let resp = round_trip(fx.router_addr, b"incr incr_by_delta_key 100\r\n").await;
-    assert_eq!(resp, b"105\r\n");
-
-    let fetched = round_trip(fx.router_addr, b"get incr_by_delta_key\r\n").await;
-    assert_eq!(fetched, b"VALUE incr_by_delta_key 0 3\r\n105\r\nEND\r\n");
+docker_test! {
+    async fn append_extends_existing_value() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms append_extends_key 5\r\nhello\r\n", b"HD\r\n").await;
+        exchange(
+            fx.router_addr,
+            b"ms append_extends_key 6 MA\r\n world\r\n",
+            b"HD\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg append_extends_key v s\r\n",
+            b"VA 11 s11\r\nhello world\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn decr_missing_key_returns_not_found() {
-    let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"decr decr_missing_key 1\r\n").await;
-    assert_eq!(resp, b"NOT_FOUND\r\n");
+docker_test! {
+    async fn append_keeps_original_client_flags() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms append_ignores_key 5 F7\r\nhello\r\n", b"HD\r\n").await;
+        exchange(
+            fx.router_addr,
+            b"ms append_ignores_key 6 MA F999\r\n world\r\n",
+            b"HD\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg append_ignores_key v f\r\n",
+            b"VA 11 f7\r\nhello world\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn decr_existing_numeric_returns_new_value() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set decr_existing_key 0 0 2\r\n42\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let resp = round_trip(fx.router_addr, b"decr decr_existing_key 5\r\n").await;
-    assert_eq!(resp, b"37\r\n");
+docker_test! {
+    async fn prepend_to_missing_key_returns_not_stored() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms prepend_missing_key 3 MP\r\nbar\r\n",
+            b"NS\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn decr_clamps_at_zero_on_underflow() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set decr_underflow_key 0 0 1\r\n5\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let resp = round_trip(fx.router_addr, b"decr decr_underflow_key 100\r\n").await;
-    assert_eq!(resp, b"0\r\n");
+docker_test! {
+    async fn prepend_extends_existing_value() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms prepend_extends_key 5\r\nworld\r\n", b"HD\r\n").await;
+        exchange(
+            fx.router_addr,
+            b"ms prepend_extends_key 6 MP\r\nhello \r\n",
+            b"HD\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg prepend_extends_key v\r\n",
+            b"VA 11\r\nhello world\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn touch_missing_key_returns_not_found() {
-    let fx = fixture().await;
-    let resp = round_trip(fx.router_addr, b"touch touch_missing_key 60\r\n").await;
-    assert_eq!(resp, b"NOT_FOUND\r\n");
+docker_test! {
+    async fn append_miss_with_vivify_seeds_item() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms append_vivify_key 3 MA N60\r\nnew\r\n",
+            b"HD\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg append_vivify_key v\r\n",
+            b"VA 3\r\nnew\r\n",
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn touch_existing_key_returns_touched() {
-    let fx = fixture().await;
-    let stored = round_trip(fx.router_addr, b"set touch_existing_key 0 0 5\r\nhello\r\n").await;
-    assert_eq!(stored, b"STORED\r\n");
-
-    let resp = round_trip(fx.router_addr, b"touch touch_existing_key 60\r\n").await;
-    assert_eq!(resp, b"TOUCHED\r\n");
+docker_test! {
+    async fn arithmetic_missing_key_returns_not_found() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ma incr_missing_key\r\n", b"NF\r\n").await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "requires Docker; run with `cargo test --test integration -- --ignored`"]
-async fn touch_preserves_value_and_flags() {
-    let fx = fixture().await;
-    let stored = round_trip(
-        fx.router_addr,
-        b"set touch_preserves_key 42 0 5\r\nhello\r\n",
-    )
-    .await;
-    assert_eq!(stored, b"STORED\r\n");
+docker_test! {
+    async fn arithmetic_incr_returns_new_value() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms incr_existing_key 2\r\n42\r\n", b"HD\r\n").await;
+        exchange(fx.router_addr, b"ma incr_existing_key v\r\n", b"VA 2\r\n43\r\n").await;
+    }
+}
 
-    let touched = round_trip(fx.router_addr, b"touch touch_preserves_key 3600\r\n").await;
-    assert_eq!(touched, b"TOUCHED\r\n");
+docker_test! {
+    async fn arithmetic_incr_by_delta() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms incr_by_delta_key 1\r\n5\r\n", b"HD\r\n").await;
+        exchange(
+            fx.router_addr,
+            b"ma incr_by_delta_key v D100\r\n",
+            b"VA 3\r\n105\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg incr_by_delta_key v\r\n",
+            b"VA 3\r\n105\r\n",
+        )
+        .await;
+    }
+}
 
-    let fetched = round_trip(fx.router_addr, b"get touch_preserves_key\r\n").await;
-    assert_eq!(
-        fetched,
-        b"VALUE touch_preserves_key 42 5\r\nhello\r\nEND\r\n"
-    );
+docker_test! {
+    async fn arithmetic_decr_returns_new_value() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms decr_existing_key 2\r\n42\r\n", b"HD\r\n").await;
+        exchange(
+            fx.router_addr,
+            b"ma decr_existing_key v MD D5\r\n",
+            b"VA 2\r\n37\r\n",
+        )
+        .await;
+    }
+}
+
+docker_test! {
+    async fn arithmetic_decr_clamps_at_zero() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms decr_underflow_key 1\r\n5\r\n", b"HD\r\n").await;
+        exchange(
+            fx.router_addr,
+            b"ma decr_underflow_key v MD D100\r\n",
+            b"VA 1\r\n0\r\n",
+        )
+        .await;
+    }
+}
+
+docker_test! {
+    async fn arithmetic_vivify_seeds_initial_value() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ma vivify_counter_key N60 J5 v\r\n",
+            b"VA 1\r\n5\r\n",
+        )
+        .await;
+    }
+}
+
+docker_test! {
+    async fn touch_missing_key_returns_miss() {
+        let fx = fixture().await;
+        // "touch" in meta is mg with a TTL update and no value.
+        exchange(fx.router_addr, b"mg touch_missing_key T60\r\n", b"EN\r\n").await;
+    }
+}
+
+docker_test! {
+    async fn touch_existing_key_returns_header() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"ms touch_existing_key 5\r\nhello\r\n", b"HD\r\n").await;
+        exchange(fx.router_addr, b"mg touch_existing_key T60\r\n", b"HD\r\n").await;
+    }
+}
+
+docker_test! {
+    async fn touch_updates_ttl_and_preserves_value_and_flags() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms touch_preserves_key 5 F42 T500\r\nhello\r\n",
+            b"HD\r\n",
+        )
+        .await;
+        // update-then-read: t must observe the new TTL (temporal ordering).
+        exchange(
+            fx.router_addr,
+            b"mg touch_preserves_key T3600 t\r\n",
+            b"HD t3600\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg touch_preserves_key v f\r\n",
+            b"VA 5 f42\r\nhello\r\n",
+        )
+        .await;
+    }
+}
+
+docker_test! {
+    async fn recoverable_parse_error_keeps_pipeline_order_and_connection() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"mg seeded_foo v\r\nmg seeded_foo zz\r\nmg seeded_foo v\r\n",
+            b"VA 3\r\nbar\r\nCLIENT_ERROR invalid flag\r\nVA 3\r\nbar\r\n",
+        )
+        .await;
+    }
+}
+
+docker_test! {
+    async fn opaque_and_key_echo_survive_the_hop() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms echo_key 2 s k Otag\r\nhi\r\n",
+            b"HD s2 kecho_key Otag\r\n",
+        )
+        .await;
+        exchange(
+            fx.router_addr,
+            b"mg echo_key v k Oget\r\n",
+            b"VA 2 kecho_key Oget\r\nhi\r\n",
+        )
+        .await;
+    }
+}
+
+docker_test! {
+    async fn quiet_store_suppresses_success_but_not_failure() {
+        let fx = fixture().await;
+        exchange(
+            fx.router_addr,
+            b"ms quiet_store_key 2 q\r\nhi\r\nms quiet_store_key 2 q ME\r\nhi\r\nmn\r\n",
+            b"NS\r\nMN\r\n",
+        )
+        .await;
+    }
+}
+
+docker_test! {
+    async fn debug_command_round_trips() {
+        let fx = fixture().await;
+        exchange(fx.router_addr, b"me debug_missing_key\r\n", b"EN\r\n").await;
+    }
 }

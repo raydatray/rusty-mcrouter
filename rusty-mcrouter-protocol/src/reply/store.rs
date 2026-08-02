@@ -6,7 +6,7 @@ pub enum StoreReply {
     NotFound(StoreResult),  // NF
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StoreResult {
     pub cas: Option<u64>,  // c
     pub size: Option<u64>, // s

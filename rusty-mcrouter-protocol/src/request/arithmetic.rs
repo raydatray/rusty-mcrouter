@@ -1,4 +1,4 @@
-use crate::{errors::ParseError, key::Key};
+use crate::{bounded_list::BoundedList, key::Key};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArithmeticRequest {
@@ -25,79 +25,13 @@ pub enum ArithmeticMode {
     Decrement, // M<D> or M<->
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ArithmeticTemporalInstructions {
-    instructions: [Option<ArithmeticTemporalInstruction>; 3],
-}
+/// `ma` has three distinct order-sensitive flags, so its temporal program
+/// never exceeds three instructions.
+pub type ArithmeticTemporalInstructions = BoundedList<ArithmeticTemporalInstruction, 3>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArithmeticTemporalInstruction {
     Vivify(i32),    // N<n>
     UpdateTtl(i32), // T<n>
     ReturnTtl,      // t
-}
-
-impl ArithmeticTemporalInstructions {
-    pub(crate) fn push(
-        &mut self,
-        instruction: ArithmeticTemporalInstruction,
-    ) -> Result<(), ParseError> {
-        let slot = self
-            .instructions
-            .iter_mut()
-            .find(|slot| slot.is_none())
-            .ok_or(ParseError::TooManyFlags)?;
-
-        *slot = Some(instruction);
-        Ok(())
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &ArithmeticTemporalInstruction> {
-        self.instructions.iter().flatten()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn temporal_instructions_preserve_insertion_order() {
-        let mut instructions = ArithmeticTemporalInstructions::default();
-        instructions
-            .push(ArithmeticTemporalInstruction::Vivify(30))
-            .unwrap();
-        instructions
-            .push(ArithmeticTemporalInstruction::UpdateTtl(60))
-            .unwrap();
-        instructions
-            .push(ArithmeticTemporalInstruction::ReturnTtl)
-            .unwrap();
-
-        assert_eq!(
-            instructions.iter().cloned().collect::<Vec<_>>(),
-            vec![
-                ArithmeticTemporalInstruction::Vivify(30),
-                ArithmeticTemporalInstruction::UpdateTtl(60),
-                ArithmeticTemporalInstruction::ReturnTtl,
-            ]
-        );
-    }
-
-    #[test]
-    fn temporal_instructions_reject_more_than_three_entries() {
-        let mut instructions = ArithmeticTemporalInstructions::default();
-        for instruction in [
-            ArithmeticTemporalInstruction::Vivify(30),
-            ArithmeticTemporalInstruction::UpdateTtl(60),
-            ArithmeticTemporalInstruction::ReturnTtl,
-        ] {
-            instructions.push(instruction).unwrap();
-        }
-
-        assert_eq!(
-            instructions.push(ArithmeticTemporalInstruction::ReturnTtl),
-            Err(ParseError::TooManyFlags)
-        );
-    }
 }

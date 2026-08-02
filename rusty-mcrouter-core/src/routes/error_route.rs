@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use super::{Result, Route};
@@ -18,8 +19,8 @@ impl ErrorRoute {
 impl Route for ErrorRoute {
     async fn route(&self, _req: Request) -> Result<Reply> {
         Ok(match &self.message {
-            Some(m) => Reply::ServerError(m.clone()),
-            None => Reply::Error,
+            Some(m) => Reply::Error(ErrorReply::Server(Some(m.clone()))),
+            None => Reply::Error(ErrorReply::Error),
         })
     }
 }
@@ -27,49 +28,30 @@ impl Route for ErrorRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{req_get, req_store};
 
     #[tokio::test]
     async fn with_message_returns_server_error_with_message() {
         let r = ErrorRoute::new(Some("boom".to_string()));
-        let reply = r
-            .route(Request::Get {
-                key: Bytes::from_static(b"k"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"boom")));
+        let reply = r.route(req_get(b"k")).await.unwrap();
+        assert_eq!(
+            reply,
+            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"boom"))))
+        );
     }
 
     #[tokio::test]
     async fn without_message_returns_bare_error() {
         let r = ErrorRoute::new(None);
-        let reply = r
-            .route(Request::Get {
-                key: Bytes::from_static(b"k"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply, Reply::Error);
+        let reply = r.route(req_get(b"k")).await.unwrap();
+        assert_eq!(reply, Reply::Error(ErrorReply::Error));
     }
 
     #[tokio::test]
     async fn ignores_request_payload() {
         let r = ErrorRoute::new(Some("nope".to_string()));
-        let reply_get = r
-            .route(Request::Get {
-                key: Bytes::from_static(b"k"),
-            })
-            .await
-            .unwrap();
-        let reply_set = r
-            .route(Request::Set {
-                key: Bytes::from_static(b"k"),
-                flags: 0,
-                exptime: 0,
-                data: Bytes::from_static(b"v"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(reply_get, reply_set);
+        let reply_get = r.route(req_get(b"k")).await.unwrap();
+        let reply_store = r.route(req_store(b"k", b"v")).await.unwrap();
+        assert_eq!(reply_get, reply_store);
     }
 }

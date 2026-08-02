@@ -75,21 +75,31 @@ impl Client {
 mod tests {
     use super::*;
     use crate::testing::{scripted_backend, Step};
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
+    use rusty_mcrouter_protocol::meta::{DecodedMetaCommand, MetaRequestDecoder};
+    use rusty_mcrouter_protocol::reply::GetReply;
     use rusty_mcrouter_protocol::Reply;
 
+    fn parse_request(input: &[u8]) -> Request {
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(input);
+        let DecodedMetaCommand::Request { request, .. } =
+            decoder.decode(&mut src).unwrap().unwrap()
+        else {
+            panic!("expected request");
+        };
+        request
+    }
+
     fn get(key: &'static [u8]) -> Request {
-        Request::Get {
-            key: Bytes::from_static(key),
-        }
+        parse_request(&[b"mg ", key, b" v\r\n"].concat())
     }
 
     fn hit_data(reply: Reply) -> Bytes {
-        let Reply::Get { mut hits } = reply else {
-            panic!("expected Reply::Get, got {reply:?}");
+        let Reply::Get(GetReply::Hit(hit)) = reply else {
+            panic!("expected get hit, got {reply:?}");
         };
-        assert_eq!(hits.len(), 1);
-        hits.remove(0).data
+        hit.value.expect("hit with value")
     }
 
     fn reply_only_cfg(reply_timeout: Option<Duration>) -> ClientConfig {
@@ -105,21 +115,21 @@ mod tests {
     #[tokio::test]
     async fn pipelines_requests() {
         let addr =
-            scripted_backend(vec![Step::ReadRequests(2), Step::Write(b"END\r\nEND\r\n")]).await;
+            scripted_backend(vec![Step::ReadRequests(2), Step::Write(b"EN\r\nEN\r\n")]).await;
         let client = Client::connect(addr).await.unwrap();
 
         let (a, b) = tokio::join!(client.send(get(b"a")), client.send(get(b"b")));
-        assert_eq!(a.unwrap(), Reply::Get { hits: vec![] });
-        assert_eq!(b.unwrap(), Reply::Get { hits: vec![] });
+        assert_eq!(a.unwrap(), Reply::Get(GetReply::Miss));
+        assert_eq!(b.unwrap(), Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
     async fn matches_replies_fifo() {
         let addr = scripted_backend(vec![
             Step::ReadRequests(3),
-            Step::Write(b"VALUE k 0 1\r\n1\r\nEND\r\n"),
-            Step::Write(b"VALUE k 0 1\r\n2\r\nEND\r\n"),
-            Step::Write(b"VALUE k 0 1\r\n3\r\nEND\r\n"),
+            Step::Write(b"VA 1\r\n1\r\n"),
+            Step::Write(b"VA 1\r\n2\r\n"),
+            Step::Write(b"VA 1\r\n3\r\n"),
         ])
         .await;
         let client = Client::connect(addr).await.unwrap();
@@ -145,7 +155,7 @@ mod tests {
     async fn reassembles_reply_across_partial_reads() {
         let addr = scripted_backend(vec![
             Step::ReadRequests(1),
-            Step::WriteChunked(b"VALUE foo 0 3\r\nbar\r\nEND\r\n"),
+            Step::WriteChunked(b"VA 3\r\nbar\r\n"),
         ])
         .await;
         let client = Client::connect(addr).await.unwrap();
@@ -160,7 +170,40 @@ mod tests {
     async fn tears_down_on_malformed_reply() {
         let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Write(b"WAT\r\n")]).await;
         let client = Client::connect(addr).await.unwrap();
-        assert!(client.send(get(b"a")).await.is_err());
+        assert!(matches!(
+            client.send(get(b"a")).await,
+            Err(NetError::Decode(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn shape_mismatch_reply_is_a_decode_error() {
+        // `mg key v` expects EN or VA; a bare HD violates the expectation.
+        let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Write(b"HD\r\n")]).await;
+        let client = Client::connect(addr).await.unwrap();
+        assert!(matches!(
+            client.send(get(b"a")).await,
+            Err(NetError::Decode(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn encode_failure_fails_only_that_request() {
+        // The routing prefix is stripped for the backend, leaving an empty
+        // key: an encode error that must not poison the connection.
+        let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]).await;
+        let client = Client::connect(addr).await.unwrap();
+
+        let bad = parse_request(b"mg /region/cluster/ v\r\n");
+        assert!(matches!(
+            client.send(bad).await,
+            Err(NetError::Encode(_))
+        ));
+
+        assert_eq!(
+            client.send(get(b"ok")).await.unwrap(),
+            Reply::Get(GetReply::Miss)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -217,30 +260,47 @@ mod tests {
         };
         let client = Client::connect_with_config(addr, cfg).await.unwrap();
 
-        let payload_larger_than_socket_buffers = vec![b'x'; 16 * 1024 * 1024];
-        let big = Request::Set {
-            key: Bytes::from_static(b"k"),
-            flags: 0,
-            exptime: 0,
-            data: Bytes::from(payload_larger_than_socket_buffers),
-        };
-        let result = client.send(big).await;
-        assert!(matches!(
-            result,
-            Err(NetError::Timeout {
-                phase: TimeoutPhase::Write
-            })
-        ));
+        // The Meta value ceiling is 1 MiB, and a single 1 MiB frame can fit
+        // in loopback socket buffers. Eight pipelined stores enqueue before
+        // the connection task drains its channel (each send readies
+        // immediately against channel capacity), so they coalesce into one
+        // 8 MiB batch whose write must stall against a non-reading peer.
+        let mut big = b"ms k 1048576\r\n".to_vec();
+        big.extend_from_slice(&vec![b'x'; 1024 * 1024]);
+        big.extend_from_slice(b"\r\n");
+        let store = parse_request(&big);
+
+        let results = tokio::join!(
+            client.send(store.clone()),
+            client.send(store.clone()),
+            client.send(store.clone()),
+            client.send(store.clone()),
+            client.send(store.clone()),
+            client.send(store.clone()),
+            client.send(store.clone()),
+            client.send(store),
+        );
+        let results = [
+            results.0, results.1, results.2, results.3, results.4, results.5, results.6, results.7,
+        ];
+        for result in results {
+            assert!(matches!(
+                result,
+                Err(NetError::Timeout {
+                    phase: TimeoutPhase::Write
+                })
+            ));
+        }
     }
 
     #[tokio::test(start_paused = true)]
     async fn late_reply_to_timed_out_request_discarded_keeping_fifo_aligned() {
         let addr = scripted_backend(vec![
             Step::ReadRequests(1),
-            Step::Write(b"VALUE k 0 1\r\nA\r\nEND\r\n"),
+            Step::Write(b"VA 1\r\nA\r\n"),
             Step::ReadRequests(3),
-            Step::Write(b"VALUE k 0 1\r\nB\r\nEND\r\n"),
-            Step::Write(b"VALUE k 0 1\r\nC\r\nEND\r\n"),
+            Step::Write(b"VA 1\r\nB\r\n"),
+            Step::Write(b"VA 1\r\nC\r\n"),
         ])
         .await;
         // Under paused time a pending deadline always beats real loopback I/O, so a
