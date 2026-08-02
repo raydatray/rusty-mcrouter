@@ -22,45 +22,41 @@ impl<B: Backend> Route for DestinationRoute<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::req_get;
+    use crate::test_support::{req_get, req_store};
     use bytes::Bytes;
     use rusty_mcrouter_net::testing::MockBackend;
     use rusty_mcrouter_net::{NetError, TimeoutPhase};
-    use rusty_mcrouter_protocol::{ProtocolError, Value};
+    use rusty_mcrouter_protocol::reply::{
+        ErrorReply, GetHit, GetReply, StoreReply, StoreResult,
+    };
     use std::sync::Arc;
 
     #[tokio::test]
     async fn forwards_request_to_backend_and_returns_reply() {
-        let backend = MockBackend::replying(Reply::Get {
-            hits: vec![Value {
-                key: Bytes::from_static(b"foo"),
-                flags: 0,
-                data: Bytes::from_static(b"bar"),
-            }],
-        });
+        let backend = MockBackend::replying(Reply::Get(GetReply::Hit(GetHit {
+            value: Some(Bytes::from_static(b"bar")),
+            ..GetHit::default()
+        })));
         let route = DestinationRoute::<MockBackend>::new(backend.clone());
 
         let reply = route.route(req_get(b"foo")).await.unwrap();
-        let Reply::Get { hits } = reply else {
-            panic!("expected Reply::Get");
+        let Reply::Get(GetReply::Hit(hit)) = reply else {
+            panic!("expected a get hit");
         };
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].key.as_ref(), b"foo");
-        assert_eq!(hits[0].data.as_ref(), b"bar");
+        assert_eq!(hit.value.as_deref(), Some(b"bar".as_slice()));
         assert_eq!(backend.received(), vec![req_get(b"foo")]);
     }
 
     #[tokio::test]
-    async fn returns_empty_reply_on_miss() {
+    async fn returns_miss_reply_on_miss() {
         let route = DestinationRoute::<MockBackend>::new(MockBackend::miss());
         let reply = route.route(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get { hits: vec![] });
+        assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
     async fn propagates_backend_protocol_error() {
-        let backend =
-            MockBackend::failing(NetError::Protocol(ProtocolError::Malformed("bad reply")));
+        let backend = MockBackend::failing(NetError::Desync("bad reply"));
         let route = DestinationRoute::<MockBackend>::new(backend);
 
         let result = route.route(req_get(b"foo")).await;
@@ -84,28 +80,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwards_set_request_and_returns_stored() {
-        let backend = MockBackend::replying(Reply::Stored);
+    async fn forwards_store_request_and_returns_success() {
+        let stored = Reply::Store(StoreReply::Success(StoreResult::default()));
+        let backend = MockBackend::replying(stored.clone());
         let route = DestinationRoute::<MockBackend>::new(backend.clone());
 
-        let req = Request::Set {
-            key: Bytes::from_static(b"foo"),
-            flags: 0,
-            exptime: 0,
-            data: Bytes::from_static(b"bar"),
-        };
+        let req = req_store(b"foo", b"bar");
         let reply = route.route(req.clone()).await.unwrap();
-        assert_eq!(reply, Reply::Stored);
+        assert_eq!(reply, stored);
         assert_eq!(backend.received(), vec![req]);
     }
 
     #[tokio::test]
     async fn propagates_backend_server_error_as_reply() {
-        let route = DestinationRoute::<MockBackend>::new(MockBackend::replying(
-            Reply::ServerError(Bytes::from_static(b"oom")),
-        ));
+        let server_error = Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"oom"))));
+        let route =
+            DestinationRoute::<MockBackend>::new(MockBackend::replying(server_error.clone()));
         let reply = route.route(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"oom")));
+        assert_eq!(reply, server_error);
     }
 
     #[tokio::test]
@@ -117,7 +109,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.unwrap(), Reply::Get { hits: vec![] });
+        assert_eq!(result.unwrap(), Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
@@ -135,8 +127,8 @@ mod tests {
         };
 
         let (a, b) = tokio::join!(r1, r2);
-        assert_eq!(a.unwrap().unwrap(), Reply::Get { hits: vec![] });
-        assert_eq!(b.unwrap().unwrap(), Reply::Get { hits: vec![] });
+        assert_eq!(a.unwrap().unwrap(), Reply::Get(GetReply::Miss));
+        assert_eq!(b.unwrap().unwrap(), Reply::Get(GetReply::Miss));
         assert_eq!(backend.received().len(), 2);
     }
 }

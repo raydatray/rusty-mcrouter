@@ -1,5 +1,6 @@
 use rusty_mcrouter_config::FailoverErrorKind;
 use rusty_mcrouter_net::NetError;
+use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::routes::{Result, RouteError};
@@ -9,12 +10,14 @@ fn classify(result: &Result<Reply>) -> Option<FailoverErrorKind> {
         Err(RouteError::Backend(net)) => match net {
             NetError::Timeout { .. } => Some(FailoverErrorKind::Timeout),
             NetError::Io(_) => Some(FailoverErrorKind::Io),
-            NetError::Protocol(_) => Some(FailoverErrorKind::Protocol),
+            NetError::Encode(_) | NetError::Decode(_) | NetError::Desync(_) => {
+                Some(FailoverErrorKind::Protocol)
+            }
             NetError::ClientClosed => Some(FailoverErrorKind::ClientClosed),
             NetError::NoAddresses | NetError::WorkerClosed { .. } => None,
         },
         Err(RouteError::SelectorOutOfRange { .. }) => None,
-        Ok(Reply::ServerError(_)) => Some(FailoverErrorKind::ServerError),
+        Ok(Reply::Error(ErrorReply::Server(_))) => Some(FailoverErrorKind::ServerError),
         Ok(_) => None,
     }
 }
@@ -45,14 +48,12 @@ impl FailoverErrors {
 
     pub(crate) fn should_failover(&self, req: &Request, result: &Result<Reply>) -> bool {
         let custom = match req {
-            Request::Get { .. } => self.gets.as_deref(),
-            Request::Set { .. }
-            | Request::Add { .. }
-            | Request::Replace { .. }
-            | Request::Append { .. }
-            | Request::Prepend { .. } => self.updates.as_deref(),
-            Request::Delete { .. } => self.deletes.as_deref(),
-            Request::Incr { .. } | Request::Decr { .. } | Request::Touch { .. } => None,
+            Request::Get(_) => self.gets.as_deref(),
+            Request::Store(_) => self.updates.as_deref(),
+            Request::Delete(_) => self.deletes.as_deref(),
+            // Arithmetic is not idempotent and debug is diagnostic; neither
+            // takes a per-op override, so both use the built-in classifier.
+            Request::Arithmetic(_) | Request::Debug(_) => None,
         };
         match custom {
             None => is_failover_error(result),
@@ -64,29 +65,24 @@ impl FailoverErrors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{req_delete, req_get, req_store};
     use bytes::Bytes;
     use rusty_mcrouter_net::TimeoutPhase;
-    use rusty_mcrouter_protocol::ProtocolError;
+    use rusty_mcrouter_protocol::meta::MetaReplyDecodeError;
+    use rusty_mcrouter_protocol::reply::{
+        ArithmeticReply, ArithmeticResult, DeleteReply, GetReply, StoreReply, StoreResult,
+    };
 
     fn get() -> Request {
-        Request::Get {
-            key: Bytes::from_static(b"k"),
-        }
+        req_get(b"k")
     }
 
     fn set() -> Request {
-        Request::Set {
-            key: Bytes::from_static(b"k"),
-            flags: 0,
-            exptime: 0,
-            data: Bytes::from_static(b"v"),
-        }
+        req_store(b"k", b"v")
     }
 
     fn delete() -> Request {
-        Request::Delete {
-            key: Bytes::from_static(b"k"),
-        }
+        req_delete(b"k")
     }
 
     fn backend(err: NetError) -> Result<Reply> {
@@ -100,11 +96,13 @@ mod tests {
     }
 
     fn server_error() -> Result<Reply> {
-        Ok(Reply::ServerError(Bytes::from_static(b"boom")))
+        Ok(Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
+            b"boom",
+        )))))
     }
 
     fn miss() -> Result<Reply> {
-        Ok(Reply::Get { hits: vec![] })
+        Ok(Reply::Get(GetReply::Miss))
     }
 
     #[test]
@@ -119,7 +117,8 @@ mod tests {
             backend(NetError::Io(std::io::Error::from(
                 std::io::ErrorKind::BrokenPipe,
             ))),
-            backend(NetError::Protocol(ProtocolError::Malformed("bad"))),
+            backend(NetError::Decode(MetaReplyDecodeError::UnexpectedEof)),
+            backend(NetError::Desync("bad")),
             backend(NetError::ClientClosed),
             server_error(),
         ];
@@ -132,11 +131,18 @@ mod tests {
     fn valid_replies_and_internal_conditions_are_not_failover_errors() {
         let cases = [
             miss(),
-            Ok(Reply::NotFound),
-            Ok(Reply::Stored),
-            Ok(Reply::Numeric(1)),
-            Ok(Reply::Error),
-            Ok(Reply::ClientError(Bytes::from_static(b"bad"))),
+            Ok(Reply::Delete(DeleteReply::NotFound)),
+            Ok(Reply::Store(StoreReply::Success(StoreResult::default()))),
+            Ok(Reply::Arithmetic(ArithmeticReply::Success(
+                ArithmeticResult {
+                    value: Some(1),
+                    ..ArithmeticResult::default()
+                },
+            ))),
+            Ok(Reply::Error(ErrorReply::Error)),
+            Ok(Reply::Error(ErrorReply::Client(Some(Bytes::from_static(
+                b"bad",
+            ))))),
             Err(RouteError::SelectorOutOfRange { idx: 3, len: 2 }),
             backend(NetError::NoAddresses),
             backend(NetError::WorkerClosed { worker: 0 }),
