@@ -4,20 +4,21 @@ use thiserror::Error;
 
 use crate::reply::{
     ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, DeleteReply, ErrorReply,
-    GetHit, GetReply, RecacheState, Reply, StoreReply, StoreResult,
+    GetHit, GetReply, Reply, StoreReply, StoreResult,
 };
 
+use super::command;
 use super::line_scanner::{scan_line, LineScan};
-use super::numbers::{parse_i64, parse_u32, parse_u64, parse_usize};
-use super::tokens::{flags, require_no_argument, split_tokens, FlagBudget};
-use super::{GetSuccessShape, MetaReplyExpectation};
+use super::numbers::{parse_i64, parse_u64, parse_usize};
+use super::tokens::{flags, split_tokens, FlagBudget};
+use super::MetaReplyExpectation;
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_REPLY_VALUE_BYTES: usize = 1024 * 1024;
 pub const MAX_DEBUG_FIELDS: usize = 64;
 
-const INVALID_RESPONSE: &str = "invalid Meta backend response";
-const SHAPE_MISMATCH: &str = "Meta backend response does not match request";
+pub const INVALID_RESPONSE: &str = "invalid Meta backend response";
+pub const SHAPE_MISMATCH: &str = "Meta backend response does not match request";
 
 #[derive(Debug)]
 pub struct MetaReplyDecoder {
@@ -42,7 +43,7 @@ impl Default for ReplyDecodeState {
 }
 
 #[derive(Debug)]
-enum PendingValue {
+pub enum PendingValue {
     Get(GetHit),
     Arithmetic(ArithmeticResult),
 }
@@ -135,7 +136,7 @@ impl MetaReplyDecoder {
     }
 }
 
-enum ParsedLine {
+pub enum ParsedLine {
     Reply(Reply),
     Value {
         length: usize,
@@ -155,7 +156,7 @@ fn parse_line(
     }
 
     match expectation {
-        MetaReplyExpectation::Get(shape) => parse_get_line(*shape, line),
+        MetaReplyExpectation::Get(shape) => command::get::parse_reply(*shape, line),
         MetaReplyExpectation::Store { cas, size } => parse_store_line(*cas, *size, line),
         MetaReplyExpectation::Delete => parse_delete_line(line),
         MetaReplyExpectation::Arithmetic { value, cas, ttl } => {
@@ -316,45 +317,6 @@ fn parse_delete_line(line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
     Ok(ParsedLine::Reply(Reply::Delete(reply)))
 }
 
-fn parse_get_line(shape: GetSuccessShape, line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
-    let mut tokens = split_tokens(line);
-    match tokens.next() {
-        Some(b"EN") => {
-            if tokens.next().is_some() {
-                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-            }
-            Ok(ParsedLine::Reply(Reply::Get(GetReply::Miss)))
-        }
-        Some(b"HD") => {
-            if shape == GetSuccessShape::Value {
-                return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
-            }
-            let hit = parse_get_attributes(tokens)?;
-            Ok(ParsedLine::Reply(Reply::Get(GetReply::Hit(hit))))
-        }
-        Some(b"VA") => {
-            if shape == GetSuccessShape::Header {
-                return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
-            }
-            let length = tokens
-                .next()
-                .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-                .and_then(|raw| parse_usize(raw).map_err(invalid_response))?;
-            if length > MAX_REPLY_VALUE_BYTES {
-                return Err(MetaReplyDecodeError::ValueTooLarge {
-                    maximum: MAX_REPLY_VALUE_BYTES,
-                });
-            }
-            let hit = parse_get_attributes(tokens)?;
-            Ok(ParsedLine::Value {
-                length,
-                pending: PendingValue::Get(hit),
-            })
-        }
-        _ => Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
-    }
-}
-
 fn parse_store_line(
     expect_cas: bool,
     expect_size: bool,
@@ -428,53 +390,9 @@ fn parse_error_reply(line: &[u8]) -> Result<Option<ErrorReply>, MetaReplyDecodeE
     Ok(None)
 }
 
-fn parse_get_attributes<'a>(
-    tokens: impl Iterator<Item = &'a [u8]>,
-) -> Result<GetHit, MetaReplyDecodeError> {
-    let mut hit = GetHit::default();
-
-    for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(invalid_response)?;
-        match flag {
-            b'c' => hit.cas = Some(parse_u64(argument).map_err(invalid_response)?),
-            b'f' => hit.client_flags = Some(parse_u32(argument).map_err(invalid_response)?),
-            b's' => hit.size = Some(parse_u64(argument).map_err(invalid_response)?),
-            b't' => hit.ttl = Some(parse_i64(argument).map_err(invalid_response)?),
-            b'h' => {
-                hit.hit_before = Some(match argument {
-                    b"0" => false,
-                    b"1" => true,
-                    _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
-                });
-            }
-            b'l' => hit.last_access_seconds = Some(parse_u64(argument).map_err(invalid_response)?),
-            b'W' => {
-                require_no_argument(argument).map_err(invalid_response)?;
-                if hit.recache != RecacheState::None {
-                    return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-                }
-                hit.recache = RecacheState::Won;
-            }
-            b'Z' => {
-                require_no_argument(argument).map_err(invalid_response)?;
-                if hit.recache != RecacheState::None {
-                    return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-                }
-                hit.recache = RecacheState::AlreadyWon;
-            }
-            b'X' => {
-                require_no_argument(argument).map_err(invalid_response)?;
-                hit.stale = true;
-            }
-            _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
-        }
-    }
-    Ok(hit)
-}
-
 /// Maps any token-level failure to the one reply-decode error: a
 /// misbehaving backend gets no diagnostics, just a torn-down connection.
-fn invalid_response<E>(_: E) -> MetaReplyDecodeError {
+pub fn invalid_response<E>(_: E) -> MetaReplyDecodeError {
     MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
 }
 
@@ -496,6 +414,8 @@ pub enum MetaReplyDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meta::GetSuccessShape;
+    use crate::reply::RecacheState;
 
     const HEADER: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Header);
     const VALUE: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Value);

@@ -8,11 +8,12 @@ use crate::{
     meta::{KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan},
     request::{
         ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction,
-        ArithmeticTemporalInstructions, DebugRequest, DeleteRequest, GetRequest,
-        GetTemporalInstruction, GetTemporalInstructions, Request, StoreMode, StoreRequest,
+        ArithmeticTemporalInstructions, DebugRequest, DeleteRequest, Request, StoreMode,
+        StoreRequest,
     },
 };
 
+use super::command;
 use super::line_scanner::{scan_line, LineScan};
 use super::numbers::{parse_i32, parse_u32, parse_u64};
 use super::tokens::{flags, require_no_argument, split_tokens, FlagBudget, FlagError};
@@ -31,8 +32,8 @@ pub const MAX_OPAQUE_BYTES: usize = 31;
 
 const MAX_ZERO_COPY_KEY_FRAME: usize = 1024;
 const MAX_RETAINED_KEY_BUFFER: usize = 64 * 1024;
-const BAD_COMMAND_LINE: &[u8] = b"bad command line format";
-const INVALID_FLAG: &[u8] = b"invalid flag";
+pub const BAD_COMMAND_LINE: &[u8] = b"bad command line format";
+pub const INVALID_FLAG: &[u8] = b"invalid flag";
 const DUPLICATE_FLAG: &[u8] = b"duplicate flag";
 const BAD_DATA_CHUNK: &[u8] = b"bad data chunk";
 const OBJECT_TOO_LARGE: &[u8] = b"object too large for cache";
@@ -228,152 +229,12 @@ fn parse_command(
 
     let mut tokens = split_tokens(line);
     match tokens.next() {
-        Some(b"mg") => parse_get(tokens, key_frame),
+        Some(b"mg") => command::get::parse_request(tokens, key_frame),
         Some(b"md") => parse_delete(tokens, key_frame),
         Some(b"ma") => parse_arithmetic(tokens, key_frame),
         Some(b"me") => parse_debug(tokens, key_frame),
         _ => Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error)),
     }
-}
-
-fn parse_get<'a>(
-    mut tokens: impl Iterator<Item = &'a [u8]>,
-    key_frame: Option<&Bytes>,
-) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
-    let raw_key = tokens
-        .next()
-        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    let mut return_value = false;
-    let mut return_client_flags = false;
-    let mut return_cas = false;
-    let mut return_size = false;
-    let mut return_hit_state = false;
-    let mut return_last_access = false;
-    let mut check_cas = None;
-    let mut override_cas = None;
-    let mut no_lru_bump = false;
-    let mut temporal = GetTemporalInstructions::default();
-    let mut reply_plan = MetaReplyPlan::default();
-    let mut return_key = false;
-
-    // 20 line tokens minus `mg` and the key.
-    for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 2)) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
-            b'b' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                reply_plan.key_encoding = KeyEncoding::Base64;
-            }
-            b'c' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_cas = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Cas)
-                    .map_err(bad_command_line)?;
-            }
-            b'C' => check_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'f' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_client_flags = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::ClientFlags)
-                    .map_err(bad_command_line)?;
-            }
-            b'h' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_hit_state = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::HitState)
-                    .map_err(bad_command_line)?;
-            }
-            b'k' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_key = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Key)
-                    .map_err(bad_command_line)?;
-            }
-            b'l' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_last_access = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::LastAccess)
-                    .map_err(bad_command_line)?;
-            }
-            b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
-            b'q' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                reply_plan.quiet = MetaQuietPolicy::SuppressMiss;
-            }
-            b's' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_size = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Size)
-                    .map_err(bad_command_line)?;
-            }
-            b't' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                temporal
-                    .push(GetTemporalInstruction::ReturnTtl)
-                    .map_err(bad_command_line)?;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Ttl)
-                    .map_err(bad_command_line)?;
-            }
-            b'u' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                no_lru_bump = true;
-            }
-            b'v' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_value = true;
-            }
-            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'N' => temporal
-                .push(GetTemporalInstruction::Vivify(
-                    parse_i32(argument).map_err(bad_command_line)?,
-                ))
-                .map_err(bad_command_line)?,
-            b'R' => temporal
-                .push(GetTemporalInstruction::WinForRecache(
-                    parse_i32(argument).map_err(bad_command_line)?,
-                ))
-                .map_err(bad_command_line)?,
-            b'T' => temporal
-                .push(GetTemporalInstruction::UpdateTtl(
-                    parse_i32(argument).map_err(bad_command_line)?,
-                ))
-                .map_err(bad_command_line)?,
-            b'P' | b'L' => require_hint_argument(argument)?,
-            _ => return Err(recoverable_client_error(INVALID_FLAG)),
-        }
-    }
-
-    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
-    Ok(DecodedMetaCommand::Request {
-        request: Request::Get(GetRequest {
-            key,
-            return_value,
-            return_client_flags,
-            return_cas,
-            return_size,
-            return_hit_state,
-            return_last_access,
-            check_cas,
-            override_cas,
-            no_lru_bump,
-            temporal,
-        }),
-        reply_plan,
-    })
 }
 
 fn parse_store(
@@ -780,7 +641,7 @@ fn bytes_from_frame(raw: &[u8], frame: Option<&Bytes>) -> Result<Bytes, MetaRequ
 
 /// `P` and `L` are proxy hints that carry no cache semantics; they are
 /// validated (argument required) and dropped on every command.
-fn require_hint_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
+pub fn require_hint_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
     if argument.is_empty() {
         Err(recoverable_client_error(BAD_COMMAND_LINE))
     } else {
@@ -790,7 +651,7 @@ fn require_hint_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> 
 
 /// `O<token>`: retain the opaque for the local reply and record its output
 /// position. Never forwarded to the backend.
-fn parse_opaque(
+pub fn parse_opaque(
     argument: &[u8],
     key_frame: Option<&Bytes>,
     reply_plan: &mut MetaReplyPlan,
@@ -807,7 +668,7 @@ fn parse_opaque(
 
 /// Parses the key under the plan's encoding and, for `k`, retains the
 /// client-visible form for the local reply.
-fn resolve_key(
+pub fn resolve_key(
     raw_key: &[u8],
     key_frame: Option<&Bytes>,
     return_key: bool,
@@ -820,7 +681,7 @@ fn resolve_key(
     Ok(key)
 }
 
-fn flag_error(error: FlagError) -> MetaRequestDecodeError {
+pub fn flag_error(error: FlagError) -> MetaRequestDecodeError {
     match error {
         FlagError::OverBudget => recoverable_client_error(OPTIONS_FLAGS_TOO_LONG),
         FlagError::InvalidToken => recoverable_client_error(INVALID_FLAG),
@@ -830,11 +691,11 @@ fn flag_error(error: FlagError) -> MetaRequestDecodeError {
 
 /// Maps any token-level failure to memcached's generic complaint; the
 /// request decoder never gives numeric or shape diagnostics beyond it.
-fn bad_command_line<E>(_: E) -> MetaRequestDecodeError {
+pub fn bad_command_line<E>(_: E) -> MetaRequestDecodeError {
     recoverable_client_error(BAD_COMMAND_LINE)
 }
 
-fn recoverable_client_error(message: &'static [u8]) -> MetaRequestDecodeError {
+pub fn recoverable_client_error(message: &'static [u8]) -> MetaRequestDecodeError {
     MetaRequestDecodeError::Recoverable(ErrorReply::Client(Some(Bytes::from_static(message))))
 }
 
@@ -864,6 +725,7 @@ pub enum FatalDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::GetTemporalInstruction;
 
     fn decode(input: &[u8]) -> DecodedMetaCommand {
         let mut decoder = MetaRequestDecoder::new();

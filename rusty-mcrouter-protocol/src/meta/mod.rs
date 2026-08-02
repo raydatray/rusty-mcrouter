@@ -11,6 +11,7 @@
 //! [`Request`]: crate::Request
 //! [`Reply`]: crate::Reply
 
+mod command;
 mod line_scanner;
 mod numbers;
 mod reply_decoder;
