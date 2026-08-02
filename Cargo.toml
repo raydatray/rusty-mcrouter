@@ -11,6 +11,7 @@ license = "MIT"
 [workspace.dependencies]
 base64 = "0.22.1"
 bytes = "1.11.1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 json_comments = "0.2"
 memchr = "2.7"
 serde = { version = "1", features = ["derive"] }

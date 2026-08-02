@@ -32,7 +32,7 @@ impl Route for SelectionRoute {
                 len: self.children.len(),
             })?;
 
-        child.route_dyn(req).await
+        Rc::clone(child).route_dyn(req).await
     }
 }
 

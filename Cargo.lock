@@ -1188,6 +1188,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "futures-util",
  "rusty-mcrouter-config",
  "rusty-mcrouter-core",
  "rusty-mcrouter-net",

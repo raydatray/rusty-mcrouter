@@ -1,6 +1,13 @@
-use std::{collections::VecDeque, rc::Rc};
+use std::{
+    collections::VecDeque,
+    future::{poll_fn, Future},
+    pin::Pin,
+    rc::Rc,
+    task::Poll,
+};
 
 use bytes::{Bytes, BytesMut};
+use futures_util::{stream::FuturesUnordered, FutureExt, Stream, StreamExt};
 use rusty_mcrouter_core::DynRoute;
 use rusty_mcrouter_net::NetError;
 use rusty_mcrouter_protocol::meta::{
@@ -12,13 +19,14 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
-    sync::mpsc,
 };
 
 use crate::proxy::{config::ThreadMode, proxy_set::ProxySet, ProxyHandle};
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
-const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
+
+/// An in-flight route continuation, owned and polled by its connection.
+type InFlightRoute = Pin<Box<dyn Future<Output = (usize, Reply)>>>;
 
 /// one client connection's lifecycle:
 /// - decode pipelined Meta commands
@@ -44,12 +52,14 @@ pub struct Connection {
     /// hop-local `MetaReplyPlan` (never routed, never crosses threads) and
     /// flips to `Ready` when its outcome exists.
     slots: VecDeque<Slot>,
+    /// In-flight route continuations, owned and polled by this connection —
+    /// the fiber-pool analogue. No task is spawned and no completion channel
+    /// exists per request; completions surface as direct `complete()` calls,
+    /// and dropping the connection cancels its in-flight work.
+    routes: FuturesUnordered<InFlightRoute>,
     next_seq: usize,
     next_write: usize,
-    in_flight: usize,
     input_closed: bool,
-    completed_tx: mpsc::Sender<(usize, Reply)>,
-    completed_rx: mpsc::Receiver<(usize, Reply)>,
 }
 
 struct Slot {
@@ -77,7 +87,6 @@ impl Connection {
         mode: ThreadMode,
     ) -> Self {
         let (reader, writer) = stream.into_split();
-        let (completed_tx, completed_rx) = mpsc::channel(COMPLETED_CHANNEL_CAPACITY);
 
         Self {
             reader,
@@ -91,12 +100,10 @@ impl Connection {
             decoder: MetaRequestDecoder::new(),
             encoder: MetaReplyEncoder::new(),
             slots: VecDeque::new(),
+            routes: FuturesUnordered::new(),
             next_seq: 0,
             next_write: 0,
-            in_flight: 0,
             input_closed: false,
-            completed_tx,
-            completed_rx,
         }
     }
 
@@ -112,7 +119,7 @@ impl Connection {
                 return Ok(());
             }
 
-            // select! touches reader/buf and completed_rx as disjoint fields
+            // select! touches reader/buf and routes as disjoint fields
             // directly; the two arms can't be factored into &mut self methods.
             tokio::select! {
                 read = self.reader.read_buf(&mut self.buf), if !self.input_closed => {
@@ -124,19 +131,29 @@ impl Connection {
                         let _ = self.decoder.decode_eof(&self.buf);
                     }
                 }
-                maybe_completed = self.completed_rx.recv(), if self.in_flight > 0 => {
-                    match maybe_completed {
-                        Some((seq, reply)) => {
-                            self.complete(seq, reply);
-                            while let Ok((seq, reply)) = self.completed_rx.try_recv() {
-                                self.complete(seq, reply);
-                            }
-                        }
-                        None => return Ok(()),
+                first = self.routes.next(), if !self.routes.is_empty() => {
+                    if let Some((seq, reply)) = first {
+                        self.complete(seq, reply);
                     }
+                    // drain everything already completed before the single
+                    // batched flush at the top of the loop.
+                    self.drain_completed_routes().await;
                 }
             }
         }
+    }
+
+    /// Collects every already-completed route without waiting. Runs under a
+    /// real poll context (not a no-op waker) so the in-flight set keeps a
+    /// waker that can actually wake this connection for later completions.
+    async fn drain_completed_routes(&mut self) {
+        poll_fn(|cx| {
+            while let Poll::Ready(Some((seq, reply))) = Pin::new(&mut self.routes).poll_next(cx) {
+                self.complete(seq, reply);
+            }
+            Poll::Ready(())
+        })
+        .await;
     }
 
     /// decode every complete command currently buffered and act on it without
@@ -153,7 +170,6 @@ impl Connection {
                         plan: reply_plan,
                         state: SlotState::InFlight,
                     });
-                    self.in_flight += 1;
                     self.submit_single(seq, request);
                 }
                 Ok(Some(DecodedMetaCommand::NoOp)) => {
@@ -185,7 +201,6 @@ impl Connection {
     }
 
     fn complete(&mut self, seq: usize, reply: Reply) {
-        self.in_flight = self.in_flight.saturating_sub(1);
         // Slots are dense and never removed before completing, so a live seq
         // always sits `seq - next_write` from the front of the ring.
         let index = seq.wrapping_sub(self.next_write);
@@ -209,15 +224,19 @@ impl Connection {
         }
     }
 
-    fn submit_single(&self, seq: usize, req: Request) {
+    fn submit_single(&mut self, seq: usize, req: Request) {
         let target = self.route_target(&req);
-        let completed_tx = self.completed_tx.clone();
+        let mut route = Box::pin(async move { (seq, route_one(target, req).await) });
 
-        tokio::task::spawn_local(async move {
-            let reply = route_one(target, req).await;
-
-            let _ = completed_tx.send((seq, reply)).await;
-        });
+        // The first poll happens inline: immediately-ready routes (null,
+        // error) complete with no queueing at all, and backend-bound routes
+        // enqueue their request during decode rather than on a later tick.
+        // A future parked here re-registers real wakers on its first poll
+        // from `routes`, which is guaranteed before this connection parks.
+        match route.as_mut().now_or_never() {
+            Some((seq, reply)) => self.complete(seq, reply),
+            None => self.routes.push(route),
+        }
     }
 
     /// flush replies that are ready in request order, advancing `next_write`.
