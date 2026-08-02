@@ -49,7 +49,7 @@ impl MetaRequestEncoder {
                     }),
                 })
             }
-            _ => Err(MetaRequestEncodeError::UnsupportedRequest),
+            Request::Debug(request) => encode_debug(request, out),
         };
         if result.is_err() {
             out.truncate(checkpoint);
@@ -60,9 +60,6 @@ impl MetaRequestEncoder {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum MetaRequestEncodeError {
-    #[error("request operation is not implemented by the Meta encoder")]
-    UnsupportedRequest,
-
     #[error("backend key is empty after removing its routing prefix")]
     EmptyBackendKey,
 
@@ -287,6 +284,28 @@ fn encode_arithmetic(
     Ok(())
 }
 
+fn encode_debug(
+    request: &crate::request::DebugRequest,
+    out: &mut BytesMut,
+) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
+    let line_start = out.len();
+    out.extend_from_slice(b"me ");
+    let key_is_base64 = write_key(out, &request.key)?;
+    if key_is_base64 {
+        write_bare_flag(out, b'b');
+    }
+    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
+        return Err(MetaRequestEncodeError::FrameTooLarge {
+            maximum: MAX_COMMAND_LINE_BYTES,
+        });
+    }
+    out.extend_from_slice(b"\r\n");
+
+    Ok(MetaReplyExpectation::Debug {
+        key: request.key.clone_without_routing_prefix(),
+    })
+}
+
 fn write_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
     let key = key.key_without_routing_prefix();
     if key.is_empty() {
@@ -360,7 +379,7 @@ mod tests {
     use super::*;
     use crate::{
         meta::{DecodedMetaCommand, MetaRequestDecoder},
-        request::{DebugRequest, GetTemporalInstructions},
+        request::GetTemporalInstructions,
     };
 
     fn parse(input: &[u8]) -> Request {
@@ -424,6 +443,52 @@ mod tests {
     fn encodes_basic_store() {
         let request = parse(b"ms key 3\r\nfoo\r\n");
         assert_eq!(encode(&request).unwrap(), b"ms key 3\r\nfoo\r\n".as_slice());
+    }
+
+    #[test]
+    fn encodes_basic_delete() {
+        let request = parse(b"md key\r\n");
+        assert_eq!(encode(&request).unwrap(), b"md key\r\n".as_slice());
+    }
+
+    #[test]
+    fn encodes_basic_arithmetic() {
+        let request = parse(b"ma key\r\n");
+        assert_eq!(encode(&request).unwrap(), b"ma key\r\n".as_slice());
+    }
+
+    #[test]
+    fn encodes_basic_debug() {
+        let request = parse(b"me key\r\n");
+        assert_eq!(encode(&request).unwrap(), b"me key\r\n".as_slice());
+    }
+
+    #[test]
+    fn returns_debug_reply_expectation_with_backend_key() {
+        let request = parse(b"me /region/cluster/key\r\n");
+        let mut out = BytesMut::new();
+
+        assert_eq!(
+            MetaRequestEncoder::new().encode(&request, &mut out),
+            Ok(MetaReplyExpectation::Debug {
+                key: Bytes::from_static(b"key"),
+            })
+        );
+        assert_eq!(out, b"me key\r\n".as_slice());
+    }
+
+    #[test]
+    fn base64_encodes_binary_debug_key() {
+        let request = parse(b"me AAE= b\r\n");
+        let mut out = BytesMut::new();
+
+        assert_eq!(
+            MetaRequestEncoder::new().encode(&request, &mut out),
+            Ok(MetaReplyExpectation::Debug {
+                key: Bytes::from_static(b"\0\x01"),
+            })
+        );
+        assert_eq!(out, b"me AAE= b\r\n".as_slice());
     }
 
     #[test]
@@ -574,32 +639,6 @@ mod tests {
             encode(&request).unwrap(),
             b"ms AAE= 4 b\r\na\0b\n\r\n".as_slice()
         );
-    }
-
-    #[test]
-    fn encodes_basic_arithmetic() {
-        let request = parse(b"ma key\r\n");
-        assert_eq!(encode(&request).unwrap(), b"ma key\r\n".as_slice());
-    }
-
-    #[test]
-    fn encodes_basic_delete() {
-        let request = parse(b"md key\r\n");
-        assert_eq!(encode(&request).unwrap(), b"md key\r\n".as_slice());
-    }
-
-    #[test]
-    fn rejects_unimplemented_operations_atomically() {
-        let request = Request::Debug(DebugRequest {
-            key: Key::new(Bytes::from_static(b"key")).unwrap(),
-        });
-        let mut out = BytesMut::from(&b"existing"[..]);
-
-        assert_eq!(
-            MetaRequestEncoder::new().encode(&request, &mut out),
-            Err(MetaRequestEncodeError::UnsupportedRequest)
-        );
-        assert_eq!(out, b"existing".as_slice());
     }
 
     #[test]
