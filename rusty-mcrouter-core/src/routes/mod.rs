@@ -46,14 +46,17 @@ pub trait Route: 'static {
     }
 }
 
-pub type RouteFuture<'a> = Pin<Box<dyn Future<Output = Result<Reply>> + 'a>>;
+/// `'static` so callers (the connection's in-flight set, cross-thread proxy
+/// tasks) can store the future without borrowing the route graph: the future
+/// owns an `Rc` to its route instead.
+pub type RouteFuture = Pin<Box<dyn Future<Output = Result<Reply>>>>;
 
 pub trait DynRoute: 'static {
-    fn route_dyn<'a>(&'a self, req: Request) -> RouteFuture<'a>;
+    fn route_dyn(self: Rc<Self>, req: Request) -> RouteFuture;
 }
 
 impl<R: Route> DynRoute for R {
-    fn route_dyn<'a>(&'a self, req: Request) -> RouteFuture<'a> {
-        Box::pin(<R as Route>::route(self, req))
+    fn route_dyn(self: Rc<Self>, req: Request) -> RouteFuture {
+        Box::pin(async move { <R as Route>::route(&self, req).await })
     }
 }

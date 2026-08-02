@@ -31,7 +31,7 @@ impl FailoverRoute {
 
 impl Route for FailoverRoute {
     async fn route(&self, req: Request) -> Result<Reply> {
-        let primary = self.children[0].route_dyn(req.clone()).await;
+        let primary = Rc::clone(&self.children[0]).route_dyn(req.clone()).await;
         let primary_failed = self.errors.should_failover(&req, &primary);
         self.policy.record_outcome(0, primary_failed);
         if !primary_failed {
@@ -43,7 +43,7 @@ impl Route for FailoverRoute {
             let Some(child) = self.children.get(idx) else {
                 continue;
             };
-            let reply = child.route_dyn(req.clone()).await;
+            let reply = Rc::clone(child).route_dyn(req.clone()).await;
             let failed = self.errors.should_failover(&req, &reply);
             self.policy.record_outcome(idx, failed);
             if !failed {

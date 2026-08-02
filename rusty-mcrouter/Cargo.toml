@@ -12,6 +12,7 @@ workspace = true
 anyhow = "1.0.102"
 bytes.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
+futures-util.workspace = true
 rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
 rusty-mcrouter-core = { path = "../rusty-mcrouter-core" }
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
