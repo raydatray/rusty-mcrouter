@@ -1,3 +1,4 @@
+mod line_scanner;
 mod numbers;
 mod reply_decoder;
 mod reply_encoder;
