@@ -1,10 +1,14 @@
-//! Raw memcached-protocol load generator for benchmarking rusty-mcrouter.
+//! Raw Meta-protocol load generator for benchmarking rusty-mcrouter.
 //!
 //! Opens `--conns` TCP connections to `--addr`, keeps `--depth` pipelined
-//! `get <key>\r\n` requests in flight per connection, and counts the
-//! `END\r\n` reply terminators. A non-existent key is used so every reply is
-//! exactly `END\r\n` (a pure miss) from both `NullRoute` and real memcached —
+//! `mg <key> v\r\n` requests in flight per connection, and counts the
+//! `EN\r\n` reply terminators. A non-existent key is used so every reply is
+//! exactly `EN\r\n` (a pure miss) from both `NullRoute` and real memcached —
 //! that keeps reply framing trivial and exercises the full router path.
+//!
+//! This is the Meta twin of the classic `get`-miss workload the write-batching
+//! baselines in `docs/mvp/design/write-batching.md` were measured with
+//! (request 16B vs 15B, reply 4B vs 5B), so runs stay comparable.
 //!
 //! Reports aggregate throughput (rps) and batch round-trip latency
 //! percentiles (one sample per pipelined batch of `depth` requests).
@@ -67,7 +71,7 @@ fn parse_args() -> Args {
 
 /// Count non-overlapping occurrences of `pat` across a streamed chunk.
 /// `partial` carries how many leading bytes of `pat` were matched at the tail
-/// of the previous chunk. `END\r\n` has no self-overlapping prefix, so a
+/// of the previous chunk. `EN\r\n` has no self-overlapping prefix, so a
 /// mismatch resets cleanly.
 fn scan(buf: &[u8], pat: &[u8], partial: &mut usize) -> u64 {
     let mut count = 0;
@@ -91,13 +95,13 @@ fn scan(buf: &[u8], pat: &[u8], partial: &mut usize) -> u64 {
 async fn main() {
     let args = parse_args();
 
-    // One pipelined batch = `depth` GET requests for a missing key.
+    // One pipelined batch = `depth` Meta get requests for a missing key.
     let mut batch = Vec::new();
     for _ in 0..args.depth {
-        batch.extend_from_slice(format!("get {}\r\n", args.key).as_bytes());
+        batch.extend_from_slice(format!("mg {} v\r\n", args.key).as_bytes());
     }
     let batch: Arc<[u8]> = Arc::from(batch.into_boxed_slice());
-    const TERM: &[u8] = b"END\r\n";
+    const TERM: &[u8] = b"EN\r\n";
 
     let stop = Arc::new(AtomicBool::new(false));
     let total = Arc::new(AtomicU64::new(0));

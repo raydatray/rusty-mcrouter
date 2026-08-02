@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::{collections::VecDeque, rc::Rc};
 
 use bytes::{Bytes, BytesMut};
 use rusty_mcrouter_core::DynRoute;
@@ -38,10 +38,12 @@ pub struct Connection {
     write_buf: BytesMut,
     decoder: MetaRequestDecoder,
     encoder: MetaReplyEncoder,
-    /// The only per-request state. A slot is created at decode time with its
+    /// The only per-request state, a dense ring ordered by sequence number:
+    /// index 0 is seq `next_write`, and a request's slot lives at
+    /// `seq - next_write`. A slot is created at decode time with its
     /// hop-local `MetaReplyPlan` (never routed, never crosses threads) and
     /// flips to `Ready` when its outcome exists.
-    slots: BTreeMap<usize, Slot>,
+    slots: VecDeque<Slot>,
     next_seq: usize,
     next_write: usize,
     in_flight: usize,
@@ -88,7 +90,7 @@ impl Connection {
             write_buf: BytesMut::new(),
             decoder: MetaRequestDecoder::new(),
             encoder: MetaReplyEncoder::new(),
-            slots: BTreeMap::new(),
+            slots: VecDeque::new(),
             next_seq: 0,
             next_write: 0,
             in_flight: 0,
@@ -147,27 +149,24 @@ impl Connection {
                     reply_plan,
                 })) => {
                     let seq = self.take_seq();
-                    self.slots.insert(
-                        seq,
-                        Slot {
-                            plan: reply_plan,
-                            state: SlotState::InFlight,
-                        },
-                    );
+                    self.slots.push_back(Slot {
+                        plan: reply_plan,
+                        state: SlotState::InFlight,
+                    });
                     self.in_flight += 1;
                     self.submit_single(seq, request);
                 }
                 Ok(Some(DecodedMetaCommand::NoOp)) => {
-                    let seq = self.take_seq();
-                    self.slots.insert(seq, Slot::ready(SlotOutcome::NoOp));
+                    self.take_seq();
+                    self.slots.push_back(Slot::ready(SlotOutcome::NoOp));
                 }
                 Ok(None) => return,
                 // one malformed command was consumed; its error joins the
                 // pipeline in order and decoding continues.
                 Err(MetaRequestDecodeError::Recoverable(error)) => {
-                    let seq = self.take_seq();
+                    self.take_seq();
                     self.slots
-                        .insert(seq, Slot::ready(SlotOutcome::Reply(Reply::Error(error))));
+                        .push_back(Slot::ready(SlotOutcome::Reply(Reply::Error(error))));
                 }
                 // frame alignment is untrustworthy: stop consuming input,
                 // finish what is owed, then close.
@@ -187,7 +186,10 @@ impl Connection {
 
     fn complete(&mut self, seq: usize, reply: Reply) {
         self.in_flight = self.in_flight.saturating_sub(1);
-        if let Some(slot) = self.slots.get_mut(&seq) {
+        // Slots are dense and never removed before completing, so a live seq
+        // always sits `seq - next_write` from the front of the ring.
+        let index = seq.wrapping_sub(self.next_write);
+        if let Some(slot) = self.slots.get_mut(index) {
             slot.state = SlotState::Ready(SlotOutcome::Reply(reply));
         }
     }
@@ -223,13 +225,13 @@ impl Connection {
     async fn flush_ready(&mut self) -> Result<(), NetError> {
         self.write_buf.clear();
         while matches!(
-            self.slots.get(&self.next_write),
+            self.slots.front(),
             Some(Slot {
                 state: SlotState::Ready(_),
                 ..
             })
         ) {
-            let slot = self.slots.remove(&self.next_write).expect("checked above");
+            let slot = self.slots.pop_front().expect("checked above");
             let SlotState::Ready(outcome) = slot.state else {
                 unreachable!("matched Ready above");
             };
