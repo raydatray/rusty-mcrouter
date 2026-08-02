@@ -1,9 +1,10 @@
 use bytes::{Bytes, BytesMut};
+use memchr::memchr;
 use thiserror::Error;
 
 use crate::reply::{ErrorReply, GetHit, GetReply, RecacheState, Reply};
 
-use super::{GetSuccessShape, MetaReplyExpectation};
+use super::{numbers, seen_flags::SeenFlags, GetSuccessShape, MetaReplyExpectation};
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_REPLY_VALUE_BYTES: usize = 1024 * 1024;
@@ -18,8 +19,18 @@ pub struct MetaReplyDecoder {
 
 #[derive(Debug)]
 enum ReplyDecodeState {
-    Line { scanned: usize },
-    Value { length: usize, hit: GetHit },
+    Line {
+        scanned: usize,
+    },
+    Value {
+        length: usize,
+        pending: PendingValue,
+    },
+}
+
+#[derive(Debug)]
+enum PendingValue {
+    Get(GetHit),
 }
 
 impl Default for MetaReplyDecoder {
@@ -47,10 +58,8 @@ impl MetaReplyDecoder {
                         *scanned = 0;
                     }
                     let search_start = *scanned;
-                    let Some(newline) = src[search_start..]
-                        .iter()
-                        .position(|byte| *byte == b'\n')
-                        .map(|offset| search_start + offset)
+                    let Some(newline) =
+                        memchr(b'\n', &src[search_start..]).map(|offset| search_start + offset)
                     else {
                         if src.len() >= MAX_REPLY_LINE_BYTES {
                             return Err(MetaReplyDecodeError::FrameTooLarge {
@@ -77,8 +86,8 @@ impl MetaReplyDecoder {
 
                     match parse_line(expectation, &frame[..line_end])? {
                         ParsedLine::Reply(reply) => return Ok(Some(reply)),
-                        ParsedLine::Value { length, hit } => {
-                            self.state = ReplyDecodeState::Value { length, hit };
+                        ParsedLine::Value { length, pending } => {
+                            self.state = ReplyDecodeState::Value { length, pending };
                         }
                     }
                 }
@@ -96,17 +105,23 @@ impl MetaReplyDecoder {
                         return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
                     }
 
-                    let ReplyDecodeState::Value { length, mut hit } =
+                    let ReplyDecodeState::Value { length, pending } =
                         std::mem::replace(&mut self.state, ReplyDecodeState::Line { scanned: 0 })
                     else {
                         unreachable!();
                     };
-                    if hit.size.is_some_and(|size| size != length as u64) {
-                        return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-                    }
                     let frame = src.split_to(frame_len).freeze();
-                    hit.value = Some(frame.slice(..length));
-                    return Ok(Some(Reply::Get(GetReply::Hit(hit))));
+                    return match pending {
+                        PendingValue::Get(mut hit) => {
+                            if hit.size.is_some_and(|size| size != length as u64) {
+                                return Err(MetaReplyDecodeError::InvalidResponse(
+                                    INVALID_RESPONSE,
+                                ));
+                            }
+                            hit.value = Some(frame.slice(..length));
+                            Ok(Some(Reply::Get(GetReply::Hit(hit))))
+                        }
+                    };
                 }
             }
         }
@@ -122,7 +137,10 @@ impl MetaReplyDecoder {
 
 enum ParsedLine {
     Reply(Reply),
-    Value { length: usize, hit: GetHit },
+    Value {
+        length: usize,
+        pending: PendingValue,
+    },
 }
 
 fn parse_line(
@@ -136,7 +154,12 @@ fn parse_line(
         return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
     }
 
-    let MetaReplyExpectation::Get(shape) = *expectation;
+    match expectation {
+        MetaReplyExpectation::Get(shape) => parse_get_line(*shape, line),
+    }
+}
+
+fn parse_get_line(shape: GetSuccessShape, line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
     let mut tokens = line
         .split(|byte| *byte == b' ')
         .filter(|token| !token.is_empty());
@@ -168,7 +191,10 @@ fn parse_line(
                 });
             }
             let hit = parse_get_attributes(tokens)?;
-            Ok(ParsedLine::Value { length, hit })
+            Ok(ParsedLine::Value {
+                length,
+                pending: PendingValue::Get(hit),
+            })
         }
         _ => Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
     }
@@ -211,22 +237,21 @@ fn parse_get_attributes<'a>(
     tokens: impl Iterator<Item = &'a [u8]>,
 ) -> Result<GetHit, MetaReplyDecodeError> {
     let mut hit = GetHit::default();
-    let mut seen = [false; 256];
+    let mut seen = SeenFlags::default();
 
     for token in tokens {
         let (&flag, argument) = token
             .split_first()
             .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
-        if seen[flag as usize] {
+        if !seen.insert(flag) {
             return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
         }
-        seen[flag as usize] = true;
 
         match flag {
-            b'c' => hit.cas = Some(parse_number(argument)?),
-            b'f' => hit.client_flags = Some(parse_number(argument)?),
-            b's' => hit.size = Some(parse_number(argument)?),
-            b't' => hit.ttl = Some(parse_number(argument)?),
+            b'c' => hit.cas = Some(parse_u64(argument)?),
+            b'f' => hit.client_flags = Some(parse_u32(argument)?),
+            b's' => hit.size = Some(parse_u64(argument)?),
+            b't' => hit.ttl = Some(parse_i64(argument)?),
             b'h' => {
                 hit.hit_before = Some(match argument {
                     b"0" => false,
@@ -234,7 +259,7 @@ fn parse_get_attributes<'a>(
                     _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
                 });
             }
-            b'l' => hit.last_access_seconds = Some(parse_number(argument)?),
+            b'l' => hit.last_access_seconds = Some(parse_u64(argument)?),
             b'W' => {
                 require_no_argument(argument)?;
                 if hit.recache != RecacheState::None {
@@ -268,17 +293,19 @@ fn require_no_argument(argument: &[u8]) -> Result<(), MetaReplyDecodeError> {
 }
 
 fn parse_usize(raw: &[u8]) -> Result<usize, MetaReplyDecodeError> {
-    parse_number(raw)
+    numbers::parse_usize(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
 }
 
-fn parse_number<T: std::str::FromStr>(raw: &[u8]) -> Result<T, MetaReplyDecodeError> {
-    if raw.is_empty() {
-        return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-    }
-    std::str::from_utf8(raw)
-        .ok()
-        .and_then(|raw| raw.parse().ok())
-        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
+fn parse_u64(raw: &[u8]) -> Result<u64, MetaReplyDecodeError> {
+    numbers::parse_u64(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
+}
+
+fn parse_u32(raw: &[u8]) -> Result<u32, MetaReplyDecodeError> {
+    numbers::parse_u32(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
+}
+
+fn parse_i64(raw: &[u8]) -> Result<i64, MetaReplyDecodeError> {
+    numbers::parse_i64(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -304,7 +331,6 @@ mod tests {
     const VALUE: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Value);
     const CONDITIONAL: MetaReplyExpectation =
         MetaReplyExpectation::Get(GetSuccessShape::HeaderOrValue);
-
     fn decode(expectation: &MetaReplyExpectation, input: &[u8]) -> Reply {
         let mut decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(input);

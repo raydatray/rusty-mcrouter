@@ -46,6 +46,10 @@ impl Key {
         self.bytes
     }
 
+    pub(crate) fn clone_bytes(&self) -> Bytes {
+        self.bytes.clone()
+    }
+
     pub fn routing_prefix(&self) -> Option<&[u8]> {
         (self.routing_prefix_len != 0).then(|| &self.bytes[..self.routing_prefix_len])
     }
