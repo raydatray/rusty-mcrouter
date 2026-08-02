@@ -1,13 +1,18 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
 use memchr::memchr;
 use thiserror::Error;
 
-use crate::reply::{ArithmeticReply, ArithmeticResult, DeleteReply, ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply, StoreResult};
+use crate::reply::{
+    ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, DeleteReply, ErrorReply,
+    GetHit, GetReply, RecacheState, Reply, StoreReply, StoreResult,
+};
 
 use super::{numbers, seen_flags::SeenFlags, GetSuccessShape, MetaReplyExpectation};
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_REPLY_VALUE_BYTES: usize = 1024 * 1024;
+pub const MAX_DEBUG_FIELDS: usize = 64;
 
 const INVALID_RESPONSE: &str = "invalid Meta backend response";
 const SHAPE_MISMATCH: &str = "Meta backend response does not match request";
@@ -165,6 +170,60 @@ fn parse_line(
         MetaReplyExpectation::Delete => parse_delete_line(line),
         MetaReplyExpectation::Arithmetic { value, cas, ttl } => {
             parse_arithmetic_line(*value, *cas, *ttl, line)
+        }
+        MetaReplyExpectation::Debug { key } => parse_debug_line(key, line),
+    }
+}
+
+fn parse_debug_line(
+    expected_key: &Bytes,
+    line: &[u8],
+) -> Result<ParsedLine, MetaReplyDecodeError> {
+    let mut tokens = line
+        .split(|byte| *byte == b' ')
+        .filter(|token| !token.is_empty());
+    match tokens.next() {
+        Some(b"EN") => {
+            if tokens.next().is_some() {
+                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+            }
+            Ok(ParsedLine::Reply(Reply::Debug(DebugReply::Miss)))
+        }
+        Some(b"ME") => {
+            let returned_key = tokens
+                .next()
+                .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+            // memcached echoes the key as stored on the item: plain, or
+            // base64 when the item was created with the `b` flag. The request
+            // encoding does not determine the response encoding (verified
+            // against memcached 1.6.45), so accept either form.
+            let key_matches = returned_key == expected_key.as_ref()
+                || STANDARD
+                    .decode(returned_key)
+                    .is_ok_and(|decoded| decoded == expected_key.as_ref());
+            if !key_matches {
+                return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
+            }
+
+            let mut fields = Vec::new();
+            for token in tokens {
+                if fields.len() == MAX_DEBUG_FIELDS {
+                    return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+                }
+                let Some(separator) = token.iter().position(|byte| *byte == b'=') else {
+                    return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+                };
+                if separator == 0 {
+                    return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+                }
+                fields.push(DebugField {
+                    name: Bytes::copy_from_slice(&token[..separator]),
+                    value: Bytes::copy_from_slice(&token[separator + 1..]),
+                });
+            }
+            Ok(ParsedLine::Reply(Reply::Debug(DebugReply::Hit(DebugHit {
+                fields,
+            }))))
         }
         _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
     }
@@ -532,9 +591,153 @@ mod tests {
         reply
     }
 
+    fn debug_expectation(key: &'static [u8]) -> MetaReplyExpectation {
+        MetaReplyExpectation::Debug {
+            key: Bytes::from_static(key),
+        }
+    }
+
     #[test]
     fn decodes_get_miss() {
         assert_eq!(decode(&HEADER, b"EN\r\n"), Reply::Get(GetReply::Miss));
+    }
+
+    #[test]
+    fn decodes_debug_hit_and_miss() {
+        let expectation = debug_expectation(b"key");
+        assert_eq!(
+            decode(
+                &expectation,
+                b"ME key exp=60 la=2 cas=42 fetch=yes cls=1 size=3\r\n"
+            ),
+            Reply::Debug(DebugReply::Hit(DebugHit {
+                fields: vec![
+                    DebugField {
+                        name: Bytes::from_static(b"exp"),
+                        value: Bytes::from_static(b"60"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"la"),
+                        value: Bytes::from_static(b"2"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"cas"),
+                        value: Bytes::from_static(b"42"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"fetch"),
+                        value: Bytes::from_static(b"yes"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"cls"),
+                        value: Bytes::from_static(b"1"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"size"),
+                        value: Bytes::from_static(b"3"),
+                    },
+                ],
+            }))
+        );
+        assert_eq!(
+            decode(&expectation, b"EN\r\n"),
+            Reply::Debug(DebugReply::Miss)
+        );
+    }
+
+    #[test]
+    fn validates_base64_debug_key() {
+        let expectation = debug_expectation(b"\0\x01");
+        assert!(matches!(
+            decode(&expectation, b"ME AAE= exp=60\r\n"),
+            Reply::Debug(DebugReply::Hit(_))
+        ));
+    }
+
+    #[test]
+    fn accepts_base64_echo_of_a_text_debug_key() {
+        // memcached 1.6.45 echoes the key base64-encoded whenever the item
+        // was stored with the `b` flag, even for a plain-text `me` request:
+        //   >> me key64
+        //   << ME a2V5NjQ= exp=-1 la=0 cas=41 fetch=no cls=1 size=67
+        let expectation = debug_expectation(b"key64");
+        assert_eq!(
+            decode(
+                &expectation,
+                b"ME a2V5NjQ= exp=-1 la=0 cas=41 fetch=no cls=1 size=67\r\n"
+            ),
+            Reply::Debug(DebugReply::Hit(DebugHit {
+                fields: vec![
+                    DebugField {
+                        name: Bytes::from_static(b"exp"),
+                        value: Bytes::from_static(b"-1"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"la"),
+                        value: Bytes::from_static(b"0"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"cas"),
+                        value: Bytes::from_static(b"41"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"fetch"),
+                        value: Bytes::from_static(b"no"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"cls"),
+                        value: Bytes::from_static(b"1"),
+                    },
+                    DebugField {
+                        name: Bytes::from_static(b"size"),
+                        value: Bytes::from_static(b"67"),
+                    },
+                ],
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_debug_key_mismatch_and_malformed_fields() {
+        let expectation = debug_expectation(b"key");
+        for input in [
+            b"ME other exp=60\r\n".as_slice(),
+            // valid base64, but decodes to "other", not "key"
+            b"ME b3RoZXI= exp=60\r\n".as_slice(),
+            b"ME key malformed\r\n".as_slice(),
+            b"ME key =value\r\n".as_slice(),
+            b"EN extra\r\n".as_slice(),
+        ] {
+            let mut decoder = MetaReplyDecoder::new();
+            let mut src = BytesMut::from(input);
+            assert!(
+                decoder.decode(&expectation, &mut src).is_err(),
+                "input={input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bounds_debug_fields() {
+        let expectation = debug_expectation(b"key");
+        let mut accepted = Vec::from(&b"ME key"[..]);
+        for index in 0..MAX_DEBUG_FIELDS {
+            accepted.extend_from_slice(format!(" f{index}=v").as_bytes());
+        }
+        accepted.extend_from_slice(b"\r\n");
+        assert!(matches!(
+            decode(&expectation, &accepted),
+            Reply::Debug(DebugReply::Hit(_))
+        ));
+
+        let mut rejected = accepted[..accepted.len() - 2].to_vec();
+        rejected.extend_from_slice(b" extra=v\r\n");
+        let mut decoder = MetaReplyDecoder::new();
+        let mut src = BytesMut::from(rejected.as_slice());
+        assert_eq!(
+            decoder.decode(&expectation, &mut src),
+            Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
+        );
     }
 
     #[test]
@@ -582,41 +785,6 @@ mod tests {
             (b"NF\r\n".as_slice(), DeleteReply::NotFound),
         ] {
             assert_eq!(decode(&DELETE, input), Reply::Delete(expected));
-        }
-    }
-
-    #[test]
-    fn decodes_store_attributes_in_any_order() {
-        assert_eq!(
-            decode(&STORE_WITH_FIELDS, b"HD s3 c42\r\n"),
-            Reply::Store(StoreReply::Success(StoreResult {
-                cas: Some(42),
-                size: Some(3),
-            }))
-        );
-    }
-
-    #[test]
-    fn rejects_store_reply_missing_expected_fields() {
-        let mut decoder = MetaReplyDecoder::new();
-        let mut src = BytesMut::from(&b"HD c42\r\n"[..]);
-
-        assert_eq!(
-            decoder.decode(&STORE_WITH_FIELDS, &mut src),
-            Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH))
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_store_codes_and_attributes() {
-        for input in [
-            b"EN\r\n".as_slice(),
-            b"HD f1\r\n".as_slice(),
-            b"HD c1 c2\r\n".as_slice(),
-        ] {
-            let mut decoder = MetaReplyDecoder::new();
-            let mut src = BytesMut::from(input);
-            assert!(decoder.decode(&STORE, &mut src).is_err(), "input={input:?}");
         }
     }
 
@@ -718,6 +886,41 @@ mod tests {
                 decoder.decode(&DELETE, &mut src).is_err(),
                 "input={input:?}"
             );
+        }
+    }
+
+    #[test]
+    fn decodes_store_attributes_in_any_order() {
+        assert_eq!(
+            decode(&STORE_WITH_FIELDS, b"HD s3 c42\r\n"),
+            Reply::Store(StoreReply::Success(StoreResult {
+                cas: Some(42),
+                size: Some(3),
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_store_reply_missing_expected_fields() {
+        let mut decoder = MetaReplyDecoder::new();
+        let mut src = BytesMut::from(&b"HD c42\r\n"[..]);
+
+        assert_eq!(
+            decoder.decode(&STORE_WITH_FIELDS, &mut src),
+            Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_store_codes_and_attributes() {
+        for input in [
+            b"EN\r\n".as_slice(),
+            b"HD f1\r\n".as_slice(),
+            b"HD c1 c2\r\n".as_slice(),
+        ] {
+            let mut decoder = MetaReplyDecoder::new();
+            let mut src = BytesMut::from(input);
+            assert!(decoder.decode(&STORE, &mut src).is_err(), "input={input:?}");
         }
     }
 
