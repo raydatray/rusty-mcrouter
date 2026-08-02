@@ -10,8 +10,8 @@ use crate::{
     meta::{KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan},
     request::{
         ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction,
-        ArithmeticTemporalInstructions, DeleteRequest, GetRequest, GetTemporalInstruction,
-        GetTemporalInstructions, Request, StoreMode, StoreRequest,
+        ArithmeticTemporalInstructions, DebugRequest, DeleteRequest, GetRequest,
+        GetTemporalInstruction, GetTemporalInstructions, Request, StoreMode, StoreRequest,
     },
 };
 
@@ -254,6 +254,7 @@ fn parse_command(
         Some(b"mg") => parse_get(tokens, key_frame),
         Some(b"md") => parse_delete(tokens, key_frame),
         Some(b"ma") => parse_arithmetic(tokens, key_frame),
+        Some(b"me") => parse_debug(tokens, key_frame),
         _ => Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error)),
     }
 }
@@ -778,6 +779,54 @@ fn parse_arithmetic<'a>(
             override_cas,
             temporal,
         }),
+        reply_plan,
+    })
+}
+
+fn parse_debug<'a>(
+    mut tokens: impl Iterator<Item = &'a [u8]>,
+    key_frame: Option<&Bytes>,
+) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
+    let raw_key = tokens
+        .next()
+        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+    let mut key_encoding = KeyEncoding::Text;
+    let mut seen = SeenFlags::default();
+
+    // `me` has no upstream token budget; see the `ma` note on termination.
+    for token in tokens {
+        let (&flag, argument) = token
+            .split_first()
+            .ok_or_else(|| recoverable_client_error(INVALID_FLAG))?;
+        if !flag.is_ascii_alphabetic() {
+            return Err(recoverable_client_error(INVALID_FLAG));
+        }
+        if !seen.insert(flag) {
+            return Err(recoverable_client_error(DUPLICATE_FLAG));
+        }
+
+        match flag {
+            b'b' => {
+                require_no_argument(argument)?;
+                key_encoding = KeyEncoding::Base64;
+            }
+            b'P' | b'L' => {
+                if argument.is_empty() {
+                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
+                }
+            }
+            _ => return Err(recoverable_client_error(INVALID_FLAG)),
+        }
+    }
+
+    let key = parse_key(raw_key, key_encoding, key_frame)?;
+    let reply_plan = MetaReplyPlan {
+        external_key: Some(key.clone_bytes()),
+        key_encoding,
+        ..MetaReplyPlan::default()
+    };
+    Ok(DecodedMetaCommand::Request {
+        request: Request::Debug(DebugRequest { key }),
         reply_plan,
     })
 }
@@ -1344,6 +1393,82 @@ mod tests {
     }
 
     #[test]
+    fn decodes_basic_debug() {
+        let DecodedMetaCommand::Request {
+            request: Request::Debug(request),
+            reply_plan,
+        } = decode(b"me key\r\n")
+        else {
+            panic!("expected debug request");
+        };
+
+        assert_eq!(request.key.as_bytes(), b"key");
+        assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+        assert_eq!(reply_plan.key_encoding, KeyEncoding::Text);
+        assert_eq!(reply_plan.output_order.iter().count(), 0);
+    }
+
+    #[test]
+    fn decodes_debug_at_every_split_point() {
+        let input = b"me /region/cluster/key Pproxy Lpath/\r\n";
+
+        for split in 0..=input.len() {
+            let mut decoder = MetaRequestDecoder::new();
+            let mut src = BytesMut::new();
+            src.extend_from_slice(&input[..split]);
+            if split < input.len() {
+                assert_eq!(decoder.decode(&mut src), Ok(None), "split={split}");
+                src.extend_from_slice(&input[split..]);
+            }
+
+            let DecodedMetaCommand::Request {
+                request: Request::Debug(request),
+                reply_plan,
+            } = decoder.decode(&mut src).unwrap().unwrap()
+            else {
+                panic!("expected debug request at split={split}");
+            };
+            assert_eq!(request.key.as_bytes(), b"/region/cluster/key");
+            assert_eq!(
+                reply_plan.external_key.as_deref(),
+                Some(b"/region/cluster/key".as_slice())
+            );
+            assert!(src.is_empty(), "split={split}");
+        }
+    }
+
+    #[test]
+    fn normalizes_base64_debug_key() {
+        let DecodedMetaCommand::Request {
+            request: Request::Debug(request),
+            reply_plan,
+        } = decode(b"me a2V5 b\r\n")
+        else {
+            panic!("expected debug request");
+        };
+
+        assert_eq!(request.key.as_bytes(), b"key");
+        assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+        assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
+    }
+
+    #[test]
+    fn rejects_invalid_debug_flags() {
+        assert_eq!(
+            decode_error(b"me key b b\r\n"),
+            recoverable_client_error(DUPLICATE_FLAG)
+        );
+        assert_eq!(
+            decode_error(b"me key q\r\n"),
+            recoverable_client_error(INVALID_FLAG)
+        );
+        assert_eq!(
+            decode_error(b"me key P\r\n"),
+            recoverable_client_error(BAD_COMMAND_LINE)
+        );
+    }
+
+    #[test]
     fn decodes_binary_store_payload_at_every_split_point() {
         let input = b"ms key 6\r\na\r\nb\0c\r\n";
 
@@ -1679,6 +1804,27 @@ mod tests {
         };
         assert!(request.return_value);
         assert_eq!(reply_plan.opaque.as_deref(), Some(b"tag".as_slice()));
+    }
+
+    #[test]
+    fn arithmetic_and_debug_have_no_flag_token_budget() {
+        // memcached parses `ma` and `me` on a path without the token budget;
+        // 30 flag tokens must fail on the duplicate, not on a budget.
+        let mut arithmetic = b"ma key ".to_vec();
+        arithmetic.extend_from_slice(&repeated_p_flags(30));
+        arithmetic.extend_from_slice(b"\r\n");
+        assert_eq!(
+            decode_error(&arithmetic),
+            recoverable_client_error(DUPLICATE_FLAG)
+        );
+
+        let mut debug = b"me key ".to_vec();
+        debug.extend_from_slice(&repeated_p_flags(30));
+        debug.extend_from_slice(b"\r\n");
+        assert_eq!(
+            decode_error(&debug),
+            recoverable_client_error(DUPLICATE_FLAG)
+        );
     }
 
     #[test]
