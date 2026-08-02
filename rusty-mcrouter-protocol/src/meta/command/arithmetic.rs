@@ -2,12 +2,12 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::meta::numbers::{parse_i32, parse_i64, parse_u64};
 use crate::meta::reply_decoder::{
     invalid_response, MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH,
 };
 use crate::meta::reply_encoder::{
-    reply_line_too_long, write_field, write_key_token, write_opaque, MetaReplyEncodeError,
+    reply_line_too_long, write_field, write_i64_field, write_key_token, write_opaque,
+    MetaReplyEncodeError,
 };
 use crate::meta::request_decoder::{
     bad_command_line, flag_error, parse_opaque, recoverable_client_error, require_hint_argument,
@@ -17,7 +17,9 @@ use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
     MetaRequestEncodeError,
 };
-use crate::meta::tokens::{flags, require_no_argument, split_tokens, FlagBudget};
+use crate::meta::tokens::{
+    flags, parse_i32, parse_i64, parse_u64, require_no_argument, split_tokens, FlagBudget,
+};
 use crate::meta::{
     wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_COMMAND_LINE_BYTES,
     MAX_REPLY_LINE_BYTES,
@@ -302,7 +304,7 @@ pub fn encode_reply(
                 write_field(out, b'c', result.cas, "CAS", success)?;
             }
             MetaOutputToken::Ttl => {
-                write_field(out, b't', result.ttl, "TTL", success)?;
+                write_i64_field(out, b't', result.ttl, "TTL", success)?;
             }
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
             MetaOutputToken::Key => write_key_token(plan, out)?,

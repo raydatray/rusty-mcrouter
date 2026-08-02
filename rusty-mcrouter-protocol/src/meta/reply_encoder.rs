@@ -167,17 +167,36 @@ pub fn write_key_token(
 /// Writes one ` <flag><value>` reply token. A `required` projection with no
 /// value is the reply/plan mismatch this encoder exists to catch; optional
 /// fields (arithmetic failure codes) are simply omitted.
-pub fn write_field<T: wire::WireInt>(
+pub fn write_field(
     out: &mut BytesMut,
     flag: u8,
-    value: Option<T>,
+    value: Option<u64>,
     name: &'static str,
     required: bool,
 ) -> Result<(), MetaReplyEncodeError> {
     match value {
         Some(value) => {
             wire::write_bare_flag(out, flag);
-            value.write(out);
+            wire::write_u64(out, value);
+            Ok(())
+        }
+        None if required => Err(MetaReplyEncodeError::MissingField(name)),
+        None => Ok(()),
+    }
+}
+
+/// [`write_field`] for the one signed reply token, `t<ttl>`.
+pub fn write_i64_field(
+    out: &mut BytesMut,
+    flag: u8,
+    value: Option<i64>,
+    name: &'static str,
+    required: bool,
+) -> Result<(), MetaReplyEncodeError> {
+    match value {
+        Some(value) => {
+            wire::write_bare_flag(out, flag);
+            wire::write_i64(out, value);
             Ok(())
         }
         None if required => Err(MetaReplyEncodeError::MissingField(name)),

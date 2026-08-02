@@ -12,8 +12,6 @@
 //! [`Reply`]: crate::Reply
 
 mod command;
-mod line_scanner;
-mod numbers;
 mod reply_decoder;
 mod reply_encoder;
 mod reply_expectation;

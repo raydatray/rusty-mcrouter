@@ -8,8 +8,7 @@ use crate::reply::ErrorReply;
 use crate::request::Request;
 
 use super::command;
-use super::line_scanner::{find_line, FindLine};
-use super::tokens::{split_tokens, FlagError};
+use super::tokens::{find_line, split_tokens, FindLine, FlagError};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
