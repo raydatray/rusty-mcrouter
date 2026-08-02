@@ -4,7 +4,9 @@ use thiserror::Error;
 
 use crate::{
     key::MAX_KEY_BYTES,
-    reply::{DeleteReply, ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply},
+    reply::{
+        ArithmeticReply, DeleteReply, ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply,
+    },
 };
 
 use super::{
@@ -40,6 +42,10 @@ impl MetaReplyEncoder {
                     Reply::Delete(DeleteReply::Success),
                     MetaQuietPolicy::SuppressSuccess
                 )
+                | (
+                    Reply::Arithmetic(ArithmeticReply::Success(_)),
+                    MetaQuietPolicy::SuppressSuccess
+                )
         ) {
             return Ok(ReplyEncodeStatus::Suppressed);
         }
@@ -49,6 +55,7 @@ impl MetaReplyEncoder {
             Reply::Get(reply) => encode_get(reply, plan, out),
             Reply::Store(reply) => encode_store(reply, plan, out),
             Reply::Delete(reply) => encode_delete(reply, plan, out),
+            Reply::Arithmetic(reply) => encode_arithmetic(reply, plan, out),
             Reply::Error(reply) => encode_error(reply, out),
             _ => Err(MetaReplyEncodeError::UnsupportedReply),
         };
@@ -243,6 +250,104 @@ fn encode_delete(
     finish_line(out, line_start)
 }
 
+fn encode_arithmetic(
+    reply: &ArithmeticReply,
+    plan: &MetaReplyPlan,
+    out: &mut BytesMut,
+) -> Result<(), MetaReplyEncodeError> {
+    let (code, result, success) = match reply {
+        ArithmeticReply::Success(result) => {
+            if result.value.is_some() {
+                (b"VA".as_slice(), result, true)
+            } else {
+                (b"HD".as_slice(), result, true)
+            }
+        }
+        ArithmeticReply::NotStored(result) => (b"NS".as_slice(), result, false),
+        ArithmeticReply::Exists(result) => (b"EX".as_slice(), result, false),
+        ArithmeticReply::NotFound(result) => (b"NF".as_slice(), result, false),
+    };
+    if !success && result.value.is_some() {
+        return Err(MetaReplyEncodeError::InvalidData(
+            "arithmetic failure contains a value",
+        ));
+    }
+
+    let mut value_digits = [0; 20];
+    let value_body = result
+        .value
+        .map(|value| format_u64(value, &mut value_digits));
+    let line_start = out.len();
+    out.extend_from_slice(code);
+    if let Some(value) = value_body {
+        out.extend_from_slice(b" ");
+        write_u64(out, value.len() as u64);
+    }
+
+    for token in plan.output_order.iter() {
+        match token {
+            MetaOutputToken::Cas => {
+                write_arithmetic_u64(out, b'c', result.cas, "CAS", success)?;
+            }
+            MetaOutputToken::Ttl => {
+                write_arithmetic_i64(out, b't', result.ttl, "TTL", success)?;
+            }
+            MetaOutputToken::Opaque => write_opaque(plan, out)?,
+            MetaOutputToken::Key => write_key(plan, out)?,
+            _ => {
+                return Err(MetaReplyEncodeError::InvalidData(
+                    "invalid arithmetic output token",
+                ));
+            }
+        }
+    }
+    finish_line(out, line_start)?;
+    if let Some(value) = value_body {
+        out.extend_from_slice(value);
+        out.extend_from_slice(b"\r\n");
+    }
+    Ok(())
+}
+
+fn write_arithmetic_u64(
+    out: &mut BytesMut,
+    flag: u8,
+    value: Option<u64>,
+    name: &'static str,
+    required: bool,
+) -> Result<(), MetaReplyEncodeError> {
+    match value {
+        Some(value) => {
+            write_bare_flag(out, flag);
+            write_u64(out, value);
+            Ok(())
+        }
+        None if required => Err(MetaReplyEncodeError::MissingField(name)),
+        None => Ok(()),
+    }
+}
+
+fn write_arithmetic_i64(
+    out: &mut BytesMut,
+    flag: u8,
+    value: Option<i64>,
+    name: &'static str,
+    required: bool,
+) -> Result<(), MetaReplyEncodeError> {
+    match value {
+        Some(value) => {
+            write_bare_flag(out, flag);
+            if value < 0 {
+                out.extend_from_slice(b"-");
+            }
+            write_u64(out, value.unsigned_abs());
+            Ok(())
+        }
+        None if required => Err(MetaReplyEncodeError::MissingField(name)),
+        None => Ok(()),
+    }
+}
+
 fn encode_error(reply: &ErrorReply, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
     let line_start = out.len();
     match reply {
@@ -349,8 +454,12 @@ fn write_bare_flag(out: &mut BytesMut, flag: u8) {
     out.extend_from_slice(&[b' ', flag]);
 }
 
-fn write_u64(out: &mut BytesMut, mut value: u64) {
+fn write_u64(out: &mut BytesMut, value: u64) {
     let mut digits = [0; 20];
+    out.extend_from_slice(format_u64(value, &mut digits));
+}
+
+fn format_u64(mut value: u64, digits: &mut [u8; 20]) -> &[u8] {
     let mut start = digits.len();
     loop {
         start -= 1;
@@ -360,7 +469,7 @@ fn write_u64(out: &mut BytesMut, mut value: u64) {
             break;
         }
     }
-    out.extend_from_slice(&digits[start..]);
+    &digits[start..]
 }
 
 fn finish_line(out: &mut BytesMut, line_start: usize) -> Result<(), MetaReplyEncodeError> {
@@ -378,7 +487,7 @@ mod tests {
     use super::*;
     use crate::{
         meta::{DecodedMetaCommand, MetaReplyDecoder, MetaRequestDecoder, MetaRequestEncoder},
-        reply::{DebugHit, DebugReply, StoreResult},
+        reply::{ArithmeticResult, DebugHit, DebugReply, StoreResult},
     };
 
     fn plan(input: &[u8]) -> MetaReplyPlan {
@@ -522,6 +631,87 @@ mod tests {
                 BytesMut::from(&b"NF Otag\r\n"[..]),
             )
         );
+    }
+
+    #[test]
+    fn encodes_arithmetic_header_and_value_success() {
+        let header_plan = plan(b"ma key Otag t c k\r\n");
+        let header = Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
+            value: None,
+            cas: Some(42),
+            ttl: Some(-1),
+        }));
+        assert_eq!(
+            encode(&header, &header_plan).unwrap(),
+            (
+                ReplyEncodeStatus::Written,
+                BytesMut::from(&b"HD Otag t-1 c42 kkey\r\n"[..]),
+            )
+        );
+
+        let value_plan = plan(b"ma key v c\r\n");
+        let value = Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
+            value: Some(u64::MAX),
+            cas: Some(43),
+            ttl: None,
+        }));
+        assert_eq!(
+            encode(&value, &value_plan).unwrap(),
+            (
+                ReplyEncodeStatus::Written,
+                BytesMut::from(&b"VA 20 c43\r\n18446744073709551615\r\n"[..]),
+            )
+        );
+    }
+
+    #[test]
+    fn arithmetic_failures_restore_local_and_available_tokens() {
+        let plan = plan(b"ma key Otag t c k\r\n");
+        let reply = Reply::Arithmetic(ArithmeticReply::Exists(ArithmeticResult {
+            value: None,
+            cas: Some(41),
+            ttl: None,
+        }));
+
+        assert_eq!(
+            encode(&reply, &plan).unwrap(),
+            (
+                ReplyEncodeStatus::Written,
+                BytesMut::from(&b"EX Otag c41 kkey\r\n"[..]),
+            )
+        );
+    }
+
+    #[test]
+    fn suppresses_only_successful_quiet_arithmetic_reply() {
+        let plan = plan(b"ma key q Otag\r\n");
+        let success = Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult::default()));
+        assert_eq!(
+            encode(&success, &plan).unwrap(),
+            (ReplyEncodeStatus::Suppressed, BytesMut::new())
+        );
+
+        let failure = Reply::Arithmetic(ArithmeticReply::NotFound(ArithmeticResult::default()));
+        assert_eq!(
+            encode(&failure, &plan).unwrap(),
+            (
+                ReplyEncodeStatus::Written,
+                BytesMut::from(&b"NF Otag\r\n"[..]),
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_arithmetic_success_missing_projected_fields_atomically() {
+        let plan = plan(b"ma key c t\r\n");
+        let reply = Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult::default()));
+        let mut out = BytesMut::from(&b"existing"[..]);
+
+        assert_eq!(
+            MetaReplyEncoder::new().encode(&reply, &plan, &mut out),
+            Err(MetaReplyEncodeError::MissingField("CAS"))
+        );
+        assert_eq!(out, b"existing".as_slice());
     }
 
     #[test]
@@ -739,6 +929,45 @@ mod tests {
         assert_eq!(
             frontend_output,
             b"HD Otag k/region/cluster/key\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn completes_arithmetic_vertical_slice() {
+        let mut request_decoder = MetaRequestDecoder::new();
+        let mut frontend_input = BytesMut::from(&b"ma /region/cluster/key Otag t c v k D2\r\n"[..]);
+        let DecodedMetaCommand::Request {
+            request,
+            reply_plan,
+        } = request_decoder
+            .decode(&mut frontend_input)
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected request");
+        };
+
+        let mut backend_output = BytesMut::new();
+        let expectation = MetaRequestEncoder::new()
+            .encode(&request, &mut backend_output)
+            .unwrap();
+        assert_eq!(backend_output, b"ma key v c D2 t\r\n".as_slice());
+
+        let mut reply_decoder = MetaReplyDecoder::new();
+        let mut backend_input = BytesMut::from(&b"VA 2 c42 t60\r\n43\r\n"[..]);
+        let reply = reply_decoder
+            .decode(&expectation, &mut backend_input)
+            .unwrap()
+            .unwrap();
+
+        let mut frontend_output = BytesMut::new();
+        assert_eq!(
+            MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
+            Ok(ReplyEncodeStatus::Written)
+        );
+        assert_eq!(
+            frontend_output,
+            b"VA 2 Otag t60 c42 k/region/cluster/key\r\n43\r\n".as_slice()
         );
     }
 }
