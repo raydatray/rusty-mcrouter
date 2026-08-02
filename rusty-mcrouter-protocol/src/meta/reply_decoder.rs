@@ -163,10 +163,7 @@ fn parse_line(
     }
 }
 
-fn parse_debug_line(
-    expected_key: &Bytes,
-    line: &[u8],
-) -> Result<ParsedLine, MetaReplyDecodeError> {
+fn parse_debug_line(expected_key: &Bytes, line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
     let mut tokens = split_tokens(line);
     match tokens.next() {
         Some(b"EN") => {
@@ -486,7 +483,6 @@ fn require_no_argument(argument: &[u8]) -> Result<(), MetaReplyDecodeError> {
         Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
     }
 }
-
 
 fn parse_usize(raw: &[u8]) -> Result<usize, MetaReplyDecodeError> {
     numbers::parse_usize(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))

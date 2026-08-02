@@ -4,8 +4,7 @@ use bytes::{Bytes, BytesMut};
 use rusty_mcrouter_core::DynRoute;
 use rusty_mcrouter_net::NetError;
 use rusty_mcrouter_protocol::meta::{
-    DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError,
-    MetaRequestDecoder,
+    DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
 };
 use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
@@ -244,9 +243,9 @@ impl Connection {
                         // the reply cannot satisfy this slot's plan (for
                         // example a backend omitted a projected field):
                         // degrade this slot only, never the connection.
-                        let fallback = Reply::Error(ErrorReply::Server(Some(
-                            Bytes::from_static(b"proxy reply encoding failed"),
-                        )));
+                        let fallback = Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
+                            b"proxy reply encoding failed",
+                        ))));
                         let _ = self.encoder.encode(
                             &fallback,
                             &MetaReplyPlan::default(),

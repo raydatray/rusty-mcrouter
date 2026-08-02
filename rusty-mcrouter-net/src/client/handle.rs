@@ -195,10 +195,7 @@ mod tests {
         let client = Client::connect(addr).await.unwrap();
 
         let bad = parse_request(b"mg /region/cluster/ v\r\n");
-        assert!(matches!(
-            client.send(bad).await,
-            Err(NetError::Encode(_))
-        ));
+        assert!(matches!(client.send(bad).await, Err(NetError::Encode(_))));
 
         assert_eq!(
             client.send(get(b"ok")).await.unwrap(),

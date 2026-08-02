@@ -660,7 +660,9 @@ fn parse_arithmetic<'a>(
                     .map_err(capacity_error)?;
             }
             b'T' => temporal
-                .push(ArithmeticTemporalInstruction::UpdateTtl(parse_i32(argument)?))
+                .push(ArithmeticTemporalInstruction::UpdateTtl(parse_i32(
+                    argument,
+                )?))
                 .map_err(capacity_error)?,
             b'v' => {
                 require_no_argument(argument)?;

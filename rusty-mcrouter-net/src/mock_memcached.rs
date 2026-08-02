@@ -17,8 +17,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use rusty_mcrouter_protocol::meta::{
-    DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError,
-    MetaRequestDecoder,
+    DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
 };
 use rusty_mcrouter_protocol::reply::{
     ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, DeleteReply, ErrorReply,
@@ -344,7 +343,10 @@ impl MockMcStore {
                 field(b"exp", ttl_remaining(item.expiry).to_string()),
                 field(b"la", "0".to_string()),
                 field(b"cas", item.cas.to_string()),
-                field(b"fetch", if item.fetched { "yes" } else { "no" }.to_string()),
+                field(
+                    b"fetch",
+                    if item.fetched { "yes" } else { "no" }.to_string(),
+                ),
                 field(b"cls", "1".to_string()),
                 field(b"size", item.data.len().to_string()),
             ],
@@ -429,9 +431,9 @@ async fn handle_connection(
                         store.lock().unwrap().apply(request)
                     };
                     if encoder.encode(&reply, &reply_plan, &mut output).is_err() {
-                        let fallback = Reply::Error(ErrorReply::Server(Some(
-                            Bytes::from_static(b"mock reply encoding failed"),
-                        )));
+                        let fallback = Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
+                            b"mock reply encoding failed",
+                        ))));
                         let _ = encoder.encode(&fallback, &MetaReplyPlan::default(), &mut output);
                     }
                 }
@@ -525,7 +527,10 @@ mod tests {
     #[test]
     fn get_miss_and_bare_hit() {
         let mut store = MockMcStore::default();
-        assert_eq!(store.apply(req(b"mg nope v\r\n")), Reply::Get(GetReply::Miss));
+        assert_eq!(
+            store.apply(req(b"mg nope v\r\n")),
+            Reply::Get(GetReply::Miss)
+        );
 
         store.apply(req(b"ms k 1\r\nx\r\n"));
         assert_eq!(hit(store.apply(req(b"mg k\r\n"))), GetHit::default());
@@ -608,7 +613,10 @@ mod tests {
             store.apply(req(b"md k C999\r\n")),
             Reply::Delete(DeleteReply::Exists)
         );
-        assert_eq!(store.apply(req(b"md k\r\n")), Reply::Delete(DeleteReply::Success));
+        assert_eq!(
+            store.apply(req(b"md k\r\n")),
+            Reply::Delete(DeleteReply::Success)
+        );
         assert_eq!(
             store.apply(req(b"md k\r\n")),
             Reply::Delete(DeleteReply::NotFound)
@@ -630,7 +638,10 @@ mod tests {
     fn delete_x_leaves_an_empty_tombstone() {
         let mut store = MockMcStore::default();
         store.apply(req(b"ms k 5\r\nhello\r\n"));
-        assert_eq!(store.apply(req(b"md k x\r\n")), Reply::Delete(DeleteReply::Success));
+        assert_eq!(
+            store.apply(req(b"md k x\r\n")),
+            Reply::Delete(DeleteReply::Success)
+        );
         assert_eq!(
             hit(store.apply(req(b"mg k v s\r\n"))),
             GetHit {
@@ -689,7 +700,10 @@ mod tests {
     #[test]
     fn debug_reports_metadata() {
         let mut store = MockMcStore::default();
-        assert_eq!(store.apply(req(b"me missing\r\n")), Reply::Debug(DebugReply::Miss));
+        assert_eq!(
+            store.apply(req(b"me missing\r\n")),
+            Reply::Debug(DebugReply::Miss)
+        );
 
         store.apply(req(b"ms k 3\r\nabc\r\n"));
         let Reply::Debug(DebugReply::Hit(hit)) = store.apply(req(b"me k\r\n")) else {
@@ -713,7 +727,10 @@ mod tests {
     fn hit_state_and_lru_bump() {
         let mut store = MockMcStore::default();
         store.apply(req(b"ms k 1\r\nx\r\n"));
-        assert_eq!(hit(store.apply(req(b"mg k h u\r\n"))).hit_before, Some(false));
+        assert_eq!(
+            hit(store.apply(req(b"mg k h u\r\n"))).hit_before,
+            Some(false)
+        );
         // `u` above suppressed the bump, so the state is still fresh.
         assert_eq!(hit(store.apply(req(b"mg k h\r\n"))).hit_before, Some(false));
         assert_eq!(hit(store.apply(req(b"mg k h\r\n"))).hit_before, Some(true));
