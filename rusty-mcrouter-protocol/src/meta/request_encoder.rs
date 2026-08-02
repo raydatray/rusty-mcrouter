@@ -76,7 +76,7 @@ fn encode_get(
 ) -> Result<GetSuccessShape, MetaRequestEncodeError> {
     let line_start = out.len();
     out.extend_from_slice(b"mg ");
-    let key_is_base64 = write_key(out, &request.key)?;
+    let key_is_base64 = write_backend_key(out, &request.key)?;
 
     if key_is_base64 {
         wire::write_bare_flag(out, b'b');
@@ -121,7 +121,7 @@ fn encode_get(
         }
     }
 
-    finish_line(out, line_start)?;
+    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
     Ok(match (request.return_value, request.check_cas.is_some()) {
         (false, _) => GetSuccessShape::Header,
         (true, false) => GetSuccessShape::Value,
@@ -138,7 +138,7 @@ fn encode_store(request: &StoreRequest, out: &mut BytesMut) -> Result<(), MetaRe
 
     let line_start = out.len();
     out.extend_from_slice(b"ms ");
-    let key_is_base64 = write_key(out, &request.key)?;
+    let key_is_base64 = write_backend_key(out, &request.key)?;
     out.extend_from_slice(b" ");
     wire::write_u64(out, request.value.len() as u64);
 
@@ -177,7 +177,7 @@ fn encode_store(request: &StoreRequest, out: &mut BytesMut) -> Result<(), MetaRe
         write_i32_flag(out, b'N', ttl);
     }
 
-    finish_line(out, line_start)?;
+    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
     out.extend_from_slice(&request.value);
     out.extend_from_slice(b"\r\n");
     Ok(())
@@ -189,7 +189,7 @@ fn encode_delete(
 ) -> Result<(), MetaRequestEncodeError> {
     let line_start = out.len();
     out.extend_from_slice(b"md ");
-    let key_is_base64 = write_key(out, &request.key)?;
+    let key_is_base64 = write_backend_key(out, &request.key)?;
 
     if key_is_base64 {
         wire::write_bare_flag(out, b'b');
@@ -213,7 +213,7 @@ fn encode_delete(
         wire::write_bare_flag(out, b'x');
     }
 
-    finish_line(out, line_start)?;
+    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
     Ok(())
 }
 
@@ -223,7 +223,7 @@ fn encode_arithmetic(
 ) -> Result<(), MetaRequestEncodeError> {
     let line_start = out.len();
     out.extend_from_slice(b"ma ");
-    let key_is_base64 = write_key(out, &request.key)?;
+    let key_is_base64 = write_backend_key(out, &request.key)?;
 
     if key_is_base64 {
         wire::write_bare_flag(out, b'b');
@@ -257,7 +257,7 @@ fn encode_arithmetic(
         }
     }
 
-    finish_line(out, line_start)?;
+    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
     Ok(())
 }
 
@@ -267,18 +267,20 @@ fn encode_debug(
 ) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
     let line_start = out.len();
     out.extend_from_slice(b"me ");
-    let key_is_base64 = write_key(out, &request.key)?;
+    let key_is_base64 = write_backend_key(out, &request.key)?;
     if key_is_base64 {
         wire::write_bare_flag(out, b'b');
     }
-    finish_line(out, line_start)?;
+    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
 
     Ok(MetaReplyExpectation::Debug {
         key: request.key.clone_without_routing_prefix(),
     })
 }
 
-fn write_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
+/// Writes the backend form of `key`: the routing prefix is stripped, and a
+/// binary key is base64-encoded (the returned bool asks for the `b` flag).
+fn write_backend_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
     let key = key.key_without_routing_prefix();
     if key.is_empty() {
         return Err(MetaRequestEncodeError::EmptyBackendKey);
@@ -318,15 +320,10 @@ fn write_mode_flag(out: &mut BytesMut, mode: u8) {
     out.extend_from_slice(&[mode]);
 }
 
-/// Enforces the command-line limit, then terminates the line.
-fn finish_line(out: &mut BytesMut, line_start: usize) -> Result<(), MetaRequestEncodeError> {
-    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
-        return Err(MetaRequestEncodeError::FrameTooLarge {
-            maximum: MAX_COMMAND_LINE_BYTES,
-        });
+fn command_line_too_long(error: wire::LineTooLong) -> MetaRequestEncodeError {
+    MetaRequestEncodeError::FrameTooLarge {
+        maximum: error.maximum,
     }
-    out.extend_from_slice(b"\r\n");
-    Ok(())
 }
 
 #[cfg(test)]

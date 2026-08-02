@@ -46,6 +46,19 @@ pub(super) fn flags<'a>(
     })
 }
 
+/// A bare flag carried an argument.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct UnexpectedArgument;
+
+/// Validates that a bare flag token carries no argument.
+pub(super) fn require_no_argument(argument: &[u8]) -> Result<(), UnexpectedArgument> {
+    if argument.is_empty() {
+        Ok(())
+    } else {
+        Err(UnexpectedArgument)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum FlagBudget {
     /// At most this many flag tokens; one more is an error.

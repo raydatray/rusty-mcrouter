@@ -8,8 +8,9 @@ use crate::reply::{
 };
 
 use super::line_scanner::{scan_line, LineScan};
-use super::tokens::{flags, split_tokens, FlagBudget};
-use super::{numbers, GetSuccessShape, MetaReplyExpectation};
+use super::numbers::{parse_i64, parse_u32, parse_u64, parse_usize};
+use super::tokens::{flags, require_no_argument, split_tokens, FlagBudget};
+use super::{GetSuccessShape, MetaReplyExpectation};
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_REPLY_VALUE_BYTES: usize = 1024 * 1024;
@@ -116,7 +117,8 @@ impl MetaReplyDecoder {
                             Ok(Some(Reply::Get(GetReply::Hit(hit))))
                         }
                         PendingValue::Arithmetic(mut result) => {
-                            result.value = Some(parse_u64(&frame[..length])?);
+                            result.value =
+                                Some(parse_u64(&frame[..length]).map_err(invalid_response)?);
                             Ok(Some(Reply::Arithmetic(ArithmeticReply::Success(result))))
                         }
                     };
@@ -241,7 +243,7 @@ fn parse_arithmetic_line(
             let length = tokens
                 .next()
                 .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-                .and_then(parse_usize)?;
+                .and_then(|raw| parse_usize(raw).map_err(invalid_response))?;
             if length > MAX_REPLY_VALUE_BYTES {
                 return Err(MetaReplyDecodeError::ValueTooLarge {
                     maximum: MAX_REPLY_VALUE_BYTES,
@@ -273,12 +275,10 @@ fn parse_arithmetic_attributes<'a>(
     let mut result = ArithmeticResult::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        // a misbehaving backend gets no diagnostics, just a torn-down connection
-        let (flag, argument) =
-            flag.map_err(|_| MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+        let (flag, argument) = flag.map_err(invalid_response)?;
         match flag {
-            b'c' => result.cas = Some(parse_u64(argument)?),
-            b't' => result.ttl = Some(parse_i64(argument)?),
+            b'c' => result.cas = Some(parse_u64(argument).map_err(invalid_response)?),
+            b't' => result.ttl = Some(parse_i64(argument).map_err(invalid_response)?),
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
         }
     }
@@ -339,7 +339,7 @@ fn parse_get_line(shape: GetSuccessShape, line: &[u8]) -> Result<ParsedLine, Met
             let length = tokens
                 .next()
                 .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-                .and_then(parse_usize)?;
+                .and_then(|raw| parse_usize(raw).map_err(invalid_response))?;
             if length > MAX_REPLY_VALUE_BYTES {
                 return Err(MetaReplyDecodeError::ValueTooLarge {
                     maximum: MAX_REPLY_VALUE_BYTES,
@@ -385,12 +385,10 @@ fn parse_store_attributes<'a>(
     let mut result = StoreResult::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        // a misbehaving backend gets no diagnostics, just a torn-down connection
-        let (flag, argument) =
-            flag.map_err(|_| MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+        let (flag, argument) = flag.map_err(invalid_response)?;
         match flag {
-            b'c' => result.cas = Some(parse_u64(argument)?),
-            b's' => result.size = Some(parse_u64(argument)?),
+            b'c' => result.cas = Some(parse_u64(argument).map_err(invalid_response)?),
+            b's' => result.size = Some(parse_u64(argument).map_err(invalid_response)?),
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
         }
     }
@@ -436,14 +434,12 @@ fn parse_get_attributes<'a>(
     let mut hit = GetHit::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        // a misbehaving backend gets no diagnostics, just a torn-down connection
-        let (flag, argument) =
-            flag.map_err(|_| MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+        let (flag, argument) = flag.map_err(invalid_response)?;
         match flag {
-            b'c' => hit.cas = Some(parse_u64(argument)?),
-            b'f' => hit.client_flags = Some(parse_u32(argument)?),
-            b's' => hit.size = Some(parse_u64(argument)?),
-            b't' => hit.ttl = Some(parse_i64(argument)?),
+            b'c' => hit.cas = Some(parse_u64(argument).map_err(invalid_response)?),
+            b'f' => hit.client_flags = Some(parse_u32(argument).map_err(invalid_response)?),
+            b's' => hit.size = Some(parse_u64(argument).map_err(invalid_response)?),
+            b't' => hit.ttl = Some(parse_i64(argument).map_err(invalid_response)?),
             b'h' => {
                 hit.hit_before = Some(match argument {
                     b"0" => false,
@@ -451,23 +447,23 @@ fn parse_get_attributes<'a>(
                     _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
                 });
             }
-            b'l' => hit.last_access_seconds = Some(parse_u64(argument)?),
+            b'l' => hit.last_access_seconds = Some(parse_u64(argument).map_err(invalid_response)?),
             b'W' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(invalid_response)?;
                 if hit.recache != RecacheState::None {
                     return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
                 }
                 hit.recache = RecacheState::Won;
             }
             b'Z' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(invalid_response)?;
                 if hit.recache != RecacheState::None {
                     return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
                 }
                 hit.recache = RecacheState::AlreadyWon;
             }
             b'X' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(invalid_response)?;
                 hit.stale = true;
             }
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
@@ -476,28 +472,10 @@ fn parse_get_attributes<'a>(
     Ok(hit)
 }
 
-fn require_no_argument(argument: &[u8]) -> Result<(), MetaReplyDecodeError> {
-    if argument.is_empty() {
-        Ok(())
-    } else {
-        Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-    }
-}
-
-fn parse_usize(raw: &[u8]) -> Result<usize, MetaReplyDecodeError> {
-    numbers::parse_usize(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-}
-
-fn parse_u64(raw: &[u8]) -> Result<u64, MetaReplyDecodeError> {
-    numbers::parse_u64(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-}
-
-fn parse_u32(raw: &[u8]) -> Result<u32, MetaReplyDecodeError> {
-    numbers::parse_u32(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-}
-
-fn parse_i64(raw: &[u8]) -> Result<i64, MetaReplyDecodeError> {
-    numbers::parse_i64(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
+/// Maps any token-level failure to the one reply-decode error: a
+/// misbehaving backend gets no diagnostics, just a torn-down connection.
+fn invalid_response<E>(_: E) -> MetaReplyDecodeError {
+    MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
