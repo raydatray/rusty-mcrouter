@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     key::{Key, MAX_KEY_BYTES},
-    request::{GetRequest, GetTemporalInstruction, Request, StoreMode, StoreRequest},
+    request::{DeleteRequest, GetRequest, GetTemporalInstruction, Request, StoreMode, StoreRequest},
 };
 
 use super::{GetSuccessShape, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES, MAX_VALUE_BYTES};
@@ -33,6 +33,9 @@ impl MetaRequestEncoder {
                     cas: request.return_cas,
                     size: request.return_size,
                 })
+            }
+            Request::Delete(request) => {
+                encode_delete(request, out).map(|()| MetaReplyExpectation::Delete)
             }
             _ => Err(MetaRequestEncodeError::UnsupportedRequest),
         };
@@ -184,6 +187,45 @@ fn encode_store(request: &StoreRequest, out: &mut BytesMut) -> Result<(), MetaRe
     Ok(())
 }
 
+fn encode_delete(
+    request: &DeleteRequest,
+    out: &mut BytesMut,
+) -> Result<(), MetaRequestEncodeError> {
+    let line_start = out.len();
+    out.extend_from_slice(b"md ");
+    let key_is_base64 = write_key(out, &request.key)?;
+
+    if key_is_base64 {
+        write_bare_flag(out, b'b');
+    }
+    if let Some(cas) = request.compare_cas {
+        write_u64_flag(out, b'C', cas);
+    }
+    if let Some(cas) = request.override_cas {
+        write_u64_flag(out, b'E', cas);
+    }
+    if let Some(flags) = request.client_flags {
+        write_u64_flag(out, b'F', u64::from(flags));
+    }
+    if request.invalidate {
+        write_bare_flag(out, b'I');
+    }
+    if let Some(ttl) = request.ttl {
+        write_i32_flag(out, b'T', ttl);
+    }
+    if request.remove_value {
+        write_bare_flag(out, b'x');
+    }
+
+    if out.len() - line_start + 2 > MAX_COMMAND_LINE_BYTES {
+        return Err(MetaRequestEncodeError::FrameTooLarge {
+            maximum: MAX_COMMAND_LINE_BYTES,
+        });
+    }
+    out.extend_from_slice(b"\r\n");
+    Ok(())
+}
+
 fn write_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
     let key = key.key_without_routing_prefix();
     if key.is_empty() {
@@ -324,6 +366,35 @@ mod tests {
     }
 
     #[test]
+    fn returns_delete_reply_expectation() {
+        let request = parse(b"md key\r\n");
+        let mut out = BytesMut::new();
+
+        assert_eq!(
+            MetaRequestEncoder::new().encode(&request, &mut out),
+            Ok(MetaReplyExpectation::Delete)
+        );
+    }
+
+    #[test]
+    fn strips_delete_frontend_metadata_and_routing_prefix() {
+        let request =
+            parse(b"md /region/cluster/key C42 E43 F7 I k Otag q T60 x Pproxy Lpath/\r\n");
+
+        assert_eq!(
+            encode(&request).unwrap(),
+            b"md key C42 E43 F7 I T60 x\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn base64_encodes_binary_delete_key() {
+        let request = parse(b"md AAE= b\r\n");
+
+        assert_eq!(encode(&request).unwrap(), b"md AAE= b\r\n".as_slice());
+    }
+
+    #[test]
     fn returns_store_reply_expectation() {
         let request = parse(b"ms key 3\r\nfoo\r\n");
         let mut out = BytesMut::new();
@@ -371,6 +442,12 @@ mod tests {
             encode(&request).unwrap(),
             b"ms AAE= 4 b\r\na\0b\n\r\n".as_slice()
         );
+    }
+
+    #[test]
+    fn encodes_basic_delete() {
+        let request = parse(b"md key\r\n");
+        assert_eq!(encode(&request).unwrap(), b"md key\r\n".as_slice());
     }
 
     #[test]
