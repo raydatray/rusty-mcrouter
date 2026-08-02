@@ -1232,6 +1232,7 @@ dependencies = [
 name = "rusty-mcrouter-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bytes",
  "thiserror 2.0.18",
 ]
