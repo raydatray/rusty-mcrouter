@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     key::MAX_KEY_BYTES,
-    reply::{ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply},
+    reply::{DeleteReply, ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply},
 };
 
 use super::{
@@ -36,6 +36,10 @@ impl MetaReplyEncoder {
                     Reply::Store(StoreReply::Success(_)),
                     MetaQuietPolicy::SuppressSuccess
                 )
+                | (
+                    Reply::Delete(DeleteReply::Success),
+                    MetaQuietPolicy::SuppressSuccess
+                )
         ) {
             return Ok(ReplyEncodeStatus::Suppressed);
         }
@@ -44,6 +48,7 @@ impl MetaReplyEncoder {
         let result = match reply {
             Reply::Get(reply) => encode_get(reply, plan, out),
             Reply::Store(reply) => encode_store(reply, plan, out),
+            Reply::Delete(reply) => encode_delete(reply, plan, out),
             Reply::Error(reply) => encode_error(reply, out),
             _ => Err(MetaReplyEncodeError::UnsupportedReply),
         };
@@ -203,6 +208,34 @@ fn encode_store(
             _ => {
                 return Err(MetaReplyEncodeError::InvalidData(
                     "invalid store output token",
+                ));
+            }
+        }
+    }
+    finish_line(out, line_start)
+}
+
+fn encode_delete(
+    reply: &DeleteReply,
+    plan: &MetaReplyPlan,
+    out: &mut BytesMut,
+) -> Result<(), MetaReplyEncodeError> {
+    let code = match reply {
+        DeleteReply::Success => b"HD".as_slice(),
+        DeleteReply::NotStored => b"NS".as_slice(),
+        DeleteReply::Exists => b"EX".as_slice(),
+        DeleteReply::NotFound => b"NF".as_slice(),
+    };
+
+    let line_start = out.len();
+    out.extend_from_slice(code);
+    for token in plan.output_order.iter() {
+        match token {
+            MetaOutputToken::Opaque => write_opaque(plan, out)?,
+            MetaOutputToken::Key => write_key(plan, out)?,
+            _ => {
+                return Err(MetaReplyEncodeError::InvalidData(
+                    "invalid delete output token",
                 ));
             }
         }
@@ -460,6 +493,38 @@ mod tests {
     }
 
     #[test]
+    fn encodes_all_delete_outcomes_with_local_tokens() {
+        let plan = plan(b"md key Otag k\r\n");
+        for (reply, expected) in [
+            (DeleteReply::Success, b"HD Otag kkey\r\n".as_slice()),
+            (DeleteReply::NotStored, b"NS Otag kkey\r\n".as_slice()),
+            (DeleteReply::Exists, b"EX Otag kkey\r\n".as_slice()),
+            (DeleteReply::NotFound, b"NF Otag kkey\r\n".as_slice()),
+        ] {
+            assert_eq!(
+                encode(&Reply::Delete(reply), &plan).unwrap(),
+                (ReplyEncodeStatus::Written, BytesMut::from(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn suppresses_only_successful_quiet_delete_reply() {
+        let plan = plan(b"md key q Otag\r\n");
+        assert_eq!(
+            encode(&Reply::Delete(DeleteReply::Success), &plan).unwrap(),
+            (ReplyEncodeStatus::Suppressed, BytesMut::new())
+        );
+        assert_eq!(
+            encode(&Reply::Delete(DeleteReply::NotFound), &plan).unwrap(),
+            (
+                ReplyEncodeStatus::Written,
+                BytesMut::from(&b"NF Otag\r\n"[..]),
+            )
+        );
+    }
+
+    #[test]
     fn suppresses_quiet_get_miss_without_touching_output() {
         let plan = plan(b"mg key q Otag\r\n");
         let mut out = BytesMut::from(&b"existing"[..]);
@@ -635,6 +700,45 @@ mod tests {
         assert_eq!(
             frontend_output,
             b"HD Otag s3 c42 k/region/cluster/key\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn completes_delete_vertical_slice() {
+        let mut request_decoder = MetaRequestDecoder::new();
+        let mut frontend_input = BytesMut::from(&b"md /region/cluster/key Otag k C42\r\n"[..]);
+        let DecodedMetaCommand::Request {
+            request,
+            reply_plan,
+        } = request_decoder
+            .decode(&mut frontend_input)
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected request");
+        };
+
+        let mut backend_output = BytesMut::new();
+        let expectation = MetaRequestEncoder::new()
+            .encode(&request, &mut backend_output)
+            .unwrap();
+        assert_eq!(backend_output, b"md key C42\r\n".as_slice());
+
+        let mut reply_decoder = MetaReplyDecoder::new();
+        let mut backend_input = BytesMut::from(&b"HD\r\n"[..]);
+        let reply = reply_decoder
+            .decode(&expectation, &mut backend_input)
+            .unwrap()
+            .unwrap();
+
+        let mut frontend_output = BytesMut::new();
+        assert_eq!(
+            MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
+            Ok(ReplyEncodeStatus::Written)
+        );
+        assert_eq!(
+            frontend_output,
+            b"HD Otag k/region/cluster/key\r\n".as_slice()
         );
     }
 }
