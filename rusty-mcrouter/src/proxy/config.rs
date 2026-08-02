@@ -18,7 +18,10 @@ pub struct ProxyThreadConfig {
 #[derive(Clone, Copy)]
 pub enum ThreadMode {
     SameThread,
+    // todo - thread modes: constructed once dispatch policy is configurable
+    #[allow(dead_code)]
     FixedRemote { proxy_id: usize },
+    #[allow(dead_code)]
     AffinitizedRemote,
 }
 

@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::{mpsc, oneshot};
 
@@ -28,15 +29,21 @@ impl ProxyHandle {
             .await
             .is_err()
         {
-            return Reply::ServerError(Bytes::from_static(b"proxy unavailable"));
+            return server_error(b"proxy unavailable");
         }
 
         reply_rx
             .await
-            .unwrap_or_else(|_| Reply::ServerError(Bytes::from_static(b"proxy dropped request")))
+            .unwrap_or_else(|_| server_error(b"proxy dropped request"))
     }
 
+    // todo - graceful shutdown: unused until the binary handles signals
+    #[allow(dead_code)]
     pub async fn shutdown(&self) {
         let _ = self.tx.send(ProxyMessage::Shutdown).await;
     }
+}
+
+fn server_error(message: &'static [u8]) -> Reply {
+    Reply::Error(ErrorReply::Server(Some(Bytes::from_static(message))))
 }

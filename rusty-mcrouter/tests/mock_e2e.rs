@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use rusty_mcrouter_net::mock_memcached::{spawn_failing_mock_memcached, spawn_mock_memcached};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -52,14 +53,7 @@ async fn start_router(config_body: &str, tag: u16) -> Stack {
 async fn start_stack() -> Stack {
     let backend_addr = spawn_mock_memcached().await;
 
-    let mut seed = TcpStream::connect(backend_addr).await.unwrap();
-    seed.write_all(b"set seeded_foo 0 0 3\r\nbar\r\n")
-        .await
-        .unwrap();
-    let mut buf = [0u8; 32];
-    let n = seed.read(&mut buf).await.unwrap();
-    assert_eq!(&buf[..n], b"STORED\r\n");
-    drop(seed);
+    exchange(backend_addr, b"ms seeded_foo 3\r\nbar\r\n", b"HD\r\n").await;
 
     let config_body = format!(
         r#"{{ "pools": {{ "memcached": {{ "servers": ["{}"] }} }}, "route": "PoolRoute|memcached" }}"#,
@@ -68,77 +62,107 @@ async fn start_stack() -> Stack {
     start_router(&config_body, backend_addr.port()).await
 }
 
-async fn round_trip(addr: SocketAddr, request: &[u8]) -> Vec<u8> {
+/// Writes `request` and asserts the connection yields exactly `expected`,
+/// reassembling partial reads until the expected length arrives.
+async fn exchange(addr: SocketAddr, request: &[u8], expected: &[u8]) {
     let mut conn = TcpStream::connect(addr).await.unwrap();
     conn.write_all(request).await.unwrap();
-    let mut buf = vec![0u8; 256];
-    let n = conn.read(&mut buf).await.unwrap();
-    buf.truncate(n);
-    buf
+
+    let mut received = Vec::with_capacity(expected.len());
+    let deadline = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut chunk = [0u8; 4096];
+        while received.len() < expected.len() {
+            let n = conn.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&chunk[..n]);
+        }
+    });
+    deadline.await.expect("timed out waiting for reply bytes");
+    assert_eq!(
+        received,
+        expected,
+        "request {:?}",
+        String::from_utf8_lossy(request)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_seeded_key_returns_value() {
     let fx = start_stack().await;
-    let resp = round_trip(fx.router_addr, b"get seeded_foo\r\n").await;
-    assert_eq!(resp, b"VALUE seeded_foo 0 3\r\nbar\r\nEND\r\n");
+    exchange(fx.router_addr, b"mg seeded_foo v\r\n", b"VA 3\r\nbar\r\n").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn get_missing_key_returns_end() {
+async fn get_missing_key_returns_miss() {
     let fx = start_stack().await;
-    let resp = round_trip(fx.router_addr, b"get mock_e2e_missing\r\n").await;
-    assert_eq!(resp, b"END\r\n");
+    exchange(fx.router_addr, b"mg mock_e2e_missing v\r\n", b"EN\r\n").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn set_then_get_round_trip() {
+async fn store_then_get_round_trip() {
     let fx = start_stack().await;
-    assert_eq!(
-        round_trip(fx.router_addr, b"set me2e_k 9 0 5\r\nworld\r\n").await,
-        b"STORED\r\n"
-    );
-    assert_eq!(
-        round_trip(fx.router_addr, b"get me2e_k\r\n").await,
-        b"VALUE me2e_k 9 5\r\nworld\r\nEND\r\n"
-    );
+    exchange(fx.router_addr, b"ms me2e_k 5 F9\r\nworld\r\n", b"HD\r\n").await;
+    exchange(
+        fx.router_addr,
+        b"mg me2e_k v f s\r\n",
+        b"VA 5 f9 s5\r\nworld\r\n",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn set_delete_get_round_trip() {
+async fn store_delete_get_round_trip() {
     let fx = start_stack().await;
-    assert_eq!(
-        round_trip(fx.router_addr, b"set me2e_d 0 0 1\r\nx\r\n").await,
-        b"STORED\r\n"
-    );
-    assert_eq!(
-        round_trip(fx.router_addr, b"delete me2e_d\r\n").await,
-        b"DELETED\r\n"
-    );
-    assert_eq!(
-        round_trip(fx.router_addr, b"get me2e_d\r\n").await,
-        b"END\r\n"
-    );
+    exchange(fx.router_addr, b"ms me2e_d 1\r\nx\r\n", b"HD\r\n").await;
+    exchange(fx.router_addr, b"md me2e_d\r\n", b"HD\r\n").await;
+    exchange(fx.router_addr, b"mg me2e_d v\r\n", b"EN\r\n").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn incr_returns_new_value() {
+async fn arithmetic_returns_new_value() {
     let fx = start_stack().await;
-    assert_eq!(
-        round_trip(fx.router_addr, b"set me2e_n 0 0 2\r\n42\r\n").await,
-        b"STORED\r\n"
-    );
-    assert_eq!(
-        round_trip(fx.router_addr, b"incr me2e_n 1\r\n").await,
-        b"43\r\n"
-    );
+    exchange(fx.router_addr, b"ms me2e_n 2\r\n42\r\n", b"HD\r\n").await;
+    exchange(fx.router_addr, b"ma me2e_n v\r\n", b"VA 2\r\n43\r\n").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn multiget_returns_only_hits() {
+async fn pipelined_quiet_gets_with_noop_fence_replace_multiget() {
     let fx = start_stack().await;
-    let resp = round_trip(fx.router_addr, b"get seeded_foo mock_e2e_multi_miss\r\n").await;
-    assert_eq!(resp, b"VALUE seeded_foo 0 3\r\nbar\r\nEND\r\n");
+    // Meta multiget: quiet gets suppress the miss, opaque correlates the
+    // hit, and `mn` fences the batch. The miss slot must produce no bytes
+    // while preserving order.
+    exchange(
+        fx.router_addr,
+        b"mg seeded_foo v q Ofirst\r\nmg mock_e2e_multi_miss v q Osecond\r\nmn\r\n",
+        b"VA 3 Ofirst\r\nbar\r\nMN\r\n",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recoverable_parse_error_keeps_pipeline_order_and_connection() {
+    let fx = start_stack().await;
+    // middle command is malformed; its error must arrive in order and the
+    // connection must keep serving.
+    exchange(
+        fx.router_addr,
+        b"mg seeded_foo v\r\nmg seeded_foo zz\r\nmg seeded_foo v\r\n",
+        b"VA 3\r\nbar\r\nCLIENT_ERROR invalid flag\r\nVA 3\r\nbar\r\n",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opaque_and_key_echo_survive_the_hop() {
+    let fx = start_stack().await;
+    exchange(
+        fx.router_addr,
+        b"ms me2e_echo 2 c s k Otag\r\nhi\r\n",
+        b"HD c2 s2 kme2e_echo Otag\r\n",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -146,20 +170,12 @@ async fn failover_from_failing_primary_serves_from_secondary() {
     let primary = spawn_failing_mock_memcached().await;
     let secondary = spawn_mock_memcached().await;
 
-    let mut seed = TcpStream::connect(secondary).await.unwrap();
-    seed.write_all(b"set failover_k 0 0 6\r\nbackup\r\n")
-        .await
-        .unwrap();
-    let mut buf = [0u8; 32];
-    let n = seed.read(&mut buf).await.unwrap();
-    assert_eq!(&buf[..n], b"STORED\r\n");
-    drop(seed);
+    exchange(secondary, b"ms failover_k 6\r\nbackup\r\n", b"HD\r\n").await;
 
     let config_body = format!(
         r#"{{ "pools": {{ "primary": {{ "servers": ["{primary}"] }}, "secondary": {{ "servers": ["{secondary}"] }} }}, "route": {{ "type": "FailoverRoute", "children": ["PoolRoute|primary", "PoolRoute|secondary"] }} }}"#
     );
     let fx = start_router(&config_body, primary.port()).await;
 
-    let resp = round_trip(fx.router_addr, b"get failover_k\r\n").await;
-    assert_eq!(resp, b"VALUE failover_k 0 6\r\nbackup\r\nEND\r\n");
+    exchange(fx.router_addr, b"mg failover_k v\r\n", b"VA 6\r\nbackup\r\n").await;
 }
