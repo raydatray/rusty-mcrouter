@@ -1,6 +1,5 @@
 use bytes::Bytes;
-
-use crate::errors::KeyError;
+use thiserror::Error;
 
 const HASH_STOP: &[u8] = b"|#|";
 pub const MAX_KEY_BYTES: usize = 250;
@@ -10,6 +9,15 @@ pub struct Key {
     bytes: Bytes,
     routing_prefix_len: usize,
     routing_key_end: usize,
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum KeyError {
+    #[error("key must not be empty")]
+    Empty,
+
+    #[error("key is {actual} bytes, exceeding the {maximum}-byte limit")]
+    TooLong { actual: usize, maximum: usize },
 }
 
 impl Key {

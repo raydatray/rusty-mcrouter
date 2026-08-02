@@ -4,14 +4,12 @@
 //! and verified against memcached 1.6.45.
 
 mod bounded_list;
-mod errors;
 mod key;
 pub mod meta;
 pub mod reply;
 pub mod request;
 
 pub use bounded_list::BoundedList;
-pub use errors::KeyError;
 pub use key::Key;
 pub use reply::Reply;
 pub use request::Request;
