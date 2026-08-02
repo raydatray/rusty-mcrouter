@@ -1,6 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
-use memchr::memchr;
 use thiserror::Error;
 
 use crate::reply::{
@@ -8,6 +7,7 @@ use crate::reply::{
     GetHit, GetReply, RecacheState, Reply, StoreReply, StoreResult,
 };
 
+use super::line_scanner::{scan_line, LineScan};
 use super::tokens::{flags, split_tokens, FlagBudget, FlagError};
 use super::{numbers, GetSuccessShape, MetaReplyExpectation};
 
@@ -68,36 +68,21 @@ impl MetaReplyDecoder {
     ) -> Result<Option<Reply>, MetaReplyDecodeError> {
         loop {
             match std::mem::take(&mut self.state) {
-                ReplyDecodeState::Line { mut scanned } => {
-                    if scanned > src.len() {
-                        scanned = 0;
-                    }
-                    let Some(newline) =
-                        memchr(b'\n', &src[scanned..]).map(|offset| scanned + offset)
-                    else {
-                        if src.len() >= MAX_REPLY_LINE_BYTES {
+                ReplyDecodeState::Line { scanned } => {
+                    let frame = match scan_line(scanned, src, MAX_REPLY_LINE_BYTES) {
+                        LineScan::Incomplete { scanned } => {
+                            self.state = ReplyDecodeState::Line { scanned };
+                            return Ok(None);
+                        }
+                        LineScan::OverLimit => {
                             return Err(MetaReplyDecodeError::FrameTooLarge {
                                 maximum: MAX_REPLY_LINE_BYTES,
                             });
                         }
-                        self.state = ReplyDecodeState::Line { scanned: src.len() };
-                        return Ok(None);
+                        LineScan::Frame(frame) => frame,
                     };
 
-                    let frame_len = newline + 1;
-                    if frame_len > MAX_REPLY_LINE_BYTES {
-                        return Err(MetaReplyDecodeError::FrameTooLarge {
-                            maximum: MAX_REPLY_LINE_BYTES,
-                        });
-                    }
-                    let line_end = if newline > 0 && src[newline - 1] == b'\r' {
-                        newline - 1
-                    } else {
-                        newline
-                    };
-                    let frame = src.split_to(frame_len).freeze();
-
-                    match parse_line(expectation, &frame[..line_end])? {
+                    match parse_line(expectation, &frame.bytes[..frame.line_end])? {
                         ParsedLine::Reply(reply) => return Ok(Some(reply)),
                         ParsedLine::Value { length, pending } => {
                             self.state = ReplyDecodeState::Value { length, pending };
