@@ -36,7 +36,7 @@ pub const BAD_COMMAND_LINE: &[u8] = b"bad command line format";
 pub const INVALID_FLAG: &[u8] = b"invalid flag";
 const DUPLICATE_FLAG: &[u8] = b"duplicate flag";
 const BAD_DATA_CHUNK: &[u8] = b"bad data chunk";
-const OBJECT_TOO_LARGE: &[u8] = b"object too large for cache";
+pub const OBJECT_TOO_LARGE: &[u8] = b"object too large for cache";
 const OPTIONS_FLAGS_TOO_LONG: &[u8] = b"options flags are too long";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,22 +67,22 @@ impl Default for RequestDecodeState {
 }
 
 #[derive(Debug)]
-struct StoreHeader {
-    key: Key,
-    value_len: usize,
-    return_cas: bool,
-    return_size: bool,
-    mode: StoreMode,
-    client_flags: Option<u32>,
-    ttl: Option<i32>,
-    compare_cas: Option<u64>,
-    override_cas: Option<u64>,
-    invalidate: bool,
-    vivify_ttl: Option<i32>,
-    reply_plan: MetaReplyPlan,
+pub struct StoreHeader {
+    pub key: Key,
+    pub value_len: usize,
+    pub return_cas: bool,
+    pub return_size: bool,
+    pub mode: StoreMode,
+    pub client_flags: Option<u32>,
+    pub ttl: Option<i32>,
+    pub compare_cas: Option<u64>,
+    pub override_cas: Option<u64>,
+    pub invalidate: bool,
+    pub vivify_ttl: Option<i32>,
+    pub reply_plan: MetaReplyPlan,
 }
 
-enum ParsedStoreHeader {
+pub enum ParsedStoreHeader {
     Ready(StoreHeader),
     Swallow { remaining: usize, reply: ErrorReply },
 }
@@ -139,7 +139,7 @@ impl MetaRequestDecoder {
                     let key_frame = retain_key_frame.then_some(&frame.bytes);
                     let line = &frame.bytes[..frame.line_end];
                     if line == b"ms" || line.starts_with(b"ms ") {
-                        self.state = match parse_store(line, key_frame)? {
+                        self.state = match command::store::parse_request(line, key_frame)? {
                             ParsedStoreHeader::Ready(header) => {
                                 RequestDecodeState::StoreBody(header)
                             }
@@ -235,142 +235,6 @@ fn parse_command(
         Some(b"me") => parse_debug(tokens, key_frame),
         _ => Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error)),
     }
-}
-
-fn parse_store(
-    line: &[u8],
-    key_frame: Option<&Bytes>,
-) -> Result<ParsedStoreHeader, MetaRequestDecodeError> {
-    let mut tokens = split_tokens(line);
-    if tokens.next() != Some(b"ms".as_slice()) {
-        return Err(recoverable_client_error(BAD_COMMAND_LINE));
-    }
-    let raw_key = tokens
-        .next()
-        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    let raw_value_len = tokens
-        .next()
-        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    let value_len_u64 = parse_u64(raw_value_len).map_err(bad_command_line)?;
-    if value_len_u64 > (i32::MAX - 2) as u64 {
-        return Err(recoverable_client_error(BAD_COMMAND_LINE));
-    }
-    let value_len = value_len_u64 as usize;
-    let remaining = value_len + 2;
-    if value_len > MAX_VALUE_BYTES {
-        return Ok(ParsedStoreHeader::Swallow {
-            remaining,
-            reply: ErrorReply::Server(Some(Bytes::from_static(OBJECT_TOO_LARGE))),
-        });
-    }
-
-    let parsed = parse_store_fields(raw_key, tokens, key_frame, value_len);
-    match parsed {
-        Ok(header) => Ok(ParsedStoreHeader::Ready(header)),
-        Err(MetaRequestDecodeError::Recoverable(reply)) => {
-            Ok(ParsedStoreHeader::Swallow { remaining, reply })
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn parse_store_fields<'a>(
-    raw_key: &[u8],
-    tokens: impl Iterator<Item = &'a [u8]>,
-    key_frame: Option<&Bytes>,
-    value_len: usize,
-) -> Result<StoreHeader, MetaRequestDecodeError> {
-    let mut return_cas = false;
-    let mut return_size = false;
-    let mut mode = StoreMode::Set;
-    let mut client_flags = None;
-    let mut ttl = None;
-    let mut compare_cas = None;
-    let mut override_cas = None;
-    let mut invalidate = false;
-    let mut vivify_ttl = None;
-    let mut reply_plan = MetaReplyPlan::default();
-    let mut return_key = false;
-
-    // 20 line tokens minus `ms`, the key, and the datalen. Unreachable today
-    // (only 16 distinct valid ms flags exist, and duplicates are rejected),
-    // but kept so the budget survives future flag leniency. Raised here
-    // rather than in `parse_store` so the body is swallowed.
-    for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 3)) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
-            b'b' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                reply_plan.key_encoding = KeyEncoding::Base64;
-            }
-            b'c' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_cas = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Cas)
-                    .map_err(bad_command_line)?;
-            }
-            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'F' => client_flags = Some(parse_u32(argument).map_err(bad_command_line)?),
-            b'I' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                invalidate = true;
-            }
-            b'k' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_key = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Key)
-                    .map_err(bad_command_line)?;
-            }
-            b'M' => {
-                mode = match argument {
-                    b"S" => StoreMode::Set,
-                    b"E" => StoreMode::Add,
-                    b"R" => StoreMode::Replace,
-                    b"A" => StoreMode::Append,
-                    b"P" => StoreMode::Prepend,
-                    _ => return Err(recoverable_client_error(BAD_COMMAND_LINE)),
-                };
-            }
-            b'N' => vivify_ttl = Some(parse_i32(argument).map_err(bad_command_line)?),
-            b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
-            b'q' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
-            }
-            b's' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_size = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Size)
-                    .map_err(bad_command_line)?;
-            }
-            b'T' => ttl = Some(parse_i32(argument).map_err(bad_command_line)?),
-            b'P' | b'L' => require_hint_argument(argument)?,
-            _ => return Err(recoverable_client_error(INVALID_FLAG)),
-        }
-    }
-
-    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
-    Ok(StoreHeader {
-        key,
-        value_len,
-        return_cas,
-        return_size,
-        mode,
-        client_flags,
-        ttl,
-        compare_cas,
-        override_cas,
-        invalidate,
-        vivify_ttl,
-        reply_plan,
-    })
 }
 
 fn parse_delete<'a>(
