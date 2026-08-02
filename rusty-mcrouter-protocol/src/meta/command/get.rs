@@ -2,10 +2,9 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::meta::numbers::{parse_i32, parse_i64, parse_u32, parse_u64, parse_usize};
+use crate::meta::numbers::{parse_i32, parse_i64, parse_u32, parse_u64};
 use crate::meta::reply_decoder::{
-    invalid_response, MetaReplyDecodeError, ParsedLine, PendingValue, INVALID_RESPONSE,
-    SHAPE_MISMATCH,
+    invalid_response, MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH,
 };
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_field, write_key_token, write_opaque, MetaReplyEncodeError,
@@ -229,40 +228,40 @@ pub fn encode_request(
 pub fn parse_reply(
     shape: GetSuccessShape,
     line: &[u8],
-) -> Result<ParsedLine, MetaReplyDecodeError> {
+    value: Option<Bytes>,
+) -> Result<Reply, MetaReplyDecodeError> {
     let mut tokens = split_tokens(line);
     match tokens.next() {
         Some(b"EN") => {
             if tokens.next().is_some() {
                 return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
             }
-            Ok(ParsedLine::Reply(Reply::Get(GetReply::Miss)))
+            Ok(Reply::Get(GetReply::Miss))
         }
         Some(b"HD") => {
             if shape == GetSuccessShape::Value {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
             let hit = parse_attributes(tokens)?;
-            Ok(ParsedLine::Reply(Reply::Get(GetReply::Hit(hit))))
+            Ok(Reply::Get(GetReply::Hit(hit)))
         }
         Some(b"VA") => {
             if shape == GetSuccessShape::Header {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
-            let length = tokens
-                .next()
-                .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-                .and_then(|raw| parse_usize(raw).map_err(invalid_response))?;
-            if length > MAX_REPLY_VALUE_BYTES {
-                return Err(MetaReplyDecodeError::ValueTooLarge {
-                    maximum: MAX_REPLY_VALUE_BYTES,
-                });
+            // Framing validated the length token and sized `value` from it.
+            if tokens.next().is_none() {
+                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
             }
-            let hit = parse_attributes(tokens)?;
-            Ok(ParsedLine::Value {
-                length,
-                pending: PendingValue::Get(hit),
-            })
+            let Some(value) = value else {
+                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+            };
+            let mut hit = parse_attributes(tokens)?;
+            if hit.size.is_some_and(|size| size != value.len() as u64) {
+                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+            }
+            hit.value = Some(value);
+            Ok(Reply::Get(GetReply::Hit(hit)))
         }
         _ => Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
     }

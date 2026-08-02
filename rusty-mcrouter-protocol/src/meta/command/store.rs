@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::meta::numbers::{parse_i32, parse_u32, parse_u64};
 use crate::meta::reply_decoder::{
-    invalid_response, MetaReplyDecodeError, ParsedLine, INVALID_RESPONSE, SHAPE_MISMATCH,
+    invalid_response, MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH,
 };
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_field, write_key_token, write_opaque, MetaReplyEncodeError,
@@ -223,7 +223,7 @@ pub fn parse_reply(
     expect_cas: bool,
     expect_size: bool,
     line: &[u8],
-) -> Result<ParsedLine, MetaReplyDecodeError> {
+) -> Result<Reply, MetaReplyDecodeError> {
     let mut tokens = split_tokens(line);
     let code = tokens
         .next()
@@ -240,7 +240,7 @@ pub fn parse_reply(
         b"NF" => StoreReply::NotFound(result),
         _ => return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
     };
-    Ok(ParsedLine::Reply(Reply::Store(reply)))
+    Ok(Reply::Store(reply))
 }
 
 fn parse_attributes<'a>(

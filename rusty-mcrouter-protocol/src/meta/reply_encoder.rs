@@ -599,7 +599,7 @@ mod tests {
             .unwrap();
         assert_eq!(backend_output, b"mg key v c\r\n".as_slice());
 
-        let mut reply_decoder = MetaReplyDecoder::new();
+        let reply_decoder = MetaReplyDecoder::new();
         let mut backend_input = BytesMut::from(&b"VA 3 c42\r\nfoo\r\n"[..]);
         let reply = reply_decoder
             .decode(&expectation, &mut backend_input)
@@ -636,7 +636,7 @@ mod tests {
             .unwrap();
         assert_eq!(backend_output, b"ms key 3 c s\r\nfoo\r\n".as_slice());
 
-        let mut reply_decoder = MetaReplyDecoder::new();
+        let reply_decoder = MetaReplyDecoder::new();
         let mut backend_input = BytesMut::from(&b"HD c42 s3\r\n"[..]);
         let reply = reply_decoder
             .decode(&expectation, &mut backend_input)
@@ -675,7 +675,7 @@ mod tests {
             .unwrap();
         assert_eq!(backend_output, b"md key C42\r\n".as_slice());
 
-        let mut reply_decoder = MetaReplyDecoder::new();
+        let reply_decoder = MetaReplyDecoder::new();
         let mut backend_input = BytesMut::from(&b"HD\r\n"[..]);
         let reply = reply_decoder
             .decode(&expectation, &mut backend_input)
@@ -714,7 +714,7 @@ mod tests {
             .unwrap();
         assert_eq!(backend_output, b"ma key v c D2 t\r\n".as_slice());
 
-        let mut reply_decoder = MetaReplyDecoder::new();
+        let reply_decoder = MetaReplyDecoder::new();
         let mut backend_input = BytesMut::from(&b"VA 2 c42 t60\r\n43\r\n"[..]);
         let reply = reply_decoder
             .decode(&expectation, &mut backend_input)
@@ -753,7 +753,7 @@ mod tests {
             .unwrap();
         assert_eq!(backend_output, b"me key\r\n".as_slice());
 
-        let mut reply_decoder = MetaReplyDecoder::new();
+        let reply_decoder = MetaReplyDecoder::new();
         let mut backend_input = BytesMut::from(&b"ME key exp=60 fetch=yes\r\n"[..]);
         let reply = reply_decoder
             .decode(&expectation, &mut backend_input)
