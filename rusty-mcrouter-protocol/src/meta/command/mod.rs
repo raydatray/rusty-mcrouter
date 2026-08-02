@@ -3,3 +3,4 @@
 //! `parse_reply`, and `encode_reply`.
 
 pub mod get;
+pub mod store;

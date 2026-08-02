@@ -50,7 +50,7 @@ impl MetaReplyEncoder {
         let checkpoint = out.len();
         let result = match reply {
             Reply::Get(reply) => command::get::encode_reply(reply, plan, out),
-            Reply::Store(reply) => encode_store(reply, plan, out),
+            Reply::Store(reply) => command::store::encode_reply(reply, plan, out),
             Reply::Delete(reply) => encode_delete(reply, plan, out),
             Reply::Arithmetic(reply) => encode_arithmetic(reply, plan, out),
             Reply::Debug(reply) => encode_debug(reply, plan, out),
@@ -92,36 +92,6 @@ pub enum MetaReplyEncodeError {
 
     #[error("Meta reply exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
-}
-
-fn encode_store(
-    reply: &StoreReply,
-    plan: &MetaReplyPlan,
-    out: &mut BytesMut,
-) -> Result<(), MetaReplyEncodeError> {
-    let (code, result) = match reply {
-        StoreReply::Success(result) => (b"HD".as_slice(), result),
-        StoreReply::NotStored(result) => (b"NS".as_slice(), result),
-        StoreReply::Exists(result) => (b"EX".as_slice(), result),
-        StoreReply::NotFound(result) => (b"NF".as_slice(), result),
-    };
-
-    let line_start = out.len();
-    out.extend_from_slice(code);
-    for token in plan.output_order.iter() {
-        match token {
-            MetaOutputToken::Cas => write_field(out, b'c', result.cas, "CAS", true)?,
-            MetaOutputToken::Size => write_field(out, b's', result.size, "size", true)?,
-            MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key_token(plan, out)?,
-            _ => {
-                return Err(MetaReplyEncodeError::InvalidData(
-                    "invalid store output token",
-                ));
-            }
-        }
-    }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn encode_delete(

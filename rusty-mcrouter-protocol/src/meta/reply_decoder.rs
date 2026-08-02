@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::reply::{
     ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, DeleteReply, ErrorReply,
-    GetHit, GetReply, Reply, StoreReply, StoreResult,
+    GetHit, GetReply, Reply,
 };
 
 use super::command;
@@ -157,7 +157,7 @@ fn parse_line(
 
     match expectation {
         MetaReplyExpectation::Get(shape) => command::get::parse_reply(*shape, line),
-        MetaReplyExpectation::Store { cas, size } => parse_store_line(*cas, *size, line),
+        MetaReplyExpectation::Store { cas, size } => command::store::parse_reply(*cas, *size, line),
         MetaReplyExpectation::Delete => parse_delete_line(line),
         MetaReplyExpectation::Arithmetic { value, cas, ttl } => {
             parse_arithmetic_line(*value, *cas, *ttl, line)
@@ -317,46 +317,6 @@ fn parse_delete_line(line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
     Ok(ParsedLine::Reply(Reply::Delete(reply)))
 }
 
-fn parse_store_line(
-    expect_cas: bool,
-    expect_size: bool,
-    line: &[u8],
-) -> Result<ParsedLine, MetaReplyDecodeError> {
-    let mut tokens = split_tokens(line);
-    let code = tokens
-        .next()
-        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
-    let result = parse_store_attributes(tokens)?;
-    if (expect_cas && result.cas.is_none()) || (expect_size && result.size.is_none()) {
-        return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
-    }
-
-    let reply = match code {
-        b"HD" => StoreReply::Success(result),
-        b"NS" => StoreReply::NotStored(result),
-        b"EX" => StoreReply::Exists(result),
-        b"NF" => StoreReply::NotFound(result),
-        _ => return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
-    };
-    Ok(ParsedLine::Reply(Reply::Store(reply)))
-}
-
-fn parse_store_attributes<'a>(
-    tokens: impl Iterator<Item = &'a [u8]>,
-) -> Result<StoreResult, MetaReplyDecodeError> {
-    let mut result = StoreResult::default();
-
-    for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(invalid_response)?;
-        match flag {
-            b'c' => result.cas = Some(parse_u64(argument).map_err(invalid_response)?),
-            b's' => result.size = Some(parse_u64(argument).map_err(invalid_response)?),
-            _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
-        }
-    }
-    Ok(result)
-}
-
 fn parse_error_reply(line: &[u8]) -> Result<Option<ErrorReply>, MetaReplyDecodeError> {
     if line == b"ERROR" {
         return Ok(Some(ErrorReply::Error));
@@ -415,7 +375,7 @@ pub enum MetaReplyDecodeError {
 mod tests {
     use super::*;
     use crate::meta::GetSuccessShape;
-    use crate::reply::RecacheState;
+    use crate::reply::{RecacheState, StoreReply, StoreResult};
 
     const HEADER: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Header);
     const VALUE: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Value);
