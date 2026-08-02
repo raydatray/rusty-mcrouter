@@ -1,4 +1,4 @@
-use crate::{errors::ParseError, key::Key};
+use crate::{bounded::BoundedList, key::Key};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetRequest {
@@ -21,83 +21,14 @@ pub struct GetRequest {
     pub temporal: GetTemporalInstructions,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct GetTemporalInstructions {
-    instructions: [Option<GetTemporalInstruction>; 4],
-    len: u8,
-}
+/// `mg` has four distinct order-sensitive flags, so its temporal program
+/// never exceeds four instructions.
+pub type GetTemporalInstructions = BoundedList<GetTemporalInstruction, 4>;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GetTemporalInstruction {
     Vivify(i32),        // N<n>
     UpdateTtl(i32),     // T<n>
     ReturnTtl,          // t
     WinForRecache(i32), // R<n>
-}
-
-impl GetTemporalInstructions {
-    pub(crate) fn push(&mut self, instruction: GetTemporalInstruction) -> Result<(), ParseError> {
-        let slot = self
-            .instructions
-            .get_mut(usize::from(self.len))
-            .ok_or(ParseError::TooManyFlags)?;
-        *slot = Some(instruction);
-        self.len += 1;
-        Ok(())
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &GetTemporalInstruction> {
-        self.instructions[..usize::from(self.len)]
-            .iter()
-            .map(|instruction| instruction.as_ref().expect("dense temporal instructions"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn temporal_instructions_preserve_insertion_order() {
-        let mut instructions = GetTemporalInstructions::default();
-        instructions
-            .push(GetTemporalInstruction::Vivify(30))
-            .unwrap();
-        instructions
-            .push(GetTemporalInstruction::UpdateTtl(60))
-            .unwrap();
-        instructions
-            .push(GetTemporalInstruction::ReturnTtl)
-            .unwrap();
-        instructions
-            .push(GetTemporalInstruction::WinForRecache(10))
-            .unwrap();
-
-        assert_eq!(
-            instructions.iter().cloned().collect::<Vec<_>>(),
-            vec![
-                GetTemporalInstruction::Vivify(30),
-                GetTemporalInstruction::UpdateTtl(60),
-                GetTemporalInstruction::ReturnTtl,
-                GetTemporalInstruction::WinForRecache(10),
-            ]
-        );
-    }
-
-    #[test]
-    fn temporal_instructions_reject_more_than_four_entries() {
-        let mut instructions = GetTemporalInstructions::default();
-        for instruction in [
-            GetTemporalInstruction::Vivify(30),
-            GetTemporalInstruction::UpdateTtl(60),
-            GetTemporalInstruction::ReturnTtl,
-            GetTemporalInstruction::WinForRecache(10),
-        ] {
-            instructions.push(instruction).unwrap();
-        }
-
-        assert_eq!(
-            instructions.push(GetTemporalInstruction::ReturnTtl),
-            Err(ParseError::TooManyFlags)
-        );
-    }
 }
