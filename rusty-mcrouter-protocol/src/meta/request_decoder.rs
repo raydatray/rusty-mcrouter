@@ -1,6 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Buf, Bytes, BytesMut};
-use memchr::memchr;
 use thiserror::Error;
 
 use crate::errors::ParseError;
@@ -15,6 +14,7 @@ use crate::{
     },
 };
 
+use super::line_scanner::{scan_line, LineScan};
 use super::numbers;
 use super::tokens::{flags, split_tokens, FlagBudget, FlagError};
 
@@ -121,10 +121,20 @@ impl MetaRequestDecoder {
                     return self.swallow(remaining, reply, src);
                 }
                 RequestDecodeState::Command { scanned } => {
-                    let Some(frame) = self.scan_command_line(scanned, src)? else {
-                        return Ok(None);
+                    let frame = match scan_line(scanned, src, MAX_COMMAND_LINE_BYTES) {
+                        LineScan::Incomplete { scanned } => {
+                            self.state = RequestDecodeState::Command { scanned };
+                            return Ok(None);
+                        }
+                        LineScan::OverLimit => {
+                            return Err(FatalDecodeError::FrameTooLarge {
+                                maximum: MAX_COMMAND_LINE_BYTES,
+                            }
+                            .into());
+                        }
+                        LineScan::Frame(frame) => frame,
                     };
-                    let retain_key_frame = frame.len() <= MAX_ZERO_COPY_KEY_FRAME
+                    let retain_key_frame = frame.bytes.len() <= MAX_ZERO_COPY_KEY_FRAME
                         && frame.buffer_capacity <= MAX_RETAINED_KEY_BUFFER;
                     let key_frame = retain_key_frame.then_some(&frame.bytes);
                     let line = &frame.bytes[..frame.line_end];
@@ -143,51 +153,6 @@ impl MetaRequestDecoder {
                 }
             }
         }
-    }
-
-    /// Scans for one complete command line, resuming from `scanned` and
-    /// remembering progress across incomplete reads.
-    fn scan_command_line(
-        &mut self,
-        mut scanned: usize,
-        src: &mut BytesMut,
-    ) -> Result<Option<CommandFrame>, MetaRequestDecodeError> {
-        if scanned > src.len() {
-            // Incomplete input should retain its prefix, but avoid indexing a
-            // stale cursor if a caller replaces the buffer unexpectedly.
-            scanned = 0;
-        }
-
-        let Some(newline) = memchr(b'\n', &src[scanned..]).map(|offset| scanned + offset) else {
-            if src.len() >= MAX_COMMAND_LINE_BYTES {
-                return Err(FatalDecodeError::FrameTooLarge {
-                    maximum: MAX_COMMAND_LINE_BYTES,
-                }
-                .into());
-            }
-            self.state = RequestDecodeState::Command { scanned: src.len() };
-            return Ok(None);
-        };
-
-        let frame_len = newline + 1;
-        if frame_len > MAX_COMMAND_LINE_BYTES {
-            return Err(FatalDecodeError::FrameTooLarge {
-                maximum: MAX_COMMAND_LINE_BYTES,
-            }
-            .into());
-        }
-
-        let line_end = if newline > 0 && src[newline - 1] == b'\r' {
-            newline - 1
-        } else {
-            newline
-        };
-        let buffer_capacity = src.capacity();
-        Ok(Some(CommandFrame {
-            bytes: src.split_to(frame_len).freeze(),
-            line_end,
-            buffer_capacity,
-        }))
     }
 
     pub fn decode_eof(&self, src: &BytesMut) -> Result<(), MetaRequestDecodeError> {
@@ -245,22 +210,6 @@ impl MetaRequestDecoder {
             return Ok(None);
         }
         Err(MetaRequestDecodeError::Recoverable(reply))
-    }
-}
-
-/// One complete command line split off the read buffer.
-struct CommandFrame {
-    bytes: Bytes,
-    /// Line length excluding the `\r\n` / `\n` terminator.
-    line_end: usize,
-    /// The read buffer's capacity before the split: retaining zero-copy key
-    /// slices is only worthwhile when it cannot pin a large allocation.
-    buffer_capacity: usize,
-}
-
-impl CommandFrame {
-    fn len(&self) -> usize {
-        self.bytes.len()
     }
 }
 
