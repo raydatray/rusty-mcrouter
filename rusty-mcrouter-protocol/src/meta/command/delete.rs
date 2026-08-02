@@ -2,14 +2,16 @@
 
 use bytes::BytesMut;
 
-use crate::meta::reply_decoder::{MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH};
+use crate::meta::reply_decoder::{
+    MetaReplyDecodeError, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH,
+};
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_key_token, write_opaque, MetaReplyEncodeError,
 };
 use crate::meta::request_decoder::{
     bad_argument, bad_number, capacity_error, flag_error, parse_opaque, recoverable_client_error,
     require_hint_argument, resolve_key, DecodedMetaCommand, MetaRequestDecodeError,
-    BAD_COMMAND_LINE, INVALID_FLAG, MAX_LINE_TOKENS,
+    BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
@@ -20,7 +22,6 @@ use crate::meta::tokens::{
 };
 use crate::meta::{
     wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyExpectation, MetaReplyPlan,
-    MAX_COMMAND_LINE_BYTES, MAX_REPLY_LINE_BYTES,
 };
 use crate::reply::{DeleteReply, Reply};
 use crate::request::{DeleteRequest, Request};

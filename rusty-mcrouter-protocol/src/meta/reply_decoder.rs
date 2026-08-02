@@ -1,17 +1,15 @@
 use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 
-use crate::reply::{ErrorReply, Reply};
-
-use super::command;
-use super::tokens::{
+use crate::meta::command;
+use crate::meta::tokens::{
     find_line, parse_usize, split_tokens, BadNumber, FindLine, FlagError, UnexpectedArgument,
 };
-use super::{GetSuccessShape, MetaReplyExpectation};
+use crate::meta::{GetSuccessShape, MetaReplyExpectation};
+use crate::reply::{ErrorReply, Reply};
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_REPLY_VALUE_BYTES: usize = 1024 * 1024;
-pub const MAX_DEBUG_FIELDS: usize = 64;
 
 pub const INVALID_RESPONSE: &str = "invalid Meta backend response";
 pub const SHAPE_MISMATCH: &str = "Meta backend response does not match request";
@@ -211,6 +209,7 @@ pub enum MetaReplyDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meta::command::debug::MAX_DEBUG_FIELDS;
     use crate::reply::{
         ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, DeleteReply, GetHit,
         GetReply, RecacheState, StoreReply, StoreResult,

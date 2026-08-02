@@ -1,12 +1,9 @@
 use bytes::BytesMut;
 use thiserror::Error;
 
-use crate::{
-    key::{Key, MAX_KEY_BYTES},
-    request::Request,
-};
-
-use super::{command, wire, MetaReplyExpectation};
+use crate::key::{Key, MAX_KEY_BYTES};
+use crate::meta::{command, wire, MetaReplyExpectation};
+use crate::request::Request;
 
 #[derive(Debug, Default)]
 pub struct MetaRequestEncoder;
@@ -106,7 +103,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        meta::{DecodedMetaCommand, GetSuccessShape, MetaRequestDecoder, MAX_VALUE_BYTES},
+        meta::{
+            request_decoder::MAX_VALUE_BYTES, DecodedMetaCommand, GetSuccessShape,
+            MetaRequestDecoder,
+        },
         request::{
             GetRequest, GetTemporalInstruction, GetTemporalInstructions, StoreMode, StoreRequest,
         },

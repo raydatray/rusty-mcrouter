@@ -3,8 +3,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
 
+use crate::meta::reply_decoder::MAX_REPLY_LINE_BYTES;
 use crate::meta::reply_decoder::{MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH};
 use crate::meta::reply_encoder::{encoded_key_too_long, reply_line_too_long, MetaReplyEncodeError};
+use crate::meta::request_decoder::MAX_COMMAND_LINE_BYTES;
 use crate::meta::request_decoder::{
     bad_argument, flag_error, parse_key, recoverable_client_error, require_hint_argument,
     DecodedMetaCommand, MetaRequestDecodeError, BAD_COMMAND_LINE, INVALID_FLAG,
@@ -13,10 +15,11 @@ use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, MetaRequestEncodeError,
 };
 use crate::meta::tokens::{flags, require_no_argument, split_tokens, FlagBudget};
-use crate::meta::{
-    wire, KeyEncoding, MetaReplyExpectation, MetaReplyPlan, MAX_COMMAND_LINE_BYTES,
-    MAX_DEBUG_FIELDS, MAX_REPLY_LINE_BYTES,
-};
+use crate::meta::{wire, KeyEncoding, MetaReplyExpectation, MetaReplyPlan};
+
+/// memcached's `me` response carries a small, fixed set of `<name>=<value>`
+/// fields; the cap bounds a misbehaving backend.
+pub const MAX_DEBUG_FIELDS: usize = 64;
 use crate::reply::{DebugField, DebugHit, DebugReply, Reply};
 use crate::request::{DebugRequest, Request};
 

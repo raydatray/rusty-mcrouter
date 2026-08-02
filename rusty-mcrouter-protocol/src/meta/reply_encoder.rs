@@ -1,12 +1,11 @@
 use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 
-use crate::{
-    key::MAX_KEY_BYTES,
-    reply::{ArithmeticReply, DeleteReply, ErrorReply, GetReply, Reply, StoreReply},
-};
-
-use super::{command, wire, KeyEncoding, MetaQuietPolicy, MetaReplyPlan, MAX_REPLY_LINE_BYTES};
+use crate::key::MAX_KEY_BYTES;
+use crate::meta::reply_decoder::MAX_REPLY_LINE_BYTES;
+use crate::meta::request_decoder::MAX_OPAQUE_BYTES;
+use crate::meta::{command, wire, KeyEncoding, MetaQuietPolicy, MetaReplyPlan};
+use crate::reply::{ArithmeticReply, DeleteReply, ErrorReply, GetReply, Reply, StoreReply};
 
 #[derive(Debug, Default)]
 pub struct MetaReplyEncoder;
@@ -120,7 +119,7 @@ pub fn write_opaque(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), Meta
         .opaque
         .as_ref()
         .ok_or(MetaReplyEncodeError::MissingField("opaque token"))?;
-    if opaque.is_empty() || opaque.len() > super::MAX_OPAQUE_BYTES {
+    if opaque.is_empty() || opaque.len() > MAX_OPAQUE_BYTES {
         return Err(MetaReplyEncodeError::InvalidData("invalid opaque token"));
     }
     wire::write_bare_flag(out, b'O');

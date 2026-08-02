@@ -14,7 +14,7 @@ use memchr::memchr;
 
 /// The result of locating one complete line at the head of a buffer
 /// without consuming anything.
-pub(super) enum FindLine {
+pub enum FindLine {
     /// No terminator buffered yet; the caller should wait for more bytes.
     Incomplete,
     /// The complete line (or the unterminated prefix) exceeds the frame
@@ -28,7 +28,7 @@ pub(super) enum FindLine {
 /// Locates the first `\n`-terminated line in `src`, bounded by `max_frame`
 /// bytes including the terminator. Pure: consumes nothing and keeps no
 /// cursor, so fragmented reads rescan the (bounded) unterminated prefix.
-pub(super) fn find_line(src: &[u8], max_frame: usize) -> FindLine {
+pub fn find_line(src: &[u8], max_frame: usize) -> FindLine {
     let Some(newline) = memchr(b'\n', src) else {
         if src.len() >= max_frame {
             return FindLine::OverLimit;
@@ -51,7 +51,7 @@ pub(super) fn find_line(src: &[u8], max_frame: usize) -> FindLine {
 
 /// Splits one command or reply line into its non-empty tokens. Runs of
 /// spaces collapse, matching memcached's tokenizer.
-pub(super) fn split_tokens(line: &[u8]) -> impl Iterator<Item = &[u8]> + Clone {
+pub fn split_tokens(line: &[u8]) -> impl Iterator<Item = &[u8]> + Clone {
     line.split(|byte| *byte == b' ')
         .filter(|token| !token.is_empty())
 }
@@ -60,7 +60,7 @@ pub(super) fn split_tokens(line: &[u8]) -> impl Iterator<Item = &[u8]> + Clone {
 /// every Meta command shares: an optional token budget (memcached's
 /// "options flags are too long", counted before any validation), a leading
 /// ASCII letter, and letter-level duplicate rejection.
-pub(super) fn flags<'a>(
+pub fn flags<'a>(
     tokens: impl Iterator<Item = &'a [u8]>,
     budget: FlagBudget,
 ) -> impl Iterator<Item = Result<(u8, &'a [u8]), FlagError>> {
@@ -91,10 +91,10 @@ pub(super) fn flags<'a>(
 
 /// A bare flag carried an argument.
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct UnexpectedArgument;
+pub struct UnexpectedArgument;
 
 /// Validates that a bare flag token carries no argument.
-pub(super) fn require_no_argument(argument: &[u8]) -> Result<(), UnexpectedArgument> {
+pub fn require_no_argument(argument: &[u8]) -> Result<(), UnexpectedArgument> {
     if argument.is_empty() {
         Ok(())
     } else {
@@ -103,7 +103,7 @@ pub(super) fn require_no_argument(argument: &[u8]) -> Result<(), UnexpectedArgum
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum FlagBudget {
+pub enum FlagBudget {
     /// At most this many flag tokens; one more is an error.
     Tokens(usize),
     /// memcached's `ma` and `me` parsers have no token budget.
@@ -111,7 +111,7 @@ pub(super) enum FlagBudget {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum FlagError {
+pub enum FlagError {
     OverBudget,
     InvalidToken,
     Duplicate,
@@ -119,7 +119,7 @@ pub(super) enum FlagError {
 
 /// The token is not a decimal number that fits the requested width.
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct BadNumber;
+pub struct BadNumber;
 
 /// Parses one decimal token. std's integer grammar — an optional sign
 /// followed by ASCII digits, overflow-checked, no whitespace — matches
@@ -131,23 +131,23 @@ fn parse_number<T: FromStr>(raw: &[u8]) -> Result<T, BadNumber> {
         .ok_or(BadNumber)
 }
 
-pub(super) fn parse_u64(raw: &[u8]) -> Result<u64, BadNumber> {
+pub fn parse_u64(raw: &[u8]) -> Result<u64, BadNumber> {
     parse_number(raw)
 }
 
-pub(super) fn parse_u32(raw: &[u8]) -> Result<u32, BadNumber> {
+pub fn parse_u32(raw: &[u8]) -> Result<u32, BadNumber> {
     parse_number(raw)
 }
 
-pub(super) fn parse_usize(raw: &[u8]) -> Result<usize, BadNumber> {
+pub fn parse_usize(raw: &[u8]) -> Result<usize, BadNumber> {
     parse_number(raw)
 }
 
-pub(super) fn parse_i32(raw: &[u8]) -> Result<i32, BadNumber> {
+pub fn parse_i32(raw: &[u8]) -> Result<i32, BadNumber> {
     parse_number(raw)
 }
 
-pub(super) fn parse_i64(raw: &[u8]) -> Result<i64, BadNumber> {
+pub fn parse_i64(raw: &[u8]) -> Result<i64, BadNumber> {
     parse_number(raw)
 }
 
