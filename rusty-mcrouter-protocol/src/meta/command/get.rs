@@ -3,7 +3,7 @@
 use bytes::{Bytes, BytesMut};
 
 use crate::meta::reply_decoder::{
-    invalid_response, MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH,
+    framed_value, invalid_response, MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH,
 };
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_field, write_i64_field, write_key_token, write_opaque,
@@ -251,13 +251,7 @@ pub fn parse_reply(
             if shape == GetSuccessShape::Header {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
-            // Framing validated the length token and sized `value` from it.
-            if tokens.next().is_none() {
-                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-            }
-            let Some(value) = value else {
-                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-            };
+            let value = framed_value(tokens.next(), value)?;
             let mut hit = parse_attributes(tokens)?;
             if hit.size.is_some_and(|size| size != value.len() as u64) {
                 return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));

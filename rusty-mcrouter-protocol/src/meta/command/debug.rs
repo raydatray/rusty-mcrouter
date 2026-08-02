@@ -156,13 +156,11 @@ fn write_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEn
             out.extend_from_slice(key);
         }
         KeyEncoding::Base64 => {
-            let mut scratch = [0; wire::MAX_BASE64_KEY_BYTES];
-            let encoded = wire::encode_base64_key(key, &mut scratch).map_err(|_| {
+            wire::write_base64_key(out, key).map_err(|_| {
                 MetaReplyEncodeError::EncodedKeyTooLong {
                     maximum: MAX_KEY_BYTES,
                 }
             })?;
-            out.extend_from_slice(encoded);
         }
     }
     Ok(())
