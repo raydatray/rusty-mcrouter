@@ -14,11 +14,11 @@ use crate::key::MAX_KEY_BYTES;
 const MAX_BASE64_KEY_BYTES: usize = MAX_KEY_BYTES.div_ceil(3) * 4;
 
 /// The encoded key exceeds the wire's key-length cap.
-pub(super) struct EncodedKeyTooLong;
+pub struct EncodedKeyTooLong;
 
 /// Base64-encodes `key` and appends it to `out`, enforcing that the encoded
 /// form still fits a wire key token.
-pub(super) fn write_base64_key(out: &mut BytesMut, key: &[u8]) -> Result<(), EncodedKeyTooLong> {
+pub fn write_base64_key(out: &mut BytesMut, key: &[u8]) -> Result<(), EncodedKeyTooLong> {
     let mut scratch = [0; MAX_BASE64_KEY_BYTES];
     let encoded_len = STANDARD
         .encode_slice(key, &mut scratch)
@@ -32,13 +32,13 @@ pub(super) fn write_base64_key(out: &mut BytesMut, key: &[u8]) -> Result<(), Enc
 
 /// The line, including its `\r\n` terminator, exceeds the frame limit.
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct LineTooLong {
-    pub(super) maximum: usize,
+pub struct LineTooLong {
+    pub maximum: usize,
 }
 
 /// Enforces `max_frame` over the line started at `line_start`, then
 /// terminates the line.
-pub(super) fn finish_line(
+pub fn finish_line(
     out: &mut BytesMut,
     line_start: usize,
     max_frame: usize,
@@ -52,16 +52,16 @@ pub(super) fn finish_line(
 
 /// Appends ` <flag>`: every Meta flag is space-separated from its
 /// predecessor.
-pub(super) fn write_bare_flag(out: &mut BytesMut, flag: u8) {
+pub fn write_bare_flag(out: &mut BytesMut, flag: u8) {
     out.extend_from_slice(&[b' ', flag]);
 }
 
-pub(super) fn write_u64(out: &mut BytesMut, value: u64) {
+pub fn write_u64(out: &mut BytesMut, value: u64) {
     let mut digits = [0; 20];
     out.extend_from_slice(format_u64(value, &mut digits));
 }
 
-pub(super) fn write_i64(out: &mut BytesMut, value: i64) {
+pub fn write_i64(out: &mut BytesMut, value: i64) {
     if value < 0 {
         out.extend_from_slice(b"-");
     }
@@ -70,7 +70,7 @@ pub(super) fn write_i64(out: &mut BytesMut, value: i64) {
 
 /// Formats `value` into the tail of `digits`, returning the used suffix.
 /// 20 bytes hold any u64.
-pub(super) fn format_u64(mut value: u64, digits: &mut [u8; 20]) -> &[u8] {
+pub fn format_u64(mut value: u64, digits: &mut [u8; 20]) -> &[u8] {
     let mut start = digits.len();
     loop {
         start -= 1;

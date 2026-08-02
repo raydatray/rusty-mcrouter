@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::meta::reply_decoder::{
     framed_value, invalid_argument, invalid_flag, invalid_number, MetaReplyDecodeError,
-    INVALID_RESPONSE, SHAPE_MISMATCH,
+    INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES, SHAPE_MISMATCH,
 };
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_field, write_i64_field, write_key_token, write_opaque,
@@ -13,7 +13,7 @@ use crate::meta::reply_encoder::{
 use crate::meta::request_decoder::{
     bad_argument, bad_number, capacity_error, flag_error, parse_opaque, recoverable_client_error,
     require_hint_argument, resolve_key, DecodedMetaCommand, MetaRequestDecodeError,
-    BAD_COMMAND_LINE, INVALID_FLAG, MAX_LINE_TOKENS,
+    BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
@@ -25,7 +25,7 @@ use crate::meta::tokens::{
 };
 use crate::meta::{
     wire, GetSuccessShape, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyExpectation,
-    MetaReplyPlan, MAX_COMMAND_LINE_BYTES, MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES,
+    MetaReplyPlan,
 };
 use crate::reply::{GetHit, GetReply, RecacheState, Reply};
 use crate::request::{GetRequest, GetTemporalInstruction, GetTemporalInstructions, Request};

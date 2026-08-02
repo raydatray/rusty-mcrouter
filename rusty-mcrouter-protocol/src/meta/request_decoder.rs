@@ -4,12 +4,13 @@ use thiserror::Error;
 
 use crate::bounded_list::CapacityExceeded;
 use crate::key::{Key, MAX_KEY_BYTES};
+use crate::meta::command;
+use crate::meta::tokens::{
+    find_line, split_tokens, BadNumber, FindLine, FlagError, UnexpectedArgument,
+};
 use crate::meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan};
 use crate::reply::ErrorReply;
 use crate::request::Request;
-
-use super::command;
-use super::tokens::{find_line, split_tokens, BadNumber, FindLine, FlagError, UnexpectedArgument};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
@@ -30,6 +31,9 @@ const BAD_DATA_CHUNK: &[u8] = b"bad data chunk";
 const OBJECT_TOO_LARGE: &[u8] = b"object too large for cache";
 const OPTIONS_FLAGS_TOO_LONG: &[u8] = b"options flags are too long";
 
+// `Request` is ~224 bytes to `NoOp`'s zero; boxing the request to appease
+// the lint would put an allocation on the per-request hot path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodedMetaCommand {
     Request {
