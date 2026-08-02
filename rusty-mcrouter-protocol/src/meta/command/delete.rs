@@ -1,6 +1,6 @@
 //! `md`: parse/encode for the Meta delete command on both proxy hops.
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 
 use crate::meta::numbers::{parse_i32, parse_u32, parse_u64};
 use crate::meta::reply_decoder::{MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH};
@@ -8,9 +8,9 @@ use crate::meta::reply_encoder::{
     reply_line_too_long, write_key_token, write_opaque, MetaReplyEncodeError,
 };
 use crate::meta::request_decoder::{
-    bad_command_line, bytes_from_frame, flag_error, recoverable_client_error,
-    require_hint_argument, resolve_key, DecodedMetaCommand, MetaRequestDecodeError,
-    BAD_COMMAND_LINE, INVALID_FLAG, MAX_LINE_TOKENS, MAX_OPAQUE_BYTES,
+    bad_command_line, flag_error, parse_opaque, recoverable_client_error, require_hint_argument,
+    resolve_key, DecodedMetaCommand, MetaRequestDecodeError, BAD_COMMAND_LINE, INVALID_FLAG,
+    MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
@@ -26,7 +26,6 @@ use crate::request::{DeleteRequest, Request};
 
 pub fn parse_request<'a>(
     mut tokens: impl Iterator<Item = &'a [u8]>,
-    key_frame: Option<&Bytes>,
 ) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
     let raw_key = tokens
         .next()
@@ -64,16 +63,7 @@ pub fn parse_request<'a>(
                     .push(MetaOutputToken::Key)
                     .map_err(bad_command_line)?;
             }
-            b'O' => {
-                if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-                reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Opaque)
-                    .map_err(bad_command_line)?;
-            }
+            b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
                 require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
@@ -88,7 +78,7 @@ pub fn parse_request<'a>(
         }
     }
 
-    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
+    let key = resolve_key(raw_key, return_key, &mut reply_plan)?;
     Ok(DecodedMetaCommand::Request {
         request: Request::Delete(DeleteRequest {
             key,

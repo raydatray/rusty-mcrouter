@@ -3,14 +3,12 @@ use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 
 use crate::key::{Key, MAX_KEY_BYTES};
+use crate::meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan};
 use crate::reply::ErrorReply;
-use crate::{
-    meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan},
-    request::{Request, StoreMode, StoreRequest},
-};
+use crate::request::Request;
 
 use super::command;
-use super::line_scanner::{scan_line, LineScan};
+use super::line_scanner::{find_line, FindLine};
 use super::tokens::{split_tokens, FlagError};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
@@ -25,13 +23,11 @@ pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
 pub const MAX_LINE_TOKENS: usize = 20;
 pub const MAX_OPAQUE_BYTES: usize = 31;
 
-const MAX_ZERO_COPY_KEY_FRAME: usize = 1024;
-const MAX_RETAINED_KEY_BUFFER: usize = 64 * 1024;
 pub const BAD_COMMAND_LINE: &[u8] = b"bad command line format";
 pub const INVALID_FLAG: &[u8] = b"invalid flag";
 const DUPLICATE_FLAG: &[u8] = b"duplicate flag";
 const BAD_DATA_CHUNK: &[u8] = b"bad data chunk";
-pub const OBJECT_TOO_LARGE: &[u8] = b"object too large for cache";
+const OBJECT_TOO_LARGE: &[u8] = b"object too large for cache";
 const OPTIONS_FLAGS_TOO_LONG: &[u8] = b"options flags are too long";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,175 +39,137 @@ pub enum DecodedMetaCommand {
     NoOp, // mn
 }
 
-#[derive(Debug)]
+/// Nearly stateless: each call frames one complete command — the line plus,
+/// for `ms`, its value block — and parses it in a single pass. The one piece
+/// of state is the swallow counter: an `ms` header may declare a body too
+/// large to ever buffer, and memcached semantics require consuming and
+/// discarding that body before reporting the error.
+#[derive(Debug, Default)]
 pub struct MetaRequestDecoder {
-    state: RequestDecodeState,
+    swallow: Option<Swallow>,
 }
 
+/// `remaining` body bytes to discard before reporting `reply`.
 #[derive(Debug)]
-enum RequestDecodeState {
-    Command { scanned: usize },
-    StoreBody(StoreHeader),
-    Swallow { remaining: usize, reply: ErrorReply },
-}
-
-impl Default for RequestDecodeState {
-    fn default() -> Self {
-        Self::Command { scanned: 0 }
-    }
-}
-
-#[derive(Debug)]
-pub struct StoreHeader {
-    pub key: Key,
-    pub value_len: usize,
-    pub return_cas: bool,
-    pub return_size: bool,
-    pub mode: StoreMode,
-    pub client_flags: Option<u32>,
-    pub ttl: Option<i32>,
-    pub compare_cas: Option<u64>,
-    pub override_cas: Option<u64>,
-    pub invalidate: bool,
-    pub vivify_ttl: Option<i32>,
-    pub reply_plan: MetaReplyPlan,
-}
-
-pub enum ParsedStoreHeader {
-    Ready(StoreHeader),
-    Swallow { remaining: usize, reply: ErrorReply },
-}
-
-impl Default for MetaRequestDecoder {
-    fn default() -> Self {
-        Self::new()
-    }
+struct Swallow {
+    remaining: usize,
+    reply: ErrorReply,
 }
 
 impl MetaRequestDecoder {
     pub const fn new() -> Self {
-        Self {
-            state: RequestDecodeState::Command { scanned: 0 },
-        }
+        Self { swallow: None }
     }
 
-    /// decodes at most one complete Meta command.
+    /// Decodes at most one complete Meta command.
     ///
-    /// `Ok(None)` leaves an incomplete frame untouched. a recoverable error
-    /// consumes exactly one complete command, while a fatal error requires the
-    /// session to close the connection.
-    ///
-    /// Each pass takes the state out by value and puts back whatever is
-    /// still incomplete, so no arm ever re-proves which variant it holds.
+    /// `Ok(None)` means the command is not fully buffered yet; nothing is
+    /// consumed until it is. A recoverable error consumes exactly one
+    /// complete command, while a fatal error requires the session to close
+    /// the connection.
     pub fn decode(
         &mut self,
         src: &mut BytesMut,
     ) -> Result<Option<DecodedMetaCommand>, MetaRequestDecodeError> {
-        loop {
-            match std::mem::take(&mut self.state) {
-                RequestDecodeState::StoreBody(header) => {
-                    return self.decode_store_body(header, src);
-                }
-                RequestDecodeState::Swallow { remaining, reply } => {
-                    return self.swallow(remaining, reply, src);
-                }
-                RequestDecodeState::Command { scanned } => {
-                    let frame = match scan_line(scanned, src, MAX_COMMAND_LINE_BYTES) {
-                        LineScan::Incomplete { scanned } => {
-                            self.state = RequestDecodeState::Command { scanned };
-                            return Ok(None);
-                        }
-                        LineScan::OverLimit => {
-                            return Err(FatalDecodeError::FrameTooLarge {
-                                maximum: MAX_COMMAND_LINE_BYTES,
-                            }
-                            .into());
-                        }
-                        LineScan::Frame(frame) => frame,
-                    };
-                    let retain_key_frame = frame.bytes.len() <= MAX_ZERO_COPY_KEY_FRAME
-                        && frame.buffer_capacity <= MAX_RETAINED_KEY_BUFFER;
-                    let key_frame = retain_key_frame.then_some(&frame.bytes);
-                    let line = &frame.bytes[..frame.line_end];
-                    if line == b"ms" || line.starts_with(b"ms ") {
-                        self.state = match command::store::parse_request(line, key_frame)? {
-                            ParsedStoreHeader::Ready(header) => {
-                                RequestDecodeState::StoreBody(header)
-                            }
-                            ParsedStoreHeader::Swallow { remaining, reply } => {
-                                RequestDecodeState::Swallow { remaining, reply }
-                            }
-                        };
-                        continue; // the body may already be buffered
-                    }
-                    return parse_command(line, key_frame).map(Some);
-                }
-            }
+        if self.swallow.is_some() {
+            return self.swallow_buffered(src);
         }
+
+        let (line_end, line_frame_len) = match find_line(src, MAX_COMMAND_LINE_BYTES) {
+            FindLine::Incomplete => return Ok(None),
+            FindLine::OverLimit => {
+                return Err(FatalDecodeError::FrameTooLarge {
+                    maximum: MAX_COMMAND_LINE_BYTES,
+                }
+                .into());
+            }
+            FindLine::Line { end, frame_len } => (end, frame_len),
+        };
+
+        let line = &src[..line_end];
+        if line == b"ms" || line.starts_with(b"ms ") {
+            return self.decode_store(line_end, line_frame_len, src);
+        }
+
+        let command = parse_command(line);
+        src.advance(line_frame_len);
+        command.map(Some)
     }
 
     pub fn decode_eof(&self, src: &BytesMut) -> Result<(), MetaRequestDecodeError> {
-        match self.state {
-            RequestDecodeState::Command { .. } if src.is_empty() => Ok(()),
-            _ => Err(FatalDecodeError::UnexpectedEof.into()),
+        if self.swallow.is_none() && src.is_empty() {
+            Ok(())
+        } else {
+            Err(FatalDecodeError::UnexpectedEof.into())
         }
     }
 
-    fn decode_store_body(
+    /// Frames `ms`: the value length is pre-parsed from the (complete)
+    /// command line so the body can be framed — or swallowed when it exceeds
+    /// what we are willing to buffer — before the header is fully validated.
+    fn decode_store(
         &mut self,
-        header: StoreHeader,
+        line_end: usize,
+        line_frame_len: usize,
         src: &mut BytesMut,
     ) -> Result<Option<DecodedMetaCommand>, MetaRequestDecodeError> {
-        let frame_len = header.value_len + 2;
+        let value_len = match command::store::parse_value_length(&src[..line_end]) {
+            Ok(value_len) => value_len,
+            Err(error) => {
+                // A malformed datalen never swallows a body: frame alignment
+                // resumes at the next line, matching memcached.
+                src.advance(line_frame_len);
+                return Err(error);
+            }
+        };
+        if value_len > MAX_VALUE_BYTES {
+            src.advance(line_frame_len);
+            self.swallow = Some(Swallow {
+                remaining: value_len + 2,
+                reply: ErrorReply::Server(Some(Bytes::from_static(OBJECT_TOO_LARGE))),
+            });
+            return self.swallow_buffered(src);
+        }
+
+        let frame_len = line_frame_len + value_len + 2;
         if src.len() < frame_len {
-            self.state = RequestDecodeState::StoreBody(header);
             return Ok(None);
         }
 
         let frame = src.split_to(frame_len).freeze();
-        if &frame[header.value_len..] != b"\r\n" {
+        // Header errors take precedence over a malformed body terminator,
+        // matching memcached, which validates the header before the chunk.
+        let command = command::store::parse_request(
+            &frame[..line_end],
+            frame.slice(line_frame_len..line_frame_len + value_len),
+        )?;
+        if &frame[frame_len - 2..] != b"\r\n" {
             return Err(recoverable_client_error(BAD_DATA_CHUNK));
         }
-        let value = frame.slice(..header.value_len);
-        Ok(Some(DecodedMetaCommand::Request {
-            request: Request::Store(StoreRequest {
-                key: header.key,
-                value,
-                return_cas: header.return_cas,
-                return_size: header.return_size,
-                mode: header.mode,
-                client_flags: header.client_flags,
-                ttl: header.ttl,
-                compare_cas: header.compare_cas,
-                override_cas: header.override_cas,
-                invalidate: header.invalidate,
-                vivify_ttl: header.vivify_ttl,
-            }),
-            reply_plan: header.reply_plan,
-        }))
+        Ok(Some(command))
     }
 
-    fn swallow(
+    /// Discards buffered bytes of a swallowed body, reporting the pending
+    /// error once the body has been fully consumed.
+    fn swallow_buffered(
         &mut self,
-        mut remaining: usize,
-        reply: ErrorReply,
         src: &mut BytesMut,
     ) -> Result<Option<DecodedMetaCommand>, MetaRequestDecodeError> {
-        let consumed = remaining.min(src.len());
+        let Some(mut swallow) = self.swallow.take() else {
+            return Ok(None);
+        };
+        let consumed = swallow.remaining.min(src.len());
         src.advance(consumed);
-        remaining -= consumed;
-        if remaining != 0 {
-            self.state = RequestDecodeState::Swallow { remaining, reply };
+        swallow.remaining -= consumed;
+        if swallow.remaining != 0 {
+            self.swallow = Some(swallow);
             return Ok(None);
         }
-        Err(MetaRequestDecodeError::Recoverable(reply))
+        Err(MetaRequestDecodeError::Recoverable(swallow.reply))
     }
 }
 
-fn parse_command(
-    line: &[u8],
-    key_frame: Option<&Bytes>,
-) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
+fn parse_command(line: &[u8]) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
     if line.first() == Some(&b' ') {
         return Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error));
     }
@@ -224,19 +182,15 @@ fn parse_command(
 
     let mut tokens = split_tokens(line);
     match tokens.next() {
-        Some(b"mg") => command::get::parse_request(tokens, key_frame),
-        Some(b"md") => command::delete::parse_request(tokens, key_frame),
-        Some(b"ma") => command::arithmetic::parse_request(tokens, key_frame),
-        Some(b"me") => command::debug::parse_request(tokens, key_frame),
+        Some(b"mg") => command::get::parse_request(tokens),
+        Some(b"md") => command::delete::parse_request(tokens),
+        Some(b"ma") => command::arithmetic::parse_request(tokens),
+        Some(b"me") => command::debug::parse_request(tokens),
         _ => Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error)),
     }
 }
 
-pub fn parse_key(
-    raw: &[u8],
-    encoding: KeyEncoding,
-    frame: Option<&Bytes>,
-) -> Result<Key, MetaRequestDecodeError> {
+pub fn parse_key(raw: &[u8], encoding: KeyEncoding) -> Result<Key, MetaRequestDecodeError> {
     if raw.len() > MAX_KEY_BYTES {
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
@@ -246,7 +200,7 @@ pub fn parse_key(
             if raw.is_empty() || raw.iter().any(|byte| *byte <= b' ' || *byte == 0x7f) {
                 return Err(recoverable_client_error(BAD_COMMAND_LINE));
             }
-            bytes_from_frame(raw, frame)?
+            Bytes::copy_from_slice(raw)
         }
         KeyEncoding::Base64 => Bytes::from(
             STANDARD
@@ -256,23 +210,6 @@ pub fn parse_key(
     };
 
     Key::new(bytes).map_err(|_| recoverable_client_error(BAD_COMMAND_LINE))
-}
-
-pub fn bytes_from_frame(
-    raw: &[u8],
-    frame: Option<&Bytes>,
-) -> Result<Bytes, MetaRequestDecodeError> {
-    let Some(frame) = frame else {
-        return Ok(Bytes::copy_from_slice(raw));
-    };
-    let start = (raw.as_ptr() as usize)
-        .checked_sub(frame.as_ptr() as usize)
-        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    let end = start
-        .checked_add(raw.len())
-        .filter(|end| *end <= frame.len())
-        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    Ok(frame.slice(start..end))
 }
 
 /// `P` and `L` are proxy hints that carry no cache semantics; they are
@@ -289,13 +226,12 @@ pub fn require_hint_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeErr
 /// position. Never forwarded to the backend.
 pub fn parse_opaque(
     argument: &[u8],
-    key_frame: Option<&Bytes>,
     reply_plan: &mut MetaReplyPlan,
 ) -> Result<(), MetaRequestDecodeError> {
     if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
-    reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
+    reply_plan.opaque = Some(Bytes::copy_from_slice(argument));
     reply_plan
         .output_order
         .push(MetaOutputToken::Opaque)
@@ -306,11 +242,10 @@ pub fn parse_opaque(
 /// client-visible form for the local reply.
 pub fn resolve_key(
     raw_key: &[u8],
-    key_frame: Option<&Bytes>,
     return_key: bool,
     reply_plan: &mut MetaReplyPlan,
 ) -> Result<Key, MetaRequestDecodeError> {
-    let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
+    let key = parse_key(raw_key, reply_plan.key_encoding)?;
     if return_key {
         reply_plan.external_key = Some(key.clone_bytes());
     }
@@ -362,7 +297,9 @@ pub enum FatalDecodeError {
 mod tests {
     use super::*;
     use crate::meta::MetaQuietPolicy;
-    use crate::request::{ArithmeticMode, ArithmeticTemporalInstruction, GetTemporalInstruction};
+    use crate::request::{
+        ArithmeticMode, ArithmeticTemporalInstruction, GetTemporalInstruction, StoreMode,
+    };
 
     fn decode(input: &[u8]) -> DecodedMetaCommand {
         let mut decoder = MetaRequestDecoder::new();
@@ -946,16 +883,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_store_header_swallows_fragmented_body_incrementally() {
+    fn invalid_store_header_reports_once_fragmented_body_arrives() {
         let mut decoder = MetaRequestDecoder::new();
         let mut src = BytesMut::from(&b"ms key 3 z\r\nf"[..]);
 
         assert_eq!(decoder.decode(&mut src), Ok(None));
-        assert!(src.is_empty());
-        assert!(matches!(
-            decoder.state,
-            RequestDecodeState::Swallow { remaining: 4, .. }
-        ));
 
         src.extend_from_slice(b"oo\r\nmn\r\n");
         assert_eq!(
@@ -1271,22 +1203,16 @@ mod tests {
     }
 
     #[test]
-    fn resumes_line_scanning_after_fragmented_reads() {
+    fn leaves_fragmented_lines_untouched_until_complete() {
         let mut decoder = MetaRequestDecoder::new();
         let mut src = BytesMut::from(&b"mg user"[..]);
 
         assert_eq!(decoder.decode(&mut src), Ok(None));
-        assert!(matches!(
-            &decoder.state,
-            RequestDecodeState::Command { scanned } if *scanned == src.len()
-        ));
+        assert_eq!(src, b"mg user".as_slice());
 
         src.extend_from_slice(b":1");
         assert_eq!(decoder.decode(&mut src), Ok(None));
-        assert!(matches!(
-            &decoder.state,
-            RequestDecodeState::Command { scanned } if *scanned == src.len()
-        ));
+        assert_eq!(src, b"mg user:1".as_slice());
 
         src.extend_from_slice(b"\r\n");
         let DecodedMetaCommand::Request {
@@ -1297,10 +1223,7 @@ mod tests {
             panic!("expected get request");
         };
         assert_eq!(request.key.as_bytes(), b"user:1");
-        assert!(matches!(
-            decoder.state,
-            RequestDecodeState::Command { scanned: 0 }
-        ));
+        assert!(src.is_empty());
     }
 
     #[test]

@@ -23,7 +23,6 @@ use crate::request::{DebugRequest, Request};
 
 pub fn parse_request<'a>(
     mut tokens: impl Iterator<Item = &'a [u8]>,
-    key_frame: Option<&Bytes>,
 ) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
     let raw_key = tokens
         .next()
@@ -43,7 +42,7 @@ pub fn parse_request<'a>(
         }
     }
 
-    let key = parse_key(raw_key, key_encoding, key_frame)?;
+    let key = parse_key(raw_key, key_encoding)?;
     let reply_plan = MetaReplyPlan {
         external_key: Some(key.clone_bytes()),
         key_encoding,
