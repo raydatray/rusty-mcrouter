@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{
     key::{Key, MAX_KEY_BYTES},
-    request::{ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction, Request},
+    request::{ArithmeticTemporalInstruction, Request},
 };
 
 use super::{command, wire, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES};
@@ -23,30 +23,29 @@ impl MetaRequestEncoder {
         out: &mut BytesMut,
     ) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
         let checkpoint = out.len();
-        let result = match request {
-            Request::Get(request) => {
-                command::get::encode_request(request, out).map(MetaReplyExpectation::Get)
-            }
-            Request::Store(request) => {
-                command::store::encode_request(request, out).map(|()| MetaReplyExpectation::Store {
-                    cas: request.return_cas,
-                    size: request.return_size,
-                })
-            }
-            Request::Delete(request) => {
-                command::delete::encode_request(request, out).map(|()| MetaReplyExpectation::Delete)
-            }
-            Request::Arithmetic(request) => {
-                encode_arithmetic(request, out).map(|()| MetaReplyExpectation::Arithmetic {
-                    value: request.return_value,
-                    cas: request.return_cas,
-                    ttl: request.temporal.iter().any(|instruction| {
-                        matches!(instruction, ArithmeticTemporalInstruction::ReturnTtl)
+        let result =
+            match request {
+                Request::Get(request) => {
+                    command::get::encode_request(request, out).map(MetaReplyExpectation::Get)
+                }
+                Request::Store(request) => command::store::encode_request(request, out).map(|()| {
+                    MetaReplyExpectation::Store {
+                        cas: request.return_cas,
+                        size: request.return_size,
+                    }
+                }),
+                Request::Delete(request) => command::delete::encode_request(request, out)
+                    .map(|()| MetaReplyExpectation::Delete),
+                Request::Arithmetic(request) => command::arithmetic::encode_request(request, out)
+                    .map(|()| MetaReplyExpectation::Arithmetic {
+                        value: request.return_value,
+                        cas: request.return_cas,
+                        ttl: request.temporal.iter().any(|instruction| {
+                            matches!(instruction, ArithmeticTemporalInstruction::ReturnTtl)
+                        }),
                     }),
-                })
-            }
-            Request::Debug(request) => encode_debug(request, out),
-        };
+                Request::Debug(request) => encode_debug(request, out),
+            };
         if result.is_err() {
             out.truncate(checkpoint);
         }
@@ -67,50 +66,6 @@ pub enum MetaRequestEncodeError {
 
     #[error("Meta request exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
-}
-
-fn encode_arithmetic(
-    request: &ArithmeticRequest,
-    out: &mut BytesMut,
-) -> Result<(), MetaRequestEncodeError> {
-    let line_start = out.len();
-    out.extend_from_slice(b"ma ");
-    let key_is_base64 = write_backend_key(out, &request.key)?;
-
-    if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
-    }
-    if request.return_value {
-        wire::write_bare_flag(out, b'v');
-    }
-    if request.return_cas {
-        wire::write_bare_flag(out, b'c');
-    }
-    if let Some(cas) = request.compare_cas {
-        write_u64_flag(out, b'C', cas);
-    }
-    if let Some(cas) = request.override_cas {
-        write_u64_flag(out, b'E', cas);
-    }
-    if let Some(initial) = request.initial_value {
-        write_u64_flag(out, b'J', initial);
-    }
-    if request.delta != 1 {
-        write_u64_flag(out, b'D', request.delta);
-    }
-    if request.mode == ArithmeticMode::Decrement {
-        write_mode_flag(out, b'D');
-    }
-    for instruction in request.temporal.iter() {
-        match instruction {
-            ArithmeticTemporalInstruction::Vivify(ttl) => write_i32_flag(out, b'N', *ttl),
-            ArithmeticTemporalInstruction::UpdateTtl(ttl) => write_i32_flag(out, b'T', *ttl),
-            ArithmeticTemporalInstruction::ReturnTtl => wire::write_bare_flag(out, b't'),
-        }
-    }
-
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
-    Ok(())
 }
 
 fn encode_debug(

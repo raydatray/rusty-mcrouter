@@ -2,6 +2,7 @@
 //! each covering all four codec roles: `parse_request`, `encode_request`,
 //! `parse_reply`, and `encode_reply`.
 
+pub mod arithmetic;
 pub mod delete;
 pub mod get;
 pub mod store;

@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    command, wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_DEBUG_FIELDS,
+    command, wire, KeyEncoding, MetaQuietPolicy, MetaReplyPlan, MAX_DEBUG_FIELDS,
     MAX_REPLY_LINE_BYTES,
 };
 
@@ -52,7 +52,7 @@ impl MetaReplyEncoder {
             Reply::Get(reply) => command::get::encode_reply(reply, plan, out),
             Reply::Store(reply) => command::store::encode_reply(reply, plan, out),
             Reply::Delete(reply) => command::delete::encode_reply(reply, plan, out),
-            Reply::Arithmetic(reply) => encode_arithmetic(reply, plan, out),
+            Reply::Arithmetic(reply) => command::arithmetic::encode_reply(reply, plan, out),
             Reply::Debug(reply) => encode_debug(reply, plan, out),
             Reply::Error(reply) => encode_error(reply, out),
         };
@@ -92,65 +92,6 @@ pub enum MetaReplyEncodeError {
 
     #[error("Meta reply exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
-}
-
-fn encode_arithmetic(
-    reply: &ArithmeticReply,
-    plan: &MetaReplyPlan,
-    out: &mut BytesMut,
-) -> Result<(), MetaReplyEncodeError> {
-    let (code, result, success) = match reply {
-        ArithmeticReply::Success(result) => {
-            if result.value.is_some() {
-                (b"VA".as_slice(), result, true)
-            } else {
-                (b"HD".as_slice(), result, true)
-            }
-        }
-        ArithmeticReply::NotStored(result) => (b"NS".as_slice(), result, false),
-        ArithmeticReply::Exists(result) => (b"EX".as_slice(), result, false),
-        ArithmeticReply::NotFound(result) => (b"NF".as_slice(), result, false),
-    };
-    if !success && result.value.is_some() {
-        return Err(MetaReplyEncodeError::InvalidData(
-            "arithmetic failure contains a value",
-        ));
-    }
-
-    let mut value_digits = [0; 20];
-    let value_body = result
-        .value
-        .map(|value| wire::format_u64(value, &mut value_digits));
-    let line_start = out.len();
-    out.extend_from_slice(code);
-    if let Some(value) = value_body {
-        out.extend_from_slice(b" ");
-        wire::write_u64(out, value.len() as u64);
-    }
-
-    for token in plan.output_order.iter() {
-        match token {
-            MetaOutputToken::Cas => {
-                write_field(out, b'c', result.cas, "CAS", success)?;
-            }
-            MetaOutputToken::Ttl => {
-                write_field(out, b't', result.ttl, "TTL", success)?;
-            }
-            MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key_token(plan, out)?,
-            _ => {
-                return Err(MetaReplyEncodeError::InvalidData(
-                    "invalid arithmetic output token",
-                ));
-            }
-        }
-    }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
-    if let Some(value) = value_body {
-        out.extend_from_slice(value);
-        out.extend_from_slice(b"\r\n");
-    }
-    Ok(())
 }
 
 fn encode_debug(
