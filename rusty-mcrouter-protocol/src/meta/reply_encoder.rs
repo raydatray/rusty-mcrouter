@@ -51,7 +51,7 @@ impl MetaReplyEncoder {
         let result = match reply {
             Reply::Get(reply) => command::get::encode_reply(reply, plan, out),
             Reply::Store(reply) => command::store::encode_reply(reply, plan, out),
-            Reply::Delete(reply) => encode_delete(reply, plan, out),
+            Reply::Delete(reply) => command::delete::encode_reply(reply, plan, out),
             Reply::Arithmetic(reply) => encode_arithmetic(reply, plan, out),
             Reply::Debug(reply) => encode_debug(reply, plan, out),
             Reply::Error(reply) => encode_error(reply, out),
@@ -92,34 +92,6 @@ pub enum MetaReplyEncodeError {
 
     #[error("Meta reply exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
-}
-
-fn encode_delete(
-    reply: &DeleteReply,
-    plan: &MetaReplyPlan,
-    out: &mut BytesMut,
-) -> Result<(), MetaReplyEncodeError> {
-    let code = match reply {
-        DeleteReply::Success => b"HD".as_slice(),
-        DeleteReply::NotStored => b"NS".as_slice(),
-        DeleteReply::Exists => b"EX".as_slice(),
-        DeleteReply::NotFound => b"NF".as_slice(),
-    };
-
-    let line_start = out.len();
-    out.extend_from_slice(code);
-    for token in plan.output_order.iter() {
-        match token {
-            MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key_token(plan, out)?,
-            _ => {
-                return Err(MetaReplyEncodeError::InvalidData(
-                    "invalid delete output token",
-                ));
-            }
-        }
-    }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn encode_arithmetic(
