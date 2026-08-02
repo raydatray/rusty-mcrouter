@@ -101,26 +101,13 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::test_support::request;
     use crate::{
-        meta::{
-            request_decoder::MAX_VALUE_BYTES, DecodedMetaCommand, GetSuccessShape,
-            MetaRequestDecoder,
-        },
+        meta::{request_decoder::MAX_VALUE_BYTES, GetSuccessShape},
         request::{
             GetRequest, GetTemporalInstruction, GetTemporalInstructions, StoreMode, StoreRequest,
         },
     };
-
-    fn parse(input: &[u8]) -> Request {
-        let mut decoder = MetaRequestDecoder::new();
-        let mut src = BytesMut::from(input);
-        let DecodedMetaCommand::Request { request, .. } =
-            decoder.decode(&mut src).unwrap().unwrap()
-        else {
-            panic!("expected request");
-        };
-        request
-    }
 
     fn encode(request: &Request) -> Result<BytesMut, MetaRequestEncodeError> {
         let mut out = BytesMut::new();
@@ -163,38 +150,38 @@ mod tests {
     #[test]
     fn encodes_basic_get() {
         assert_eq!(
-            encode(&parse(b"mg key\r\n")).unwrap(),
+            encode(&request(b"mg key\r\n")).unwrap(),
             b"mg key\r\n".as_slice()
         );
     }
 
     #[test]
     fn encodes_basic_store() {
-        let request = parse(b"ms key 3\r\nfoo\r\n");
+        let request = request(b"ms key 3\r\nfoo\r\n");
         assert_eq!(encode(&request).unwrap(), b"ms key 3\r\nfoo\r\n".as_slice());
     }
 
     #[test]
     fn encodes_basic_delete() {
-        let request = parse(b"md key\r\n");
+        let request = request(b"md key\r\n");
         assert_eq!(encode(&request).unwrap(), b"md key\r\n".as_slice());
     }
 
     #[test]
     fn encodes_basic_arithmetic() {
-        let request = parse(b"ma key\r\n");
+        let request = request(b"ma key\r\n");
         assert_eq!(encode(&request).unwrap(), b"ma key\r\n".as_slice());
     }
 
     #[test]
     fn encodes_basic_debug() {
-        let request = parse(b"me key\r\n");
+        let request = request(b"me key\r\n");
         assert_eq!(encode(&request).unwrap(), b"me key\r\n".as_slice());
     }
 
     #[test]
     fn returns_debug_reply_expectation_with_backend_key() {
-        let request = parse(b"me /region/cluster/key\r\n");
+        let request = request(b"me /region/cluster/key\r\n");
         let mut out = BytesMut::new();
 
         assert_eq!(
@@ -208,7 +195,7 @@ mod tests {
 
     #[test]
     fn base64_encodes_binary_debug_key() {
-        let request = parse(b"me AAE= b\r\n");
+        let request = request(b"me AAE= b\r\n");
         let mut out = BytesMut::new();
 
         assert_eq!(
@@ -224,7 +211,7 @@ mod tests {
     fn returns_arithmetic_reply_expectation() {
         let encoder = MetaRequestEncoder::new();
         let mut out = BytesMut::new();
-        let header = parse(b"ma key\r\n");
+        let header = request(b"ma key\r\n");
         assert_eq!(
             encoder.encode(&header, &mut out),
             Ok(MetaReplyExpectation::Arithmetic {
@@ -235,7 +222,7 @@ mod tests {
         );
 
         out.clear();
-        let value = parse(b"ma key v\r\n");
+        let value = request(b"ma key v\r\n");
         assert_eq!(
             encoder.encode(&value, &mut out),
             Ok(MetaReplyExpectation::Arithmetic {
@@ -248,7 +235,7 @@ mod tests {
 
     #[test]
     fn strips_arithmetic_frontend_metadata_and_routing_prefix() {
-        let request = parse(
+        let request = request(
             b"ma /region/cluster/key Otag N30 J5 D2 T60 MD q t c v k C42 E43 Pproxy Lpath/\r\n",
         );
 
@@ -261,22 +248,22 @@ mod tests {
     #[test]
     fn canonicalizes_arithmetic_modes_and_defaults() {
         assert_eq!(
-            encode(&parse(b"ma key MI D1\r\n")).unwrap(),
+            encode(&request(b"ma key MI D1\r\n")).unwrap(),
             b"ma key\r\n".as_slice()
         );
         assert_eq!(
-            encode(&parse(b"ma key M+\r\n")).unwrap(),
+            encode(&request(b"ma key M+\r\n")).unwrap(),
             b"ma key\r\n".as_slice()
         );
         assert_eq!(
-            encode(&parse(b"ma key M-\r\n")).unwrap(),
+            encode(&request(b"ma key M-\r\n")).unwrap(),
             b"ma key MD\r\n".as_slice()
         );
     }
 
     #[test]
     fn preserves_arithmetic_temporal_order() {
-        let request = parse(b"ma key t T60 N30\r\n");
+        let request = request(b"ma key t T60 N30\r\n");
 
         assert_eq!(
             encode(&request).unwrap(),
@@ -286,14 +273,14 @@ mod tests {
 
     #[test]
     fn base64_encodes_binary_arithmetic_key() {
-        let request = parse(b"ma AAE= b\r\n");
+        let request = request(b"ma AAE= b\r\n");
 
         assert_eq!(encode(&request).unwrap(), b"ma AAE= b\r\n".as_slice());
     }
 
     #[test]
     fn returns_delete_reply_expectation() {
-        let request = parse(b"md key\r\n");
+        let request = request(b"md key\r\n");
         let mut out = BytesMut::new();
 
         assert_eq!(
@@ -305,7 +292,7 @@ mod tests {
     #[test]
     fn strips_delete_frontend_metadata_and_routing_prefix() {
         let request =
-            parse(b"md /region/cluster/key C42 E43 F7 I k Otag q T60 x Pproxy Lpath/\r\n");
+            request(b"md /region/cluster/key C42 E43 F7 I k Otag q T60 x Pproxy Lpath/\r\n");
 
         assert_eq!(
             encode(&request).unwrap(),
@@ -315,14 +302,14 @@ mod tests {
 
     #[test]
     fn base64_encodes_binary_delete_key() {
-        let request = parse(b"md AAE= b\r\n");
+        let request = request(b"md AAE= b\r\n");
 
         assert_eq!(encode(&request).unwrap(), b"md AAE= b\r\n".as_slice());
     }
 
     #[test]
     fn returns_store_reply_expectation() {
-        let request = parse(b"ms key 3\r\nfoo\r\n");
+        let request = request(b"ms key 3\r\nfoo\r\n");
         let mut out = BytesMut::new();
 
         assert_eq!(
@@ -336,7 +323,7 @@ mod tests {
 
     #[test]
     fn strips_store_frontend_metadata_and_routing_prefix() {
-        let request = parse(
+        let request = request(
             b"ms /region/cluster/key 3 c C42 E43 F7 I k Otag q s T60 MA N30 Pproxy Lpath/\r\nfoo\r\n",
         );
 
@@ -356,13 +343,13 @@ mod tests {
             (b'P', b"ms key 0 MP\r\n\r\n".as_slice()),
         ] {
             let input = [b"ms key 0 M".as_slice(), &[wire_mode], b"\r\n\r\n"].concat();
-            assert_eq!(encode(&parse(&input)).unwrap(), expected);
+            assert_eq!(encode(&request(&input)).unwrap(), expected);
         }
     }
 
     #[test]
     fn encodes_binary_store_key_and_value() {
-        let request = parse(b"ms AAE= 4 b\r\na\0b\n\r\n");
+        let request = request(b"ms AAE= 4 b\r\na\0b\n\r\n");
 
         assert_eq!(
             encode(&request).unwrap(),
@@ -392,21 +379,21 @@ mod tests {
         let mut out = BytesMut::new();
         let encoder = MetaRequestEncoder::new();
 
-        let header = parse(b"mg key\r\n");
+        let header = request(b"mg key\r\n");
         assert_eq!(
             encoder.encode(&header, &mut out),
             Ok(MetaReplyExpectation::Get(GetSuccessShape::Header))
         );
 
         out.clear();
-        let value = parse(b"mg key v\r\n");
+        let value = request(b"mg key v\r\n");
         assert_eq!(
             encoder.encode(&value, &mut out),
             Ok(MetaReplyExpectation::Get(GetSuccessShape::Value))
         );
 
         out.clear();
-        let conditional = parse(b"mg key v C42\r\n");
+        let conditional = request(b"mg key v C42\r\n");
         assert_eq!(
             encoder.encode(&conditional, &mut out),
             Ok(MetaReplyExpectation::Get(GetSuccessShape::HeaderOrValue))
@@ -415,7 +402,7 @@ mod tests {
 
     #[test]
     fn strips_frontend_metadata_and_routing_prefix() {
-        let request = parse(
+        let request = request(
             b"mg /region/cluster/key Otag s N30 T40 t R50 c f h k l C99 E100 u v q Pproxy Lpath/\r\n",
         );
 
@@ -427,14 +414,14 @@ mod tests {
 
     #[test]
     fn preserves_hash_stop_suffix_on_backend_key() {
-        let request = parse(b"mg /region/cluster/key|#|suffix\r\n");
+        let request = request(b"mg /region/cluster/key|#|suffix\r\n");
 
         assert_eq!(encode(&request).unwrap(), b"mg key|#|suffix\r\n".as_slice());
     }
 
     #[test]
     fn base64_encodes_binary_backend_key_without_allocation() {
-        let request = parse(b"mg AAE= b v\r\n");
+        let request = request(b"mg AAE= b v\r\n");
 
         assert_eq!(encode(&request).unwrap(), b"mg AAE= b v\r\n".as_slice());
     }

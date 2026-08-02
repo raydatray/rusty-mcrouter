@@ -30,17 +30,17 @@ impl Route for NullRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{req, req_delete, req_get, req_store};
+    use rusty_mcrouter_protocol::test_support::{delete, get, request, store};
 
     #[tokio::test]
     async fn returns_miss_for_get() {
-        let reply = NullRoute.route(req_get(b"foo")).await.unwrap();
+        let reply = NullRoute.route(get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
     async fn returns_synthesized_success_for_store() {
-        let reply = NullRoute.route(req_store(b"k", b"value")).await.unwrap();
+        let reply = NullRoute.route(store(b"k", b"value")).await.unwrap();
         assert_eq!(
             reply,
             Reply::Store(StoreReply::Success(StoreResult {
@@ -52,13 +52,13 @@ mod tests {
 
     #[tokio::test]
     async fn returns_success_for_delete() {
-        let reply = NullRoute.route(req_delete(b"k")).await.unwrap();
+        let reply = NullRoute.route(delete(b"k")).await.unwrap();
         assert_eq!(reply, Reply::Delete(DeleteReply::Success));
     }
 
     #[tokio::test]
     async fn returns_not_found_for_arithmetic() {
-        let reply = NullRoute.route(req(b"ma k v\r\n")).await.unwrap();
+        let reply = NullRoute.route(request(b"ma k v\r\n")).await.unwrap();
         assert_eq!(
             reply,
             Reply::Arithmetic(ArithmeticReply::NotFound(ArithmeticResult::default()))
@@ -67,7 +67,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_miss_for_debug() {
-        let reply = NullRoute.route(req(b"me k\r\n")).await.unwrap();
+        let reply = NullRoute.route(request(b"me k\r\n")).await.unwrap();
         assert_eq!(reply, Reply::Debug(DebugReply::Miss));
     }
 }

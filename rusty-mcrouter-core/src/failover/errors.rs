@@ -65,25 +65,13 @@ impl FailoverErrors {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{req_delete, req_get, req_store};
     use bytes::Bytes;
     use rusty_mcrouter_net::TimeoutPhase;
     use rusty_mcrouter_protocol::meta::MetaReplyDecodeError;
     use rusty_mcrouter_protocol::reply::{
         ArithmeticReply, ArithmeticResult, DeleteReply, GetReply, StoreReply, StoreResult,
     };
-
-    fn get() -> Request {
-        req_get(b"k")
-    }
-
-    fn set() -> Request {
-        req_store(b"k", b"v")
-    }
-
-    fn delete() -> Request {
-        req_delete(b"k")
-    }
+    use rusty_mcrouter_protocol::test_support::{delete, get, store};
 
     fn backend(err: NetError) -> Result<Reply> {
         Err(RouteError::Backend(err))
@@ -168,21 +156,21 @@ mod tests {
     #[test]
     fn default_uses_the_built_in_classifier_for_every_op() {
         let errors = FailoverErrors::default();
-        assert!(errors.should_failover(&get(), &timeout()));
-        assert!(errors.should_failover(&set(), &timeout()));
-        assert!(errors.should_failover(&delete(), &timeout()));
-        assert!(!errors.should_failover(&get(), &miss()));
+        assert!(errors.should_failover(&get(b"k"), &timeout()));
+        assert!(errors.should_failover(&store(b"k", b"v"), &timeout()));
+        assert!(errors.should_failover(&delete(b"k"), &timeout()));
+        assert!(!errors.should_failover(&get(b"k"), &miss()));
     }
 
     #[test]
     fn empty_updates_list_blocks_write_failover_but_not_reads() {
         let errors = FailoverErrors::new(None, Some(vec![]), None);
         assert!(
-            !errors.should_failover(&set(), &timeout()),
+            !errors.should_failover(&store(b"k", b"v"), &timeout()),
             "a set timeout must not fail over"
         );
         assert!(
-            errors.should_failover(&get(), &timeout()),
+            errors.should_failover(&get(b"k"), &timeout()),
             "a get timeout still fails over under the default"
         );
     }
@@ -190,7 +178,7 @@ mod tests {
     #[test]
     fn explicit_list_matches_only_named_kinds() {
         let errors = FailoverErrors::new(Some(vec![FailoverErrorKind::ServerError]), None, None);
-        assert!(errors.should_failover(&get(), &server_error()));
-        assert!(!errors.should_failover(&get(), &timeout()));
+        assert!(errors.should_failover(&get(b"k"), &server_error()));
+        assert!(!errors.should_failover(&get(b"k"), &timeout()));
     }
 }

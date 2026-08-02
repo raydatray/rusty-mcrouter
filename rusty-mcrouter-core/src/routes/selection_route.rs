@@ -46,32 +46,32 @@ fn routing_key(req: &Request) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{req_delete, req_get};
+    use rusty_mcrouter_protocol::test_support::{delete, get};
 
     #[test]
     fn routing_key_extracts_single_key() {
-        assert_eq!(routing_key(&req_delete(b"user:1")), b"user:1");
+        assert_eq!(routing_key(&delete(b"user:1")), b"user:1");
     }
 
     #[test]
     fn routing_key_cuts_at_hash_stop() {
-        assert_eq!(routing_key(&req_delete(b"user:1|#|debuginfo")), b"user:1");
+        assert_eq!(routing_key(&delete(b"user:1|#|debuginfo")), b"user:1");
     }
 
     #[test]
     fn routing_key_strips_the_routing_prefix() {
         // `/region/cluster/key` and `key` must land on the same child.
         assert_eq!(
-            routing_key(&req_get(b"/region/cluster/user:1")),
-            routing_key(&req_get(b"user:1"))
+            routing_key(&get(b"/region/cluster/user:1")),
+            routing_key(&get(b"user:1"))
         );
     }
 
     #[test]
     fn routing_key_hash_stop_makes_suffix_irrelevant() {
         assert_eq!(
-            routing_key(&req_get(b"user:1")),
-            routing_key(&req_get(b"user:1|#|x"))
+            routing_key(&get(b"user:1")),
+            routing_key(&get(b"user:1|#|x"))
         );
     }
 }

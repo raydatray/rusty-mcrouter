@@ -205,23 +205,13 @@ pub fn reply_line_too_long(error: wire::LineTooLong) -> MetaReplyEncodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::plan;
     use crate::{
         meta::{DecodedMetaCommand, MetaReplyDecoder, MetaRequestDecoder, MetaRequestEncoder},
         reply::{
             ArithmeticResult, DebugField, DebugHit, DebugReply, GetHit, RecacheState, StoreResult,
         },
     };
-
-    fn plan(input: &[u8]) -> MetaReplyPlan {
-        let mut decoder = MetaRequestDecoder::new();
-        let mut src = BytesMut::from(input);
-        let DecodedMetaCommand::Request { reply_plan, .. } =
-            decoder.decode(&mut src).unwrap().unwrap()
-        else {
-            panic!("expected request");
-        };
-        reply_plan
-    }
 
     fn encode(reply: &Reply, plan: &MetaReplyPlan) -> Result<BytesMut, MetaReplyEncodeError> {
         let mut out = BytesMut::new();
