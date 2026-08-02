@@ -28,7 +28,6 @@ use crate::request::{GetRequest, GetTemporalInstruction, GetTemporalInstructions
 
 pub fn parse_request<'a>(
     mut tokens: impl Iterator<Item = &'a [u8]>,
-    key_frame: Option<&Bytes>,
 ) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
     let raw_key = tokens
         .next()
@@ -95,7 +94,7 @@ pub fn parse_request<'a>(
                     .push(MetaOutputToken::LastAccess)
                     .map_err(bad_command_line)?;
             }
-            b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
+            b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
                 require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressMiss;
@@ -147,7 +146,7 @@ pub fn parse_request<'a>(
         }
     }
 
-    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
+    let key = resolve_key(raw_key, return_key, &mut reply_plan)?;
     Ok(DecodedMetaCommand::Request {
         request: Request::Get(GetRequest {
             key,
