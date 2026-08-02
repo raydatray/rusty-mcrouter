@@ -5,7 +5,8 @@ mod backend;
 mod client;
 mod server;
 
-// todo(diff 3) - re-plug `pub mod mock_memcached;` once it speaks meta
+#[cfg(any(test, feature = "testing"))]
+pub mod mock_memcached;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
