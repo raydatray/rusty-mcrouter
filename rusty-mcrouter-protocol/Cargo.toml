@@ -11,4 +11,5 @@ workspace = true
 [dependencies]
 base64.workspace = true
 bytes.workspace = true
+memchr.workspace = true
 thiserror.workspace = true

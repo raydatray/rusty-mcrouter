@@ -24,6 +24,7 @@ pub struct GetRequest {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GetTemporalInstructions {
     instructions: [Option<GetTemporalInstruction>; 4],
+    len: u8,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GetTemporalInstruction {
@@ -37,16 +38,17 @@ impl GetTemporalInstructions {
     pub(crate) fn push(&mut self, instruction: GetTemporalInstruction) -> Result<(), ParseError> {
         let slot = self
             .instructions
-            .iter_mut()
-            .find(|slot| slot.is_none())
+            .get_mut(usize::from(self.len))
             .ok_or(ParseError::TooManyFlags)?;
-
         *slot = Some(instruction);
+        self.len += 1;
         Ok(())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &GetTemporalInstruction> {
-        self.instructions.iter().flatten()
+        self.instructions[..usize::from(self.len)]
+            .iter()
+            .map(|instruction| instruction.as_ref().expect("dense temporal instructions"))
     }
 }
 

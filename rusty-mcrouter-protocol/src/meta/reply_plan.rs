@@ -30,22 +30,24 @@ pub enum KeyEncoding {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MetaOutputOrder {
     tokens: [Option<MetaOutputToken>; 8],
+    len: u8,
 }
 
 impl MetaOutputOrder {
     pub(crate) fn push(&mut self, token: MetaOutputToken) -> Result<(), ParseError> {
         let slot = self
             .tokens
-            .iter_mut()
-            .find(|slot| slot.is_none())
+            .get_mut(usize::from(self.len))
             .ok_or(ParseError::TooManyFlags)?;
-
         *slot = Some(token);
+        self.len += 1;
         Ok(())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &MetaOutputToken> {
-        self.tokens.iter().flatten()
+        self.tokens[..usize::from(self.len)]
+            .iter()
+            .map(|token| token.as_ref().expect("dense output order"))
     }
 }
 

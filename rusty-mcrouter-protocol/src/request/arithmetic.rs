@@ -28,6 +28,7 @@ pub enum ArithmeticMode {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ArithmeticTemporalInstructions {
     instructions: [Option<ArithmeticTemporalInstruction>; 3],
+    len: u8,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,16 +45,17 @@ impl ArithmeticTemporalInstructions {
     ) -> Result<(), ParseError> {
         let slot = self
             .instructions
-            .iter_mut()
-            .find(|slot| slot.is_none())
+            .get_mut(usize::from(self.len))
             .ok_or(ParseError::TooManyFlags)?;
-
         *slot = Some(instruction);
+        self.len += 1;
         Ok(())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &ArithmeticTemporalInstruction> {
-        self.instructions.iter().flatten()
+        self.instructions[..usize::from(self.len)]
+            .iter()
+            .map(|instruction| instruction.as_ref().expect("dense temporal instructions"))
     }
 }
 
