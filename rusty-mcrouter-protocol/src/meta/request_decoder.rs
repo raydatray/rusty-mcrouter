@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 
-use crate::bounded::CapacityExceeded;
+use crate::bounded_list::CapacityExceeded;
 use crate::key::{Key, MAX_KEY_BYTES};
 use crate::reply::ErrorReply;
 use crate::{
@@ -268,28 +268,43 @@ fn parse_get<'a>(
             b'c' => {
                 require_no_argument(argument)?;
                 return_cas = true;
-                push_output(&mut reply_plan, MetaOutputToken::Cas)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Cas)
+                    .map_err(capacity_error)?;
             }
             b'C' => check_cas = Some(parse_u64(argument)?),
             b'f' => {
                 require_no_argument(argument)?;
                 return_client_flags = true;
-                push_output(&mut reply_plan, MetaOutputToken::ClientFlags)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::ClientFlags)
+                    .map_err(capacity_error)?;
             }
             b'h' => {
                 require_no_argument(argument)?;
                 return_hit_state = true;
-                push_output(&mut reply_plan, MetaOutputToken::HitState)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::HitState)
+                    .map_err(capacity_error)?;
             }
             b'k' => {
                 require_no_argument(argument)?;
                 return_key = true;
-                push_output(&mut reply_plan, MetaOutputToken::Key)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Key)
+                    .map_err(capacity_error)?;
             }
             b'l' => {
                 require_no_argument(argument)?;
                 return_last_access = true;
-                push_output(&mut reply_plan, MetaOutputToken::LastAccess)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::LastAccess)
+                    .map_err(capacity_error)?;
             }
             b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
             b'q' => {
@@ -299,12 +314,20 @@ fn parse_get<'a>(
             b's' => {
                 require_no_argument(argument)?;
                 return_size = true;
-                push_output(&mut reply_plan, MetaOutputToken::Size)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Size)
+                    .map_err(capacity_error)?;
             }
             b't' => {
                 require_no_argument(argument)?;
-                push_temporal(&mut temporal, GetTemporalInstruction::ReturnTtl)?;
-                push_output(&mut reply_plan, MetaOutputToken::Ttl)?;
+                temporal
+                    .push(GetTemporalInstruction::ReturnTtl)
+                    .map_err(capacity_error)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Ttl)
+                    .map_err(capacity_error)?;
             }
             b'u' => {
                 require_no_argument(argument)?;
@@ -315,18 +338,15 @@ fn parse_get<'a>(
                 return_value = true;
             }
             b'E' => override_cas = Some(parse_u64(argument)?),
-            b'N' => push_temporal(
-                &mut temporal,
-                GetTemporalInstruction::Vivify(parse_i32(argument)?),
-            )?,
-            b'R' => push_temporal(
-                &mut temporal,
-                GetTemporalInstruction::WinForRecache(parse_i32(argument)?),
-            )?,
-            b'T' => push_temporal(
-                &mut temporal,
-                GetTemporalInstruction::UpdateTtl(parse_i32(argument)?),
-            )?,
+            b'N' => temporal
+                .push(GetTemporalInstruction::Vivify(parse_i32(argument)?))
+                .map_err(capacity_error)?,
+            b'R' => temporal
+                .push(GetTemporalInstruction::WinForRecache(parse_i32(argument)?))
+                .map_err(capacity_error)?,
+            b'T' => temporal
+                .push(GetTemporalInstruction::UpdateTtl(parse_i32(argument)?))
+                .map_err(capacity_error)?,
             b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
@@ -420,7 +440,10 @@ fn parse_store_fields<'a>(
             b'c' => {
                 require_no_argument(argument)?;
                 return_cas = true;
-                push_output(&mut reply_plan, MetaOutputToken::Cas)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Cas)
+                    .map_err(capacity_error)?;
             }
             b'C' => compare_cas = Some(parse_u64(argument)?),
             b'E' => override_cas = Some(parse_u64(argument)?),
@@ -432,7 +455,10 @@ fn parse_store_fields<'a>(
             b'k' => {
                 require_no_argument(argument)?;
                 return_key = true;
-                push_output(&mut reply_plan, MetaOutputToken::Key)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Key)
+                    .map_err(capacity_error)?;
             }
             b'M' => {
                 mode = match argument {
@@ -453,7 +479,10 @@ fn parse_store_fields<'a>(
             b's' => {
                 require_no_argument(argument)?;
                 return_size = true;
-                push_output(&mut reply_plan, MetaOutputToken::Size)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Size)
+                    .map_err(capacity_error)?;
             }
             b'T' => ttl = Some(parse_i32(argument)?),
             b'P' | b'L' => require_hint_argument(argument)?,
@@ -513,14 +542,20 @@ fn parse_delete<'a>(
             b'k' => {
                 require_no_argument(argument)?;
                 return_key = true;
-                push_output(&mut reply_plan, MetaOutputToken::Key)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Key)
+                    .map_err(capacity_error)?;
             }
             b'O' => {
                 if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
                     return Err(recoverable_client_error(BAD_COMMAND_LINE));
                 }
                 reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
-                push_output(&mut reply_plan, MetaOutputToken::Opaque)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Opaque)
+                    .map_err(capacity_error)?;
             }
             b'q' => {
                 require_no_argument(argument)?;
@@ -582,7 +617,10 @@ fn parse_arithmetic<'a>(
             b'c' => {
                 require_no_argument(argument)?;
                 return_cas = true;
-                push_output(&mut reply_plan, MetaOutputToken::Cas)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Cas)
+                    .map_err(capacity_error)?;
             }
             b'C' => compare_cas = Some(parse_u64(argument)?),
             b'D' => delta = parse_u64(argument)?,
@@ -591,7 +629,10 @@ fn parse_arithmetic<'a>(
             b'k' => {
                 require_no_argument(argument)?;
                 return_key = true;
-                push_output(&mut reply_plan, MetaOutputToken::Key)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Key)
+                    .map_err(capacity_error)?;
             }
             b'M' => {
                 mode = match argument {
@@ -600,10 +641,9 @@ fn parse_arithmetic<'a>(
                     _ => return Err(recoverable_client_error(BAD_COMMAND_LINE)),
                 };
             }
-            b'N' => push_arithmetic_temporal(
-                &mut temporal,
-                ArithmeticTemporalInstruction::Vivify(parse_i32(argument)?),
-            )?,
+            b'N' => temporal
+                .push(ArithmeticTemporalInstruction::Vivify(parse_i32(argument)?))
+                .map_err(capacity_error)?,
             b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
             b'q' => {
                 require_no_argument(argument)?;
@@ -611,13 +651,17 @@ fn parse_arithmetic<'a>(
             }
             b't' => {
                 require_no_argument(argument)?;
-                push_arithmetic_temporal(&mut temporal, ArithmeticTemporalInstruction::ReturnTtl)?;
-                push_output(&mut reply_plan, MetaOutputToken::Ttl)?;
+                temporal
+                    .push(ArithmeticTemporalInstruction::ReturnTtl)
+                    .map_err(capacity_error)?;
+                reply_plan
+                    .output_order
+                    .push(MetaOutputToken::Ttl)
+                    .map_err(capacity_error)?;
             }
-            b'T' => push_arithmetic_temporal(
-                &mut temporal,
-                ArithmeticTemporalInstruction::UpdateTtl(parse_i32(argument)?),
-            )?,
+            b'T' => temporal
+                .push(ArithmeticTemporalInstruction::UpdateTtl(parse_i32(argument)?))
+                .map_err(capacity_error)?,
             b'v' => {
                 require_no_argument(argument)?;
                 return_value = true;
@@ -754,7 +798,10 @@ fn parse_opaque(
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
     reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
-    push_output(reply_plan, MetaOutputToken::Opaque)
+    reply_plan
+        .output_order
+        .push(MetaOutputToken::Opaque)
+        .map_err(capacity_error)
 }
 
 /// Parses the key under the plan's encoding and, for `k`, retains the
@@ -792,31 +839,7 @@ fn parse_i32(raw: &[u8]) -> Result<i32, MetaRequestDecodeError> {
     numbers::parse_i32(raw).ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))
 }
 
-fn push_temporal(
-    temporal: &mut GetTemporalInstructions,
-    instruction: GetTemporalInstruction,
-) -> Result<(), MetaRequestDecodeError> {
-    temporal.push(instruction).map_err(parse_capacity_error)
-}
-
-fn push_arithmetic_temporal(
-    temporal: &mut ArithmeticTemporalInstructions,
-    instruction: ArithmeticTemporalInstruction,
-) -> Result<(), MetaRequestDecodeError> {
-    temporal.push(instruction).map_err(parse_capacity_error)
-}
-
-fn push_output(
-    reply_plan: &mut MetaReplyPlan,
-    token: MetaOutputToken,
-) -> Result<(), MetaRequestDecodeError> {
-    reply_plan
-        .output_order
-        .push(token)
-        .map_err(parse_capacity_error)
-}
-
-fn parse_capacity_error(_: CapacityExceeded) -> MetaRequestDecodeError {
+fn capacity_error(_: CapacityExceeded) -> MetaRequestDecodeError {
     recoverable_client_error(BAD_COMMAND_LINE)
 }
 

@@ -8,7 +8,7 @@ use crate::reply::{
 };
 
 use super::line_scanner::{scan_line, LineScan};
-use super::tokens::{flags, split_tokens, FlagBudget, FlagError};
+use super::tokens::{flags, split_tokens, FlagBudget};
 use super::{numbers, GetSuccessShape, MetaReplyExpectation};
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
@@ -276,7 +276,9 @@ fn parse_arithmetic_attributes<'a>(
     let mut result = ArithmeticResult::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(flag_error)?;
+        // a misbehaving backend gets no diagnostics, just a torn-down connection
+        let (flag, argument) =
+            flag.map_err(|_| MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
         match flag {
             b'c' => result.cas = Some(parse_u64(argument)?),
             b't' => result.ttl = Some(parse_i64(argument)?),
@@ -386,7 +388,9 @@ fn parse_store_attributes<'a>(
     let mut result = StoreResult::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(flag_error)?;
+        // a misbehaving backend gets no diagnostics, just a torn-down connection
+        let (flag, argument) =
+            flag.map_err(|_| MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
         match flag {
             b'c' => result.cas = Some(parse_u64(argument)?),
             b's' => result.size = Some(parse_u64(argument)?),
@@ -435,7 +439,9 @@ fn parse_get_attributes<'a>(
     let mut hit = GetHit::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(flag_error)?;
+        // a misbehaving backend gets no diagnostics, just a torn-down connection
+        let (flag, argument) =
+            flag.map_err(|_| MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
         match flag {
             b'c' => hit.cas = Some(parse_u64(argument)?),
             b'f' => hit.client_flags = Some(parse_u32(argument)?),
@@ -481,12 +487,6 @@ fn require_no_argument(argument: &[u8]) -> Result<(), MetaReplyDecodeError> {
     }
 }
 
-/// Backend replies collapse every malformed-flag condition into one error:
-/// unlike client input, a misbehaving backend gets no diagnostics, just a
-/// torn-down connection.
-fn flag_error(_: FlagError) -> MetaReplyDecodeError {
-    MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
-}
 
 fn parse_usize(raw: &[u8]) -> Result<usize, MetaReplyDecodeError> {
     numbers::parse_usize(raw).ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))

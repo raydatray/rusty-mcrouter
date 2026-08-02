@@ -1,3 +1,16 @@
+//! The Meta protocol codec, split into the four roles a proxy hop needs:
+//!
+//! - [`MetaRequestDecoder`]: client bytes -> semantic [`Request`] + hop-local
+//!   [`MetaReplyPlan`] (or a session-local no-op / recoverable error);
+//! - [`MetaRequestEncoder`]: [`Request`] -> canonical backend bytes, plus the
+//!   [`MetaReplyExpectation`] that disambiguates the eventual reply;
+//! - [`MetaReplyDecoder`]: backend bytes + expectation -> typed [`Reply`];
+//! - [`MetaReplyEncoder`]: [`Reply`] + [`MetaReplyPlan`] -> client bytes, in
+//!   the client's requested token order.
+//!
+//! [`Request`]: crate::Request
+//! [`Reply`]: crate::Reply
+
 mod line_scanner;
 mod numbers;
 mod reply_decoder;
@@ -7,6 +20,7 @@ mod reply_plan;
 mod request_decoder;
 mod request_encoder;
 mod tokens;
+mod wire;
 
 pub use reply_decoder::{
     MetaReplyDecodeError, MetaReplyDecoder, MAX_DEBUG_FIELDS, MAX_REPLY_LINE_BYTES,
