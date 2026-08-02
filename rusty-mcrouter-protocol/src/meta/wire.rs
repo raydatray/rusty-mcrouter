@@ -31,6 +31,26 @@ pub(super) fn encode_base64_key<'a>(
     Ok(&scratch[..encoded_len])
 }
 
+/// The line, including its `\r\n` terminator, exceeds the frame limit.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct LineTooLong {
+    pub(super) maximum: usize,
+}
+
+/// Enforces `max_frame` over the line started at `line_start`, then
+/// terminates the line.
+pub(super) fn finish_line(
+    out: &mut BytesMut,
+    line_start: usize,
+    max_frame: usize,
+) -> Result<(), LineTooLong> {
+    if out.len() - line_start + 2 > max_frame {
+        return Err(LineTooLong { maximum: max_frame });
+    }
+    out.extend_from_slice(b"\r\n");
+    Ok(())
+}
+
 /// Appends ` <flag>`: every Meta flag is space-separated from its
 /// predecessor.
 pub(super) fn write_bare_flag(out: &mut BytesMut, flag: u8) {

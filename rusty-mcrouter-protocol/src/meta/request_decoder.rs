@@ -2,7 +2,6 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 
-use crate::bounded_list::CapacityExceeded;
 use crate::key::{Key, MAX_KEY_BYTES};
 use crate::reply::ErrorReply;
 use crate::{
@@ -15,8 +14,8 @@ use crate::{
 };
 
 use super::line_scanner::{scan_line, LineScan};
-use super::numbers;
-use super::tokens::{flags, split_tokens, FlagBudget, FlagError};
+use super::numbers::{parse_i32, parse_u32, parse_u64};
+use super::tokens::{flags, require_no_argument, split_tokens, FlagBudget, FlagError};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
@@ -262,91 +261,97 @@ fn parse_get<'a>(
         let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_cas = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Cas)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
-            b'C' => check_cas = Some(parse_u64(argument)?),
+            b'C' => check_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
             b'f' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_client_flags = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::ClientFlags)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'h' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_hit_state = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::HitState)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'k' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_key = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Key)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'l' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_last_access = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::LastAccess)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
             b'q' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressMiss;
             }
             b's' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_size = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Size)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b't' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 temporal
                     .push(GetTemporalInstruction::ReturnTtl)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Ttl)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'u' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 no_lru_bump = true;
             }
             b'v' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_value = true;
             }
-            b'E' => override_cas = Some(parse_u64(argument)?),
+            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
             b'N' => temporal
-                .push(GetTemporalInstruction::Vivify(parse_i32(argument)?))
-                .map_err(capacity_error)?,
+                .push(GetTemporalInstruction::Vivify(
+                    parse_i32(argument).map_err(bad_command_line)?,
+                ))
+                .map_err(bad_command_line)?,
             b'R' => temporal
-                .push(GetTemporalInstruction::WinForRecache(parse_i32(argument)?))
-                .map_err(capacity_error)?,
+                .push(GetTemporalInstruction::WinForRecache(
+                    parse_i32(argument).map_err(bad_command_line)?,
+                ))
+                .map_err(bad_command_line)?,
             b'T' => temporal
-                .push(GetTemporalInstruction::UpdateTtl(parse_i32(argument)?))
-                .map_err(capacity_error)?,
+                .push(GetTemporalInstruction::UpdateTtl(
+                    parse_i32(argument).map_err(bad_command_line)?,
+                ))
+                .map_err(bad_command_line)?,
             b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
@@ -385,7 +390,7 @@ fn parse_store(
     let raw_value_len = tokens
         .next()
         .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    let value_len_u64 = parse_u64(raw_value_len)?;
+    let value_len_u64 = parse_u64(raw_value_len).map_err(bad_command_line)?;
     if value_len_u64 > (i32::MAX - 2) as u64 {
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
@@ -434,31 +439,31 @@ fn parse_store_fields<'a>(
         let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_cas = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Cas)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
-            b'C' => compare_cas = Some(parse_u64(argument)?),
-            b'E' => override_cas = Some(parse_u64(argument)?),
-            b'F' => client_flags = Some(parse_u32(argument)?),
+            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
+            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
+            b'F' => client_flags = Some(parse_u32(argument).map_err(bad_command_line)?),
             b'I' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 invalidate = true;
             }
             b'k' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_key = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Key)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'M' => {
                 mode = match argument {
@@ -470,21 +475,21 @@ fn parse_store_fields<'a>(
                     _ => return Err(recoverable_client_error(BAD_COMMAND_LINE)),
                 };
             }
-            b'N' => vivify_ttl = Some(parse_i32(argument)?),
+            b'N' => vivify_ttl = Some(parse_i32(argument).map_err(bad_command_line)?),
             b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
             b'q' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
             b's' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_size = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Size)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
-            b'T' => ttl = Some(parse_i32(argument)?),
+            b'T' => ttl = Some(parse_i32(argument).map_err(bad_command_line)?),
             b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
@@ -529,23 +534,23 @@ fn parse_delete<'a>(
         let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
-            b'C' => compare_cas = Some(parse_u64(argument)?),
-            b'E' => override_cas = Some(parse_u64(argument)?),
-            b'F' => client_flags = Some(parse_u32(argument)?),
+            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
+            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
+            b'F' => client_flags = Some(parse_u32(argument).map_err(bad_command_line)?),
             b'I' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 invalidate = true;
             }
             b'k' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_key = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Key)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'O' => {
                 if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
@@ -555,15 +560,15 @@ fn parse_delete<'a>(
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Opaque)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'q' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
-            b'T' => ttl = Some(parse_i32(argument)?),
+            b'T' => ttl = Some(parse_i32(argument).map_err(bad_command_line)?),
             b'x' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 remove_value = true;
             }
             b'P' | b'L' => require_hint_argument(argument)?,
@@ -611,28 +616,28 @@ fn parse_arithmetic<'a>(
         let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_cas = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Cas)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
-            b'C' => compare_cas = Some(parse_u64(argument)?),
-            b'D' => delta = parse_u64(argument)?,
-            b'E' => override_cas = Some(parse_u64(argument)?),
-            b'J' => initial_value = Some(parse_u64(argument)?),
+            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
+            b'D' => delta = parse_u64(argument).map_err(bad_command_line)?,
+            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
+            b'J' => initial_value = Some(parse_u64(argument).map_err(bad_command_line)?),
             b'k' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_key = true;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Key)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'M' => {
                 mode = match argument {
@@ -642,30 +647,32 @@ fn parse_arithmetic<'a>(
                 };
             }
             b'N' => temporal
-                .push(ArithmeticTemporalInstruction::Vivify(parse_i32(argument)?))
-                .map_err(capacity_error)?,
+                .push(ArithmeticTemporalInstruction::Vivify(
+                    parse_i32(argument).map_err(bad_command_line)?,
+                ))
+                .map_err(bad_command_line)?,
             b'O' => parse_opaque(argument, key_frame, &mut reply_plan)?,
             b'q' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
             b't' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 temporal
                     .push(ArithmeticTemporalInstruction::ReturnTtl)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
                 reply_plan
                     .output_order
                     .push(MetaOutputToken::Ttl)
-                    .map_err(capacity_error)?;
+                    .map_err(bad_command_line)?;
             }
             b'T' => temporal
-                .push(ArithmeticTemporalInstruction::UpdateTtl(parse_i32(
-                    argument,
-                )?))
-                .map_err(capacity_error)?,
+                .push(ArithmeticTemporalInstruction::UpdateTtl(
+                    parse_i32(argument).map_err(bad_command_line)?,
+                ))
+                .map_err(bad_command_line)?,
             b'v' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 return_value = true;
             }
             b'P' | b'L' => require_hint_argument(argument)?,
@@ -711,7 +718,7 @@ fn parse_debug<'a>(
         let (flag, argument) = flag.map_err(flag_error)?;
         match flag {
             b'b' => {
-                require_no_argument(argument)?;
+                require_no_argument(argument).map_err(bad_command_line)?;
                 key_encoding = KeyEncoding::Base64;
             }
             b'P' | b'L' => require_hint_argument(argument)?,
@@ -771,14 +778,6 @@ fn bytes_from_frame(raw: &[u8], frame: Option<&Bytes>) -> Result<Bytes, MetaRequ
     Ok(frame.slice(start..end))
 }
 
-fn require_no_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
-    if argument.is_empty() {
-        Ok(())
-    } else {
-        Err(recoverable_client_error(BAD_COMMAND_LINE))
-    }
-}
-
 /// `P` and `L` are proxy hints that carry no cache semantics; they are
 /// validated (argument required) and dropped on every command.
 fn require_hint_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
@@ -803,7 +802,7 @@ fn parse_opaque(
     reply_plan
         .output_order
         .push(MetaOutputToken::Opaque)
-        .map_err(capacity_error)
+        .map_err(bad_command_line)
 }
 
 /// Parses the key under the plan's encoding and, for `k`, retains the
@@ -829,19 +828,9 @@ fn flag_error(error: FlagError) -> MetaRequestDecodeError {
     }
 }
 
-fn parse_u64(raw: &[u8]) -> Result<u64, MetaRequestDecodeError> {
-    numbers::parse_u64(raw).ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))
-}
-
-fn parse_u32(raw: &[u8]) -> Result<u32, MetaRequestDecodeError> {
-    numbers::parse_u32(raw).ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))
-}
-
-fn parse_i32(raw: &[u8]) -> Result<i32, MetaRequestDecodeError> {
-    numbers::parse_i32(raw).ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))
-}
-
-fn capacity_error(_: CapacityExceeded) -> MetaRequestDecodeError {
+/// Maps any token-level failure to memcached's generic complaint; the
+/// request decoder never gives numeric or shape diagnostics beyond it.
+fn bad_command_line<E>(_: E) -> MetaRequestDecodeError {
     recoverable_client_error(BAD_COMMAND_LINE)
 }
 

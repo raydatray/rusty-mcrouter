@@ -112,11 +112,11 @@ fn encode_get_miss(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaR
     for token in plan.output_order.iter() {
         match token {
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key(plan, out)?,
+            MetaOutputToken::Key => write_key_token(plan, out)?,
             _ => {}
         }
     }
-    finish_line(out, line_start)
+    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn encode_get_hit(
@@ -171,7 +171,7 @@ fn encode_get_hit(
                 write_field(out, b'l', hit.last_access_seconds, "last access", true)?;
             }
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key(plan, out)?,
+            MetaOutputToken::Key => write_key_token(plan, out)?,
         }
     }
 
@@ -185,7 +185,7 @@ fn encode_get_hit(
         wire::write_bare_flag(out, b'W');
     }
 
-    finish_line(out, line_start)?;
+    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
     if let Some(value) = &hit.value {
         out.extend_from_slice(value);
         out.extend_from_slice(b"\r\n");
@@ -212,7 +212,7 @@ fn encode_store(
             MetaOutputToken::Cas => write_field(out, b'c', result.cas, "CAS", true)?,
             MetaOutputToken::Size => write_field(out, b's', result.size, "size", true)?,
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key(plan, out)?,
+            MetaOutputToken::Key => write_key_token(plan, out)?,
             _ => {
                 return Err(MetaReplyEncodeError::InvalidData(
                     "invalid store output token",
@@ -220,7 +220,7 @@ fn encode_store(
             }
         }
     }
-    finish_line(out, line_start)
+    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn encode_delete(
@@ -240,7 +240,7 @@ fn encode_delete(
     for token in plan.output_order.iter() {
         match token {
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key(plan, out)?,
+            MetaOutputToken::Key => write_key_token(plan, out)?,
             _ => {
                 return Err(MetaReplyEncodeError::InvalidData(
                     "invalid delete output token",
@@ -248,7 +248,7 @@ fn encode_delete(
             }
         }
     }
-    finish_line(out, line_start)
+    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn encode_arithmetic(
@@ -294,7 +294,7 @@ fn encode_arithmetic(
                 write_field(out, b't', result.ttl, "TTL", success)?;
             }
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key(plan, out)?,
+            MetaOutputToken::Key => write_key_token(plan, out)?,
             _ => {
                 return Err(MetaReplyEncodeError::InvalidData(
                     "invalid arithmetic output token",
@@ -302,7 +302,7 @@ fn encode_arithmetic(
             }
         }
     }
-    finish_line(out, line_start)?;
+    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
     if let Some(value) = value_body {
         out.extend_from_slice(value);
         out.extend_from_slice(b"\r\n");
@@ -329,7 +329,7 @@ fn encode_debug(
             write_debug_fields(hit, out)?;
         }
     }
-    finish_line(out, line_start)
+    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn write_debug_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
@@ -398,7 +398,7 @@ fn encode_error(reply: &ErrorReply, out: &mut BytesMut) -> Result<(), MetaReplyE
             write_error_message(out, message.as_ref())?;
         }
     }
-    finish_line(out, line_start)
+    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn write_error_message(
@@ -429,7 +429,9 @@ fn write_opaque(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaRepl
     Ok(())
 }
 
-fn write_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
+/// Writes the client-facing ` k<key>` token (plus the `b` marker for a
+/// base64-encoded reply key) from the frontend's reply plan.
+fn write_key_token(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
     let key = plan
         .external_key
         .as_ref()
@@ -476,14 +478,10 @@ fn write_field<T: wire::WireInt>(
     }
 }
 
-fn finish_line(out: &mut BytesMut, line_start: usize) -> Result<(), MetaReplyEncodeError> {
-    if out.len() - line_start + 2 > MAX_REPLY_LINE_BYTES {
-        return Err(MetaReplyEncodeError::FrameTooLarge {
-            maximum: MAX_REPLY_LINE_BYTES,
-        });
+fn reply_line_too_long(error: wire::LineTooLong) -> MetaReplyEncodeError {
+    MetaReplyEncodeError::FrameTooLarge {
+        maximum: error.maximum,
     }
-    out.extend_from_slice(b"\r\n");
-    Ok(())
 }
 
 #[cfg(test)]
