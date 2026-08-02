@@ -4,12 +4,12 @@ use thiserror::Error;
 use crate::{
     key::{Key, MAX_KEY_BYTES},
     request::{
-        ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction, DeleteRequest,
-        GetRequest, GetTemporalInstruction, Request, StoreMode, StoreRequest,
+        ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction, DeleteRequest, Request,
+        StoreMode, StoreRequest,
     },
 };
 
-use super::{wire, GetSuccessShape, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES, MAX_VALUE_BYTES};
+use super::{command, wire, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES, MAX_VALUE_BYTES};
 
 #[derive(Debug, Default)]
 pub struct MetaRequestEncoder;
@@ -27,7 +27,9 @@ impl MetaRequestEncoder {
     ) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
         let checkpoint = out.len();
         let result = match request {
-            Request::Get(request) => encode_get(request, out).map(MetaReplyExpectation::Get),
+            Request::Get(request) => {
+                command::get::encode_request(request, out).map(MetaReplyExpectation::Get)
+            }
             Request::Store(request) => {
                 encode_store(request, out).map(|()| MetaReplyExpectation::Store {
                     cas: request.return_cas,
@@ -68,65 +70,6 @@ pub enum MetaRequestEncodeError {
 
     #[error("Meta request exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
-}
-
-fn encode_get(
-    request: &GetRequest,
-    out: &mut BytesMut,
-) -> Result<GetSuccessShape, MetaRequestEncodeError> {
-    let line_start = out.len();
-    out.extend_from_slice(b"mg ");
-    let key_is_base64 = write_backend_key(out, &request.key)?;
-
-    if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
-    }
-
-    // Direct fields use canonical order. Only the temporal program has
-    // request-order semantics in memcached.
-    if request.return_value {
-        wire::write_bare_flag(out, b'v');
-    }
-    if request.return_client_flags {
-        wire::write_bare_flag(out, b'f');
-    }
-    if request.return_cas {
-        wire::write_bare_flag(out, b'c');
-    }
-    if request.return_size {
-        wire::write_bare_flag(out, b's');
-    }
-    if request.return_hit_state {
-        wire::write_bare_flag(out, b'h');
-    }
-    if request.return_last_access {
-        wire::write_bare_flag(out, b'l');
-    }
-    if let Some(cas) = request.check_cas {
-        write_u64_flag(out, b'C', cas);
-    }
-    if let Some(cas) = request.override_cas {
-        write_u64_flag(out, b'E', cas);
-    }
-    if request.no_lru_bump {
-        wire::write_bare_flag(out, b'u');
-    }
-
-    for instruction in request.temporal.iter() {
-        match instruction {
-            GetTemporalInstruction::Vivify(ttl) => write_i32_flag(out, b'N', *ttl),
-            GetTemporalInstruction::UpdateTtl(ttl) => write_i32_flag(out, b'T', *ttl),
-            GetTemporalInstruction::ReturnTtl => wire::write_bare_flag(out, b't'),
-            GetTemporalInstruction::WinForRecache(ttl) => write_i32_flag(out, b'R', *ttl),
-        }
-    }
-
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
-    Ok(match (request.return_value, request.check_cas.is_some()) {
-        (false, _) => GetSuccessShape::Header,
-        (true, false) => GetSuccessShape::Value,
-        (true, true) => GetSuccessShape::HeaderOrValue,
-    })
 }
 
 fn encode_store(request: &StoreRequest, out: &mut BytesMut) -> Result<(), MetaRequestEncodeError> {
@@ -280,7 +223,7 @@ fn encode_debug(
 
 /// Writes the backend form of `key`: the routing prefix is stripped, and a
 /// binary key is base64-encoded (the returned bool asks for the `b` flag).
-fn write_backend_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
+pub fn write_backend_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
     let key = key.key_without_routing_prefix();
     if key.is_empty() {
         return Err(MetaRequestEncodeError::EmptyBackendKey);
@@ -305,12 +248,12 @@ fn is_text_key(key: &[u8]) -> bool {
     !key.iter().any(|byte| *byte <= b' ' || *byte == 0x7f)
 }
 
-fn write_u64_flag(out: &mut BytesMut, flag: u8, value: u64) {
+pub fn write_u64_flag(out: &mut BytesMut, flag: u8, value: u64) {
     wire::write_bare_flag(out, flag);
     wire::write_u64(out, value);
 }
 
-fn write_i32_flag(out: &mut BytesMut, flag: u8, value: i32) {
+pub fn write_i32_flag(out: &mut BytesMut, flag: u8, value: i32) {
     wire::write_bare_flag(out, flag);
     wire::write_i64(out, i64::from(value));
 }
@@ -320,7 +263,7 @@ fn write_mode_flag(out: &mut BytesMut, mode: u8) {
     out.extend_from_slice(&[mode]);
 }
 
-fn command_line_too_long(error: wire::LineTooLong) -> MetaRequestEncodeError {
+pub fn command_line_too_long(error: wire::LineTooLong) -> MetaRequestEncodeError {
     MetaRequestEncodeError::FrameTooLarge {
         maximum: error.maximum,
     }
@@ -332,8 +275,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        meta::{DecodedMetaCommand, MetaRequestDecoder},
-        request::GetTemporalInstructions,
+        meta::{DecodedMetaCommand, GetSuccessShape, MetaRequestDecoder},
+        request::{GetRequest, GetTemporalInstruction, GetTemporalInstructions},
     };
 
     fn parse(input: &[u8]) -> Request {

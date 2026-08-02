@@ -4,14 +4,13 @@ use thiserror::Error;
 use crate::{
     key::MAX_KEY_BYTES,
     reply::{
-        ArithmeticReply, DebugHit, DebugReply, DeleteReply, ErrorReply, GetHit, GetReply,
-        RecacheState, Reply, StoreReply,
+        ArithmeticReply, DebugHit, DebugReply, DeleteReply, ErrorReply, GetReply, Reply, StoreReply,
     },
 };
 
 use super::{
-    wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_DEBUG_FIELDS,
-    MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES,
+    command, wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_DEBUG_FIELDS,
+    MAX_REPLY_LINE_BYTES,
 };
 
 #[derive(Debug, Default)]
@@ -50,7 +49,7 @@ impl MetaReplyEncoder {
 
         let checkpoint = out.len();
         let result = match reply {
-            Reply::Get(reply) => encode_get(reply, plan, out),
+            Reply::Get(reply) => command::get::encode_reply(reply, plan, out),
             Reply::Store(reply) => encode_store(reply, plan, out),
             Reply::Delete(reply) => encode_delete(reply, plan, out),
             Reply::Arithmetic(reply) => encode_arithmetic(reply, plan, out),
@@ -93,104 +92,6 @@ pub enum MetaReplyEncodeError {
 
     #[error("Meta reply exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
-}
-
-fn encode_get(
-    reply: &GetReply,
-    plan: &MetaReplyPlan,
-    out: &mut BytesMut,
-) -> Result<(), MetaReplyEncodeError> {
-    match reply {
-        GetReply::Miss => encode_get_miss(plan, out),
-        GetReply::Hit(hit) => encode_get_hit(hit, plan, out),
-    }
-}
-
-fn encode_get_miss(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
-    let line_start = out.len();
-    out.extend_from_slice(b"EN");
-    for token in plan.output_order.iter() {
-        match token {
-            MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key_token(plan, out)?,
-            _ => {}
-        }
-    }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
-}
-
-fn encode_get_hit(
-    hit: &GetHit,
-    plan: &MetaReplyPlan,
-    out: &mut BytesMut,
-) -> Result<(), MetaReplyEncodeError> {
-    let line_start = out.len();
-    if let Some(value) = &hit.value {
-        if value.len() > MAX_REPLY_VALUE_BYTES {
-            return Err(MetaReplyEncodeError::ValueTooLarge {
-                maximum: MAX_REPLY_VALUE_BYTES,
-            });
-        }
-        if hit.size.is_some_and(|size| size != value.len() as u64) {
-            return Err(MetaReplyEncodeError::SizeMismatch);
-        }
-        out.extend_from_slice(b"VA ");
-        wire::write_u64(out, value.len() as u64);
-    } else {
-        out.extend_from_slice(b"HD");
-    }
-
-    for token in plan.output_order.iter() {
-        match token {
-            MetaOutputToken::Cas => {
-                write_field(out, b'c', hit.cas, "CAS", true)?;
-            }
-            MetaOutputToken::ClientFlags => {
-                write_field(
-                    out,
-                    b'f',
-                    hit.client_flags.map(u64::from),
-                    "client flags",
-                    true,
-                )?;
-            }
-            MetaOutputToken::Size => {
-                write_field(out, b's', hit.size, "size", true)?;
-            }
-            MetaOutputToken::Ttl => {
-                write_field(out, b't', hit.ttl, "TTL", true)?;
-            }
-            MetaOutputToken::HitState => {
-                let value = hit
-                    .hit_before
-                    .ok_or(MetaReplyEncodeError::MissingField("hit state"))?;
-                wire::write_bare_flag(out, b'h');
-                out.extend_from_slice(if value { b"1" } else { b"0" });
-            }
-            MetaOutputToken::LastAccess => {
-                write_field(out, b'l', hit.last_access_seconds, "last access", true)?;
-            }
-            MetaOutputToken::Opaque => write_opaque(plan, out)?,
-            MetaOutputToken::Key => write_key_token(plan, out)?,
-        }
-    }
-
-    if hit.recache == RecacheState::AlreadyWon {
-        wire::write_bare_flag(out, b'Z');
-    }
-    if hit.stale {
-        wire::write_bare_flag(out, b'X');
-    }
-    if hit.recache == RecacheState::Won {
-        wire::write_bare_flag(out, b'W');
-    }
-
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
-    if let Some(value) = &hit.value {
-        out.extend_from_slice(value);
-        out.extend_from_slice(b"\r\n");
-    }
-    Ok(())
 }
 
 fn encode_store(
@@ -416,7 +317,7 @@ fn write_error_message(
     Ok(())
 }
 
-fn write_opaque(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
+pub fn write_opaque(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
     let opaque = plan
         .opaque
         .as_ref()
@@ -431,7 +332,10 @@ fn write_opaque(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaRepl
 
 /// Writes the client-facing ` k<key>` token (plus the `b` marker for a
 /// base64-encoded reply key) from the frontend's reply plan.
-fn write_key_token(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
+pub fn write_key_token(
+    plan: &MetaReplyPlan,
+    out: &mut BytesMut,
+) -> Result<(), MetaReplyEncodeError> {
     let key = plan
         .external_key
         .as_ref()
@@ -460,7 +364,7 @@ fn write_key_token(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaR
 /// Writes one ` <flag><value>` reply token. A `required` projection with no
 /// value is the reply/plan mismatch this encoder exists to catch; optional
 /// fields (arithmetic failure codes) are simply omitted.
-fn write_field<T: wire::WireInt>(
+pub fn write_field<T: wire::WireInt>(
     out: &mut BytesMut,
     flag: u8,
     value: Option<T>,
@@ -478,7 +382,7 @@ fn write_field<T: wire::WireInt>(
     }
 }
 
-fn reply_line_too_long(error: wire::LineTooLong) -> MetaReplyEncodeError {
+pub fn reply_line_too_long(error: wire::LineTooLong) -> MetaReplyEncodeError {
     MetaReplyEncodeError::FrameTooLarge {
         maximum: error.maximum,
     }
@@ -489,7 +393,7 @@ mod tests {
     use super::*;
     use crate::{
         meta::{DecodedMetaCommand, MetaReplyDecoder, MetaRequestDecoder, MetaRequestEncoder},
-        reply::{ArithmeticResult, DebugField, DebugHit, DebugReply, StoreResult},
+        reply::{ArithmeticResult, DebugField, GetHit, RecacheState, StoreResult},
     };
 
     fn plan(input: &[u8]) -> MetaReplyPlan {
