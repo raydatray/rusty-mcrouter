@@ -146,7 +146,13 @@ fn encode_get_hit(
                 write_field(out, b'c', hit.cas, "CAS", true)?;
             }
             MetaOutputToken::ClientFlags => {
-                write_field(out, b'f', hit.client_flags.map(u64::from), "client flags", true)?;
+                write_field(
+                    out,
+                    b'f',
+                    hit.client_flags.map(u64::from),
+                    "client flags",
+                    true,
+                )?;
             }
             MetaOutputToken::Size => {
                 write_field(out, b's', hit.size, "size", true)?;
@@ -303,7 +309,6 @@ fn encode_arithmetic(
     }
     Ok(())
 }
-
 
 fn encode_debug(
     reply: &DebugReply,

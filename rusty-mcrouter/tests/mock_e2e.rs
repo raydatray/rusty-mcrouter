@@ -177,5 +177,10 @@ async fn failover_from_failing_primary_serves_from_secondary() {
     );
     let fx = start_router(&config_body, primary.port()).await;
 
-    exchange(fx.router_addr, b"mg failover_k v\r\n", b"VA 6\r\nbackup\r\n").await;
+    exchange(
+        fx.router_addr,
+        b"mg failover_k v\r\n",
+        b"VA 6\r\nbackup\r\n",
+    )
+    .await;
 }

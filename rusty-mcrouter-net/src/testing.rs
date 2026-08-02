@@ -107,9 +107,7 @@ impl BackendFactory for MockBackendFactory {
         }
         self.connected.lock().unwrap().push(addr.to_string());
         Ok(MockBackend::replying(
-            self.reply
-                .clone()
-                .unwrap_or(Reply::Get(GetReply::Miss)),
+            self.reply.clone().unwrap_or(Reply::Get(GetReply::Miss)),
         ))
     }
 }

@@ -100,9 +100,8 @@ mod tests {
 
     #[test]
     fn flags_validate_shape_budget_and_duplicates() {
-        let collect = |line: &'static [u8], budget| {
-            flags(split_tokens(line), budget).collect::<Vec<_>>()
-        };
+        let collect =
+            |line: &'static [u8], budget| flags(split_tokens(line), budget).collect::<Vec<_>>();
 
         assert_eq!(
             collect(b"v Otag", FlagBudget::Unlimited),
@@ -112,7 +111,10 @@ mod tests {
             collect(b"v v", FlagBudget::Unlimited),
             vec![Ok((b'v', b"".as_slice())), Err(FlagError::Duplicate)]
         );
-        assert_eq!(collect(b"1", FlagBudget::Unlimited), vec![Err(FlagError::InvalidToken)]);
+        assert_eq!(
+            collect(b"1", FlagBudget::Unlimited),
+            vec![Err(FlagError::InvalidToken)]
+        );
         assert_eq!(
             collect(b"a b c", FlagBudget::Tokens(2)),
             vec![

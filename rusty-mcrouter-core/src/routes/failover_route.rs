@@ -139,7 +139,10 @@ mod tests {
         let backup = MockBackend::replying(numeric(1));
         let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
-        assert_eq!(route.route(get()).await.unwrap(), Reply::Get(GetReply::Miss));
+        assert_eq!(
+            route.route(get()).await.unwrap(),
+            Reply::Get(GetReply::Miss)
+        );
         assert!(backup.received().is_empty());
     }
 
@@ -162,10 +165,7 @@ mod tests {
             dest(MockBackend::failing(timeout())),
             dest(MockBackend::replying(server_error(b"x"))),
         ]);
-        assert_eq!(
-            route.route(get()).await.unwrap(),
-            server_error(b"x")
-        );
+        assert_eq!(route.route(get()).await.unwrap(), server_error(b"x"));
 
         let route = in_order(vec![
             dest(MockBackend::failing(timeout())),
@@ -200,7 +200,8 @@ mod tests {
     #[tokio::test]
     async fn per_op_updates_empty_blocks_write_failover() {
         let primary = MockBackend::failing(timeout());
-        let backup = MockBackend::replying(Reply::Store(StoreReply::Success(StoreResult::default())));
+        let backup =
+            MockBackend::replying(Reply::Store(StoreReply::Success(StoreResult::default())));
         let route = FailoverRoute::new(
             vec![dest(primary.clone()), dest(backup.clone())],
             FailoverErrors::new(None, Some(vec![]), None),

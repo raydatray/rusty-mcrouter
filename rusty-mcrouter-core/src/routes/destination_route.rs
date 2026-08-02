@@ -26,9 +26,7 @@ mod tests {
     use bytes::Bytes;
     use rusty_mcrouter_net::testing::MockBackend;
     use rusty_mcrouter_net::{NetError, TimeoutPhase};
-    use rusty_mcrouter_protocol::reply::{
-        ErrorReply, GetHit, GetReply, StoreReply, StoreResult,
-    };
+    use rusty_mcrouter_protocol::reply::{ErrorReply, GetHit, GetReply, StoreReply, StoreResult};
     use std::sync::Arc;
 
     #[tokio::test]
