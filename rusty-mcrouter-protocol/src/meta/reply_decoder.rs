@@ -161,6 +161,20 @@ fn parse_error_reply(line: &[u8]) -> Result<Option<ErrorReply>, MetaReplyDecodeE
     Ok(None)
 }
 
+/// Consumes a `VA` line's length token and yields the value block framing
+/// sized from it. [`expected_value_length`] validated both before the
+/// command parser ran; either missing here means the backend and framing
+/// disagree on the line's shape.
+pub fn framed_value(
+    length_token: Option<&[u8]>,
+    value: Option<Bytes>,
+) -> Result<Bytes, MetaReplyDecodeError> {
+    if length_token.is_none() {
+        return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+    }
+    value.ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
+}
+
 /// Maps any token-level failure to the one reply-decode error: a
 /// misbehaving backend gets no diagnostics, just a torn-down connection.
 pub fn invalid_response<E>(_: E) -> MetaReplyDecodeError {

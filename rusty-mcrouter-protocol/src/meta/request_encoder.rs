@@ -81,13 +81,9 @@ pub fn write_backend_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequ
         return Ok(false);
     }
 
-    let mut scratch = [0; wire::MAX_BASE64_KEY_BYTES];
-    let encoded = wire::encode_base64_key(key, &mut scratch).map_err(|_| {
-        MetaRequestEncodeError::EncodedKeyTooLong {
-            maximum: MAX_KEY_BYTES,
-        }
+    wire::write_base64_key(out, key).map_err(|_| MetaRequestEncodeError::EncodedKeyTooLong {
+        maximum: MAX_KEY_BYTES,
     })?;
-    out.extend_from_slice(encoded);
     Ok(true)
 }
 
