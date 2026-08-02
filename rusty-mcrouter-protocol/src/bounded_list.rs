@@ -1,20 +1,14 @@
-//! A fixed-capacity, heap-free list preserving insertion order.
-//!
-//! Meta's order-sensitive collections (temporal instruction programs, the
-//! reply plan's output order) are bounded by the number of distinct protocol
-//! flags, so they live inline and never allocate. Pushes fill a dense prefix;
-//! the fields are private so holes cannot be constructed.
-
-/// Returned when pushing into a full [`BoundedList`]; callers map it to
-/// their protocol error.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CapacityExceeded;
+use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundedList<T, const N: usize> {
     items: [Option<T>; N],
     len: u8,
 }
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("bounded list capacity exceeded")]
+pub struct CapacityExceeded;
 
 impl<T, const N: usize> Default for BoundedList<T, N> {
     fn default() -> Self {
