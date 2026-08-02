@@ -9,6 +9,7 @@ rust-version = "1.75"
 license = "MIT"
 
 [workspace.dependencies]
+base64 = "0.22.1"
 bytes = "1.11.1"
 json_comments = "0.2"
 serde = { version = "1", features = ["derive"] }
