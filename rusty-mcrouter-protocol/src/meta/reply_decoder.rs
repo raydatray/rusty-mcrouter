@@ -34,6 +34,12 @@ enum ReplyDecodeState {
     },
 }
 
+impl Default for ReplyDecodeState {
+    fn default() -> Self {
+        Self::Line { scanned: 0 }
+    }
+}
+
 #[derive(Debug)]
 enum PendingValue {
     Get(GetHit),
@@ -53,27 +59,28 @@ impl MetaReplyDecoder {
         }
     }
 
+    /// Each pass takes the state out by value and puts back whatever is
+    /// still incomplete, so no arm ever re-proves which variant it holds.
     pub fn decode(
         &mut self,
         expectation: &MetaReplyExpectation,
         src: &mut BytesMut,
     ) -> Result<Option<Reply>, MetaReplyDecodeError> {
         loop {
-            match &mut self.state {
-                ReplyDecodeState::Line { scanned } => {
-                    if *scanned > src.len() {
-                        *scanned = 0;
+            match std::mem::take(&mut self.state) {
+                ReplyDecodeState::Line { mut scanned } => {
+                    if scanned > src.len() {
+                        scanned = 0;
                     }
-                    let search_start = *scanned;
                     let Some(newline) =
-                        memchr(b'\n', &src[search_start..]).map(|offset| search_start + offset)
+                        memchr(b'\n', &src[scanned..]).map(|offset| scanned + offset)
                     else {
                         if src.len() >= MAX_REPLY_LINE_BYTES {
                             return Err(MetaReplyDecodeError::FrameTooLarge {
                                 maximum: MAX_REPLY_LINE_BYTES,
                             });
                         }
-                        *scanned = src.len();
+                        self.state = ReplyDecodeState::Line { scanned: src.len() };
                         return Ok(None);
                     };
 
@@ -89,7 +96,6 @@ impl MetaReplyDecoder {
                         newline
                     };
                     let frame = src.split_to(frame_len).freeze();
-                    *scanned = 0;
 
                     match parse_line(expectation, &frame[..line_end])? {
                         ParsedLine::Reply(reply) => return Ok(Some(reply)),
@@ -98,7 +104,7 @@ impl MetaReplyDecoder {
                         }
                     }
                 }
-                ReplyDecodeState::Value { length, .. } => {
+                ReplyDecodeState::Value { length, pending } => {
                     let frame_len =
                         length
                             .checked_add(2)
@@ -106,17 +112,13 @@ impl MetaReplyDecoder {
                                 maximum: MAX_REPLY_VALUE_BYTES,
                             })?;
                     if src.len() < frame_len {
+                        self.state = ReplyDecodeState::Value { length, pending };
                         return Ok(None);
                     }
-                    if &src[*length..frame_len] != b"\r\n" {
+                    if &src[length..frame_len] != b"\r\n" {
                         return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
                     }
 
-                    let ReplyDecodeState::Value { length, pending } =
-                        std::mem::replace(&mut self.state, ReplyDecodeState::Line { scanned: 0 })
-                    else {
-                        unreachable!();
-                    };
                     let frame = src.split_to(frame_len).freeze();
                     return match pending {
                         PendingValue::Get(mut hit) => {
