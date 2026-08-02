@@ -237,6 +237,7 @@ mod tests {
     use bytes::Bytes;
     use rusty_mcrouter_config::parse;
     use rusty_mcrouter_net::testing::MockBackendFactory;
+    use rusty_mcrouter_protocol::reply::{ErrorReply, GetReply};
     use rusty_mcrouter_protocol::Reply;
 
     async fn expect_err<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> BuildError {
@@ -251,7 +252,7 @@ mod tests {
         let cfg = parse(r#"{"route": "NullRoute"}"#).unwrap();
         let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get { hits: vec![] });
+        assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
@@ -259,7 +260,7 @@ mod tests {
         let cfg = parse(r#"{"route": {"type": "NullRoute"}}"#).unwrap();
         let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get { hits: vec![] });
+        assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
@@ -267,7 +268,7 @@ mod tests {
         let cfg = parse(r#"{"route": {"type": "ErrorRoute", "message": "boom"}}"#).unwrap();
         let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"boom")));
+        assert_eq!(reply, Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"boom")))));
     }
 
     #[tokio::test]
@@ -275,7 +276,7 @@ mod tests {
         let cfg = parse(r#"{"route": "ErrorRoute|nope"}"#).unwrap();
         let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"nope")));
+        assert_eq!(reply, Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"nope")))));
     }
 
     #[tokio::test]
@@ -284,7 +285,7 @@ mod tests {
         let cfg = parse(json).unwrap();
         let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get { hits: vec![] });
+        assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
@@ -293,7 +294,7 @@ mod tests {
         let cfg = parse(json).unwrap();
         let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get { hits: vec![] });
+        assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
@@ -343,7 +344,7 @@ mod tests {
         let cfg = parse(json).unwrap();
         let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get { hits: vec![] });
+        assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
@@ -352,17 +353,17 @@ mod tests {
         let cfg = parse(json).unwrap();
         let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get { hits: vec![] });
+        assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
     async fn failover_route_surfaces_last_error_when_all_children_fail() {
         let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"]}}"#;
         let cfg = parse(json).unwrap();
-        let factory = MockBackendFactory::replying(Reply::ServerError(Bytes::from_static(b"down")));
+        let factory = MockBackendFactory::replying(Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"down")))));
         let route = build_route(&cfg, &factory).await.unwrap();
         let reply = route.route_dyn(req_get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::ServerError(Bytes::from_static(b"down")));
+        assert_eq!(reply, Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"down")))));
     }
 
     #[tokio::test]
