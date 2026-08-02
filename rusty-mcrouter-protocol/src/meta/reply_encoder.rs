@@ -3,15 +3,10 @@ use thiserror::Error;
 
 use crate::{
     key::MAX_KEY_BYTES,
-    reply::{
-        ArithmeticReply, DebugHit, DebugReply, DeleteReply, ErrorReply, GetReply, Reply, StoreReply,
-    },
+    reply::{ArithmeticReply, DeleteReply, ErrorReply, GetReply, Reply, StoreReply},
 };
 
-use super::{
-    command, wire, KeyEncoding, MetaQuietPolicy, MetaReplyPlan, MAX_DEBUG_FIELDS,
-    MAX_REPLY_LINE_BYTES,
-};
+use super::{command, wire, KeyEncoding, MetaQuietPolicy, MetaReplyPlan, MAX_REPLY_LINE_BYTES};
 
 #[derive(Debug, Default)]
 pub struct MetaReplyEncoder;
@@ -53,7 +48,7 @@ impl MetaReplyEncoder {
             Reply::Store(reply) => command::store::encode_reply(reply, plan, out),
             Reply::Delete(reply) => command::delete::encode_reply(reply, plan, out),
             Reply::Arithmetic(reply) => command::arithmetic::encode_reply(reply, plan, out),
-            Reply::Debug(reply) => encode_debug(reply, plan, out),
+            Reply::Debug(reply) => command::debug::encode_reply(reply, plan, out),
             Reply::Error(reply) => encode_error(reply, out),
         };
         if result.is_err() {
@@ -92,81 +87,6 @@ pub enum MetaReplyEncodeError {
 
     #[error("Meta reply exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
-}
-
-fn encode_debug(
-    reply: &DebugReply,
-    plan: &MetaReplyPlan,
-    out: &mut BytesMut,
-) -> Result<(), MetaReplyEncodeError> {
-    if plan.output_order.iter().next().is_some() {
-        return Err(MetaReplyEncodeError::InvalidData(
-            "debug reply has an output-token plan",
-        ));
-    }
-    let line_start = out.len();
-    match reply {
-        DebugReply::Miss => out.extend_from_slice(b"EN"),
-        DebugReply::Hit(hit) => {
-            out.extend_from_slice(b"ME ");
-            write_debug_key(plan, out)?;
-            write_debug_fields(hit, out)?;
-        }
-    }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
-}
-
-fn write_debug_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
-    let key = plan
-        .external_key
-        .as_ref()
-        .ok_or(MetaReplyEncodeError::MissingField("external key"))?;
-    if key.is_empty() {
-        return Err(MetaReplyEncodeError::InvalidData("empty external key"));
-    }
-    match plan.key_encoding {
-        KeyEncoding::Text => {
-            if key.iter().any(|byte| *byte <= b' ' || *byte == 0x7f) {
-                return Err(MetaReplyEncodeError::InvalidData("invalid external key"));
-            }
-            out.extend_from_slice(key);
-        }
-        KeyEncoding::Base64 => {
-            let mut scratch = [0; wire::MAX_BASE64_KEY_BYTES];
-            let encoded = wire::encode_base64_key(key, &mut scratch).map_err(|_| {
-                MetaReplyEncodeError::EncodedKeyTooLong {
-                    maximum: MAX_KEY_BYTES,
-                }
-            })?;
-            out.extend_from_slice(encoded);
-        }
-    }
-    Ok(())
-}
-
-fn write_debug_fields(hit: &DebugHit, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
-    if hit.fields.len() > MAX_DEBUG_FIELDS {
-        return Err(MetaReplyEncodeError::InvalidData("too many debug fields"));
-    }
-    for field in &hit.fields {
-        if field.name.is_empty()
-            || field
-                .name
-                .iter()
-                .any(|byte| *byte <= b' ' || *byte == b'=' || *byte == 0x7f)
-            || field
-                .value
-                .iter()
-                .any(|byte| *byte <= b' ' || *byte == 0x7f)
-        {
-            return Err(MetaReplyEncodeError::InvalidData("invalid debug field"));
-        }
-        out.extend_from_slice(b" ");
-        out.extend_from_slice(&field.name);
-        out.extend_from_slice(b"=");
-        out.extend_from_slice(&field.value);
-    }
-    Ok(())
 }
 
 fn encode_error(reply: &ErrorReply, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
@@ -276,7 +196,9 @@ mod tests {
     use super::*;
     use crate::{
         meta::{DecodedMetaCommand, MetaReplyDecoder, MetaRequestDecoder, MetaRequestEncoder},
-        reply::{ArithmeticResult, DebugField, GetHit, RecacheState, StoreResult},
+        reply::{
+            ArithmeticResult, DebugField, DebugHit, DebugReply, GetHit, RecacheState, StoreResult,
+        },
     };
 
     fn plan(input: &[u8]) -> MetaReplyPlan {

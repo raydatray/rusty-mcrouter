@@ -6,7 +6,7 @@ use crate::{
     request::{ArithmeticTemporalInstruction, Request},
 };
 
-use super::{command, wire, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES};
+use super::{command, wire, MetaReplyExpectation};
 
 #[derive(Debug, Default)]
 pub struct MetaRequestEncoder;
@@ -44,7 +44,7 @@ impl MetaRequestEncoder {
                             matches!(instruction, ArithmeticTemporalInstruction::ReturnTtl)
                         }),
                     }),
-                Request::Debug(request) => encode_debug(request, out),
+                Request::Debug(request) => command::debug::encode_request(request, out),
             };
         if result.is_err() {
             out.truncate(checkpoint);
@@ -66,23 +66,6 @@ pub enum MetaRequestEncodeError {
 
     #[error("Meta request exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
-}
-
-fn encode_debug(
-    request: &crate::request::DebugRequest,
-    out: &mut BytesMut,
-) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
-    let line_start = out.len();
-    out.extend_from_slice(b"me ");
-    let key_is_base64 = write_backend_key(out, &request.key)?;
-    if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
-    }
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
-
-    Ok(MetaReplyExpectation::Debug {
-        key: request.key.clone_without_routing_prefix(),
-    })
 }
 
 /// Writes the backend form of `key`: the routing prefix is stripped, and a

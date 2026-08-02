@@ -6,12 +6,12 @@ use crate::key::{Key, MAX_KEY_BYTES};
 use crate::reply::ErrorReply;
 use crate::{
     meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan},
-    request::{DebugRequest, Request, StoreMode, StoreRequest},
+    request::{Request, StoreMode, StoreRequest},
 };
 
 use super::command;
 use super::line_scanner::{scan_line, LineScan};
-use super::tokens::{flags, require_no_argument, split_tokens, FlagBudget, FlagError};
+use super::tokens::{split_tokens, FlagError};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
@@ -227,46 +227,12 @@ fn parse_command(
         Some(b"mg") => command::get::parse_request(tokens, key_frame),
         Some(b"md") => command::delete::parse_request(tokens, key_frame),
         Some(b"ma") => command::arithmetic::parse_request(tokens, key_frame),
-        Some(b"me") => parse_debug(tokens, key_frame),
+        Some(b"me") => command::debug::parse_request(tokens, key_frame),
         _ => Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error)),
     }
 }
 
-fn parse_debug<'a>(
-    mut tokens: impl Iterator<Item = &'a [u8]>,
-    key_frame: Option<&Bytes>,
-) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
-    let raw_key = tokens
-        .next()
-        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    let mut key_encoding = KeyEncoding::Text;
-
-    // `me` has no upstream token budget; see the `ma` note on termination.
-    for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
-            b'b' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                key_encoding = KeyEncoding::Base64;
-            }
-            b'P' | b'L' => require_hint_argument(argument)?,
-            _ => return Err(recoverable_client_error(INVALID_FLAG)),
-        }
-    }
-
-    let key = parse_key(raw_key, key_encoding, key_frame)?;
-    let reply_plan = MetaReplyPlan {
-        external_key: Some(key.clone_bytes()),
-        key_encoding,
-        ..MetaReplyPlan::default()
-    };
-    Ok(DecodedMetaCommand::Request {
-        request: Request::Debug(DebugRequest { key }),
-        reply_plan,
-    })
-}
-
-fn parse_key(
+pub fn parse_key(
     raw: &[u8],
     encoding: KeyEncoding,
     frame: Option<&Bytes>,
