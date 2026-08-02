@@ -1,16 +1,11 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 
-use crate::reply::{
-    ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, ErrorReply, GetHit,
-    GetReply, Reply,
-};
+use crate::reply::{ArithmeticReply, ArithmeticResult, ErrorReply, GetHit, GetReply, Reply};
 
 use super::command;
 use super::line_scanner::{scan_line, LineScan};
 use super::numbers::parse_u64;
-use super::tokens::split_tokens;
 use super::MetaReplyExpectation;
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
@@ -162,56 +157,7 @@ fn parse_line(
         MetaReplyExpectation::Arithmetic { value, cas, ttl } => {
             command::arithmetic::parse_reply(*value, *cas, *ttl, line)
         }
-        MetaReplyExpectation::Debug { key } => parse_debug_line(key, line),
-    }
-}
-
-fn parse_debug_line(expected_key: &Bytes, line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
-    let mut tokens = split_tokens(line);
-    match tokens.next() {
-        Some(b"EN") => {
-            if tokens.next().is_some() {
-                return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-            }
-            Ok(ParsedLine::Reply(Reply::Debug(DebugReply::Miss)))
-        }
-        Some(b"ME") => {
-            let returned_key = tokens
-                .next()
-                .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
-            // memcached echoes the key as stored on the item: plain, or
-            // base64 when the item was created with the `b` flag. The request
-            // encoding does not determine the response encoding (verified
-            // against memcached 1.6.45), so accept either form.
-            let key_matches = returned_key == expected_key.as_ref()
-                || STANDARD
-                    .decode(returned_key)
-                    .is_ok_and(|decoded| decoded == expected_key.as_ref());
-            if !key_matches {
-                return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
-            }
-
-            let mut fields = Vec::new();
-            for token in tokens {
-                if fields.len() == MAX_DEBUG_FIELDS {
-                    return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-                }
-                let Some(separator) = token.iter().position(|byte| *byte == b'=') else {
-                    return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-                };
-                if separator == 0 {
-                    return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-                }
-                fields.push(DebugField {
-                    name: Bytes::copy_from_slice(&token[..separator]),
-                    value: Bytes::copy_from_slice(&token[separator + 1..]),
-                });
-            }
-            Ok(ParsedLine::Reply(Reply::Debug(DebugReply::Hit(DebugHit {
-                fields,
-            }))))
-        }
-        _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
+        MetaReplyExpectation::Debug { key } => command::debug::parse_reply(key, line),
     }
 }
 
@@ -273,7 +219,9 @@ pub enum MetaReplyDecodeError {
 mod tests {
     use super::*;
     use crate::meta::GetSuccessShape;
-    use crate::reply::{DeleteReply, RecacheState, StoreReply, StoreResult};
+    use crate::reply::{
+        DebugField, DebugHit, DebugReply, DeleteReply, RecacheState, StoreReply, StoreResult,
+    };
 
     const HEADER: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Header);
     const VALUE: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Value);
