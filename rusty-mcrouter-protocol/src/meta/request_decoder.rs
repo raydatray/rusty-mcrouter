@@ -60,6 +60,12 @@ enum RequestDecodeState {
     Swallow { remaining: usize, reply: ErrorReply },
 }
 
+impl Default for RequestDecodeState {
+    fn default() -> Self {
+        Self::Command { scanned: 0 }
+    }
+}
+
 #[derive(Debug)]
 struct StoreHeader {
     key: Key,
@@ -99,35 +105,67 @@ impl MetaRequestDecoder {
     /// `Ok(None)` leaves an incomplete frame untouched. a recoverable error
     /// consumes exactly one complete command, while a fatal error requires the
     /// session to close the connection.
+    ///
+    /// Each pass takes the state out by value and puts back whatever is
+    /// still incomplete, so no arm ever re-proves which variant it holds.
     pub fn decode(
         &mut self,
         src: &mut BytesMut,
     ) -> Result<Option<DecodedMetaCommand>, MetaRequestDecodeError> {
-        match self.state {
-            RequestDecodeState::StoreBody(_) => return self.decode_store_body(src),
-            RequestDecodeState::Swallow { .. } => return self.swallow(src),
-            RequestDecodeState::Command { .. } => {}
+        loop {
+            match std::mem::take(&mut self.state) {
+                RequestDecodeState::StoreBody(header) => {
+                    return self.decode_store_body(header, src);
+                }
+                RequestDecodeState::Swallow { remaining, reply } => {
+                    return self.swallow(remaining, reply, src);
+                }
+                RequestDecodeState::Command { scanned } => {
+                    let Some(frame) = self.scan_command_line(scanned, src)? else {
+                        return Ok(None);
+                    };
+                    let retain_key_frame = frame.len() <= MAX_ZERO_COPY_KEY_FRAME
+                        && frame.buffer_capacity <= MAX_RETAINED_KEY_BUFFER;
+                    let key_frame = retain_key_frame.then_some(&frame.bytes);
+                    let line = &frame.bytes[..frame.line_end];
+                    if line == b"ms" || line.starts_with(b"ms ") {
+                        self.state = match parse_store(line, key_frame)? {
+                            ParsedStoreHeader::Ready(header) => {
+                                RequestDecodeState::StoreBody(header)
+                            }
+                            ParsedStoreHeader::Swallow { remaining, reply } => {
+                                RequestDecodeState::Swallow { remaining, reply }
+                            }
+                        };
+                        continue; // the body may already be buffered
+                    }
+                    return parse_command(line, key_frame).map(Some);
+                }
+            }
         }
+    }
 
-        let RequestDecodeState::Command { scanned } = &mut self.state else {
-            unreachable!();
-        };
-        if *scanned > src.len() {
+    /// Scans for one complete command line, resuming from `scanned` and
+    /// remembering progress across incomplete reads.
+    fn scan_command_line(
+        &mut self,
+        mut scanned: usize,
+        src: &mut BytesMut,
+    ) -> Result<Option<CommandFrame>, MetaRequestDecodeError> {
+        if scanned > src.len() {
             // Incomplete input should retain its prefix, but avoid indexing a
             // stale cursor if a caller replaces the buffer unexpectedly.
-            *scanned = 0;
+            scanned = 0;
         }
 
-        let search_start = *scanned;
-        let Some(newline) = memchr(b'\n', &src[search_start..]).map(|offset| search_start + offset)
-        else {
+        let Some(newline) = memchr(b'\n', &src[scanned..]).map(|offset| scanned + offset) else {
             if src.len() >= MAX_COMMAND_LINE_BYTES {
                 return Err(FatalDecodeError::FrameTooLarge {
                     maximum: MAX_COMMAND_LINE_BYTES,
                 }
                 .into());
             }
-            *scanned = src.len();
+            self.state = RequestDecodeState::Command { scanned: src.len() };
             return Ok(None);
         };
 
@@ -144,24 +182,12 @@ impl MetaRequestDecoder {
         } else {
             newline
         };
-        let retain_key_frame =
-            frame_len <= MAX_ZERO_COPY_KEY_FRAME && src.capacity() <= MAX_RETAINED_KEY_BUFFER;
-        let frame = src.split_to(frame_len).freeze();
-        *scanned = 0;
-        let key_frame = retain_key_frame.then_some(&frame);
-        let line = &frame[..line_end];
-        if line == b"ms" || line.starts_with(b"ms ") {
-            match parse_store(line, key_frame)? {
-                ParsedStoreHeader::Ready(header) => {
-                    self.state = RequestDecodeState::StoreBody(header);
-                }
-                ParsedStoreHeader::Swallow { remaining, reply } => {
-                    self.state = RequestDecodeState::Swallow { remaining, reply };
-                }
-            }
-            return self.decode(src);
-        }
-        parse_command(line, key_frame).map(Some)
+        let buffer_capacity = src.capacity();
+        Ok(Some(CommandFrame {
+            bytes: src.split_to(frame_len).freeze(),
+            line_end,
+            buffer_capacity,
+        }))
     }
 
     pub fn decode_eof(&self, src: &BytesMut) -> Result<(), MetaRequestDecodeError> {
@@ -173,22 +199,16 @@ impl MetaRequestDecoder {
 
     fn decode_store_body(
         &mut self,
+        header: StoreHeader,
         src: &mut BytesMut,
     ) -> Result<Option<DecodedMetaCommand>, MetaRequestDecodeError> {
-        let RequestDecodeState::StoreBody(header) = &self.state else {
-            unreachable!();
-        };
         let frame_len = header.value_len + 2;
         if src.len() < frame_len {
+            self.state = RequestDecodeState::StoreBody(header);
             return Ok(None);
         }
 
         let frame = src.split_to(frame_len).freeze();
-        let RequestDecodeState::StoreBody(header) =
-            std::mem::replace(&mut self.state, RequestDecodeState::Command { scanned: 0 })
-        else {
-            unreachable!();
-        };
         if &frame[header.value_len..] != b"\r\n" {
             return Err(recoverable_client_error(BAD_DATA_CHUNK));
         }
@@ -213,24 +233,34 @@ impl MetaRequestDecoder {
 
     fn swallow(
         &mut self,
+        mut remaining: usize,
+        reply: ErrorReply,
         src: &mut BytesMut,
     ) -> Result<Option<DecodedMetaCommand>, MetaRequestDecodeError> {
-        let RequestDecodeState::Swallow { remaining, .. } = &mut self.state else {
-            unreachable!();
-        };
-        let consumed = (*remaining).min(src.len());
+        let consumed = remaining.min(src.len());
         src.advance(consumed);
-        *remaining -= consumed;
-        if *remaining != 0 {
+        remaining -= consumed;
+        if remaining != 0 {
+            self.state = RequestDecodeState::Swallow { remaining, reply };
             return Ok(None);
         }
-
-        let RequestDecodeState::Swallow { reply, .. } =
-            std::mem::replace(&mut self.state, RequestDecodeState::Command { scanned: 0 })
-        else {
-            unreachable!();
-        };
         Err(MetaRequestDecodeError::Recoverable(reply))
+    }
+}
+
+/// One complete command line split off the read buffer.
+struct CommandFrame {
+    bytes: Bytes,
+    /// Line length excluding the `\r\n` / `\n` terminator.
+    line_end: usize,
+    /// The read buffer's capacity before the split: retaining zero-copy key
+    /// slices is only worthwhile when it cannot pin a large allocation.
+    buffer_capacity: usize,
+}
+
+impl CommandFrame {
+    fn len(&self) -> usize {
+        self.bytes.len()
     }
 }
 
