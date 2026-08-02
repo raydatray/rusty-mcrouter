@@ -9,8 +9,9 @@ use crate::reply::ErrorReply;
 use crate::{
     meta::{KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan},
     request::{
-        DeleteRequest, GetRequest, GetTemporalInstruction, GetTemporalInstructions, Request,
-        StoreMode, StoreRequest,
+        ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction,
+        ArithmeticTemporalInstructions, DeleteRequest, GetRequest, GetTemporalInstruction,
+        GetTemporalInstructions, Request, StoreMode, StoreRequest,
     },
 };
 
@@ -252,6 +253,7 @@ fn parse_command(
     match tokens.next() {
         Some(b"mg") => parse_get(tokens, key_frame),
         Some(b"md") => parse_delete(tokens, key_frame),
+        Some(b"ma") => parse_arithmetic(tokens, key_frame),
         _ => Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error)),
     }
 }
@@ -656,6 +658,130 @@ fn parse_delete<'a>(
     })
 }
 
+fn parse_arithmetic<'a>(
+    mut tokens: impl Iterator<Item = &'a [u8]>,
+    key_frame: Option<&Bytes>,
+) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
+    let raw_key = tokens
+        .next()
+        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+    let mut return_value = false;
+    let mut return_cas = false;
+    let mut mode = ArithmeticMode::Increment;
+    let mut delta = 1;
+    let mut initial_value = None;
+    let mut compare_cas = None;
+    let mut override_cas = None;
+    let mut temporal = ArithmeticTemporalInstructions::default();
+    let mut reply_plan = MetaReplyPlan::default();
+    let mut seen = SeenFlags::default();
+    let mut return_key = false;
+
+    // `ma` has no upstream token budget. The loop still terminates quickly:
+    // non-alphabetic or repeated flags error out, so at most 52 distinct
+    // letters are ever processed.
+    for token in tokens {
+        let (&flag, argument) = token
+            .split_first()
+            .ok_or_else(|| recoverable_client_error(INVALID_FLAG))?;
+        if !flag.is_ascii_alphabetic() {
+            return Err(recoverable_client_error(INVALID_FLAG));
+        }
+        if !seen.insert(flag) {
+            return Err(recoverable_client_error(DUPLICATE_FLAG));
+        }
+
+        match flag {
+            b'b' => {
+                require_no_argument(argument)?;
+                reply_plan.key_encoding = KeyEncoding::Base64;
+            }
+            b'c' => {
+                require_no_argument(argument)?;
+                return_cas = true;
+                push_output(&mut reply_plan, MetaOutputToken::Cas)?;
+            }
+            b'C' => compare_cas = Some(parse_u64(argument)?),
+            b'D' => delta = parse_u64(argument)?,
+            b'E' => override_cas = Some(parse_u64(argument)?),
+            b'J' => initial_value = Some(parse_u64(argument)?),
+            b'k' => {
+                require_no_argument(argument)?;
+                return_key = true;
+                push_output(&mut reply_plan, MetaOutputToken::Key)?;
+            }
+            b'M' => {
+                mode = match argument {
+                    b"I" | b"+" => ArithmeticMode::Increment,
+                    b"D" | b"-" => ArithmeticMode::Decrement,
+                    _ => return Err(recoverable_client_error(BAD_COMMAND_LINE)),
+                };
+            }
+            b'N' => push_arithmetic_temporal(
+                &mut temporal,
+                ArithmeticTemporalInstruction::Vivify(parse_i32(argument)?),
+            )?,
+            b'O' => {
+                if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
+                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
+                }
+                reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
+                push_output(&mut reply_plan, MetaOutputToken::Opaque)?;
+            }
+            b'q' => {
+                require_no_argument(argument)?;
+                reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
+            }
+            b't' => {
+                require_no_argument(argument)?;
+                push_arithmetic_temporal(&mut temporal, ArithmeticTemporalInstruction::ReturnTtl)?;
+                push_output(&mut reply_plan, MetaOutputToken::Ttl)?;
+            }
+            b'T' => push_arithmetic_temporal(
+                &mut temporal,
+                ArithmeticTemporalInstruction::UpdateTtl(parse_i32(argument)?),
+            )?,
+            b'v' => {
+                require_no_argument(argument)?;
+                return_value = true;
+            }
+            b'P' | b'L' => {
+                if argument.is_empty() {
+                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
+                }
+            }
+            _ => return Err(recoverable_client_error(INVALID_FLAG)),
+        }
+    }
+
+    let has_vivify = temporal
+        .iter()
+        .any(|instruction| matches!(instruction, ArithmeticTemporalInstruction::Vivify(_)));
+    if initial_value.is_some() && !has_vivify {
+        return Err(recoverable_client_error(BAD_COMMAND_LINE));
+    }
+
+    let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
+    if return_key {
+        reply_plan.external_key = Some(key.clone_bytes());
+    }
+
+    Ok(DecodedMetaCommand::Request {
+        request: Request::Arithmetic(ArithmeticRequest {
+            key,
+            return_value,
+            return_cas,
+            mode,
+            delta,
+            initial_value,
+            compare_cas,
+            override_cas,
+            temporal,
+        }),
+        reply_plan,
+    })
+}
+
 fn parse_key(
     raw: &[u8],
     encoding: KeyEncoding,
@@ -719,6 +845,13 @@ fn parse_i32(raw: &[u8]) -> Result<i32, MetaRequestDecodeError> {
 fn push_temporal(
     temporal: &mut GetTemporalInstructions,
     instruction: GetTemporalInstruction,
+) -> Result<(), MetaRequestDecodeError> {
+    temporal.push(instruction).map_err(parse_capacity_error)
+}
+
+fn push_arithmetic_temporal(
+    temporal: &mut ArithmeticTemporalInstructions,
+    instruction: ArithmeticTemporalInstruction,
 ) -> Result<(), MetaRequestDecodeError> {
     temporal.push(instruction).map_err(parse_capacity_error)
 }
@@ -1059,6 +1192,154 @@ mod tests {
         assert_eq!(
             decode_error(b"md key Cnope\r\n"),
             recoverable_client_error(BAD_COMMAND_LINE)
+        );
+    }
+
+    #[test]
+    fn decodes_basic_arithmetic() {
+        let DecodedMetaCommand::Request {
+            request: Request::Arithmetic(request),
+            reply_plan,
+        } = decode(b"ma key\r\n")
+        else {
+            panic!("expected arithmetic request");
+        };
+
+        assert_eq!(request.key.as_bytes(), b"key");
+        assert_eq!(request.mode, ArithmeticMode::Increment);
+        assert_eq!(request.delta, 1);
+        assert_eq!(request.initial_value, None);
+        assert_eq!(request.compare_cas, None);
+        assert_eq!(request.override_cas, None);
+        assert!(!request.return_value);
+        assert!(!request.return_cas);
+        assert_eq!(request.temporal.iter().count(), 0);
+        assert_eq!(reply_plan, MetaReplyPlan::default());
+    }
+
+    #[test]
+    fn separates_arithmetic_semantics_from_frontend_reply_plan() {
+        let DecodedMetaCommand::Request {
+            request: Request::Arithmetic(request),
+            reply_plan,
+        } = decode(b"ma key Otag N30 J5 D2 T60 MD q t c v k C42 E43 Pproxy Lpath/\r\n")
+        else {
+            panic!("expected arithmetic request");
+        };
+
+        assert_eq!(request.mode, ArithmeticMode::Decrement);
+        assert_eq!(request.delta, 2);
+        assert_eq!(request.initial_value, Some(5));
+        assert_eq!(request.compare_cas, Some(42));
+        assert_eq!(request.override_cas, Some(43));
+        assert!(request.return_value);
+        assert!(request.return_cas);
+        assert_eq!(
+            request.temporal.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                ArithmeticTemporalInstruction::Vivify(30),
+                ArithmeticTemporalInstruction::UpdateTtl(60),
+                ArithmeticTemporalInstruction::ReturnTtl,
+            ]
+        );
+
+        assert_eq!(reply_plan.quiet, MetaQuietPolicy::SuppressSuccess);
+        assert_eq!(reply_plan.opaque.as_deref(), Some(b"tag".as_slice()));
+        assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+        assert_eq!(
+            reply_plan.output_order.iter().copied().collect::<Vec<_>>(),
+            vec![
+                MetaOutputToken::Opaque,
+                MetaOutputToken::Ttl,
+                MetaOutputToken::Cas,
+                MetaOutputToken::Key,
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_all_arithmetic_modes() {
+        for (wire_mode, expected) in [
+            (b'I', ArithmeticMode::Increment),
+            (b'+', ArithmeticMode::Increment),
+            (b'D', ArithmeticMode::Decrement),
+            (b'-', ArithmeticMode::Decrement),
+        ] {
+            let input = [b"ma key M".as_slice(), &[wire_mode], b"\r\n"].concat();
+            let DecodedMetaCommand::Request {
+                request: Request::Arithmetic(request),
+                ..
+            } = decode(&input)
+            else {
+                panic!("expected arithmetic request");
+            };
+            assert_eq!(request.mode, expected);
+        }
+    }
+
+    #[test]
+    fn decodes_arithmetic_at_every_split_point() {
+        let input = b"ma /region/cluster/key N30 T60 t D2 v\r\n";
+
+        for split in 0..=input.len() {
+            let mut decoder = MetaRequestDecoder::new();
+            let mut src = BytesMut::new();
+            src.extend_from_slice(&input[..split]);
+            if split < input.len() {
+                assert_eq!(decoder.decode(&mut src), Ok(None), "split={split}");
+                src.extend_from_slice(&input[split..]);
+            }
+
+            let DecodedMetaCommand::Request {
+                request: Request::Arithmetic(request),
+                ..
+            } = decoder.decode(&mut src).unwrap().unwrap()
+            else {
+                panic!("expected arithmetic request at split={split}");
+            };
+            assert_eq!(request.key.as_bytes(), b"/region/cluster/key");
+            assert_eq!(request.delta, 2);
+            assert!(request.return_value);
+            assert!(src.is_empty(), "split={split}");
+        }
+    }
+
+    #[test]
+    fn normalizes_base64_arithmetic_key() {
+        let DecodedMetaCommand::Request {
+            request: Request::Arithmetic(request),
+            reply_plan,
+        } = decode(b"ma a2V5 b k\r\n")
+        else {
+            panic!("expected arithmetic request");
+        };
+
+        assert_eq!(request.key.as_bytes(), b"key");
+        assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
+        assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
+    }
+
+    #[test]
+    fn rejects_invalid_arithmetic_flags() {
+        assert_eq!(
+            decode_error(b"ma key J5\r\n"),
+            recoverable_client_error(BAD_COMMAND_LINE)
+        );
+        assert_eq!(
+            decode_error(b"ma key MX\r\n"),
+            recoverable_client_error(BAD_COMMAND_LINE)
+        );
+        assert_eq!(
+            decode_error(b"ma key Dnope\r\n"),
+            recoverable_client_error(BAD_COMMAND_LINE)
+        );
+        assert_eq!(
+            decode_error(b"ma key v v\r\n"),
+            recoverable_client_error(DUPLICATE_FLAG)
+        );
+        assert_eq!(
+            decode_error(b"ma key s\r\n"),
+            recoverable_client_error(INVALID_FLAG)
         );
     }
 
