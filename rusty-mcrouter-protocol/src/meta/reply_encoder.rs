@@ -5,13 +5,14 @@ use thiserror::Error;
 use crate::{
     key::MAX_KEY_BYTES,
     reply::{
-        ArithmeticReply, DeleteReply, ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply,
+        ArithmeticReply, DebugHit, DebugReply, DeleteReply, ErrorReply, GetHit, GetReply,
+        RecacheState, Reply, StoreReply,
     },
 };
 
 use super::{
-    KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_REPLY_LINE_BYTES,
-    MAX_REPLY_VALUE_BYTES,
+    KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan, MAX_DEBUG_FIELDS,
+    MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES,
 };
 
 const MAX_BASE64_KEY_BYTES: usize = MAX_KEY_BYTES.div_ceil(3) * 4;
@@ -56,8 +57,8 @@ impl MetaReplyEncoder {
             Reply::Store(reply) => encode_store(reply, plan, out),
             Reply::Delete(reply) => encode_delete(reply, plan, out),
             Reply::Arithmetic(reply) => encode_arithmetic(reply, plan, out),
+            Reply::Debug(reply) => encode_debug(reply, plan, out),
             Reply::Error(reply) => encode_error(reply, out),
-            _ => Err(MetaReplyEncodeError::UnsupportedReply),
         };
         if result.is_err() {
             out.truncate(checkpoint);
@@ -78,9 +79,6 @@ pub enum ReplyEncodeStatus {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum MetaReplyEncodeError {
-    #[error("reply operation is not implemented by the Meta encoder")]
-    UnsupportedReply,
-
     #[error("get reply is missing requested {0}")]
     MissingField(&'static str),
 
@@ -348,6 +346,86 @@ fn write_arithmetic_i64(
     }
 }
 
+fn encode_debug(
+    reply: &DebugReply,
+    plan: &MetaReplyPlan,
+    out: &mut BytesMut,
+) -> Result<(), MetaReplyEncodeError> {
+    if plan.output_order.iter().next().is_some() {
+        return Err(MetaReplyEncodeError::InvalidData(
+            "debug reply has an output-token plan",
+        ));
+    }
+    let line_start = out.len();
+    match reply {
+        DebugReply::Miss => out.extend_from_slice(b"EN"),
+        DebugReply::Hit(hit) => {
+            out.extend_from_slice(b"ME ");
+            write_debug_key(plan, out)?;
+            write_debug_fields(hit, out)?;
+        }
+    }
+    finish_line(out, line_start)
+}
+
+fn write_debug_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
+    let key = plan
+        .external_key
+        .as_ref()
+        .ok_or(MetaReplyEncodeError::MissingField("external key"))?;
+    if key.is_empty() {
+        return Err(MetaReplyEncodeError::InvalidData("empty external key"));
+    }
+    match plan.key_encoding {
+        KeyEncoding::Text => {
+            if key.iter().any(|byte| *byte <= b' ' || *byte == 0x7f) {
+                return Err(MetaReplyEncodeError::InvalidData("invalid external key"));
+            }
+            out.extend_from_slice(key);
+        }
+        KeyEncoding::Base64 => {
+            let mut encoded = [0; MAX_BASE64_KEY_BYTES];
+            let encoded_len = STANDARD.encode_slice(key, &mut encoded).map_err(|_| {
+                MetaReplyEncodeError::EncodedKeyTooLong {
+                    maximum: MAX_KEY_BYTES,
+                }
+            })?;
+            if encoded_len > MAX_KEY_BYTES {
+                return Err(MetaReplyEncodeError::EncodedKeyTooLong {
+                    maximum: MAX_KEY_BYTES,
+                });
+            }
+            out.extend_from_slice(&encoded[..encoded_len]);
+        }
+    }
+    Ok(())
+}
+
+fn write_debug_fields(hit: &DebugHit, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
+    if hit.fields.len() > MAX_DEBUG_FIELDS {
+        return Err(MetaReplyEncodeError::InvalidData("too many debug fields"));
+    }
+    for field in &hit.fields {
+        if field.name.is_empty()
+            || field
+                .name
+                .iter()
+                .any(|byte| *byte <= b' ' || *byte == b'=' || *byte == 0x7f)
+            || field
+                .value
+                .iter()
+                .any(|byte| *byte <= b' ' || *byte == 0x7f)
+        {
+            return Err(MetaReplyEncodeError::InvalidData("invalid debug field"));
+        }
+        out.extend_from_slice(b" ");
+        out.extend_from_slice(&field.name);
+        out.extend_from_slice(b"=");
+        out.extend_from_slice(&field.value);
+    }
+    Ok(())
+}
+
 fn encode_error(reply: &ErrorReply, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
     let line_start = out.len();
     match reply {
@@ -487,7 +565,7 @@ mod tests {
     use super::*;
     use crate::{
         meta::{DecodedMetaCommand, MetaReplyDecoder, MetaRequestDecoder, MetaRequestEncoder},
-        reply::{ArithmeticResult, DebugHit, DebugReply, StoreResult},
+        reply::{ArithmeticResult, DebugField, DebugHit, DebugReply, StoreResult},
     };
 
     fn plan(input: &[u8]) -> MetaReplyPlan {
@@ -800,13 +878,63 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unimplemented_reply_operations() {
+    fn encodes_debug_hit_and_miss() {
+        let plan = plan(b"me key\r\n");
+        let hit = Reply::Debug(DebugReply::Hit(DebugHit {
+            fields: vec![
+                DebugField {
+                    name: Bytes::from_static(b"exp"),
+                    value: Bytes::from_static(b"60"),
+                },
+                DebugField {
+                    name: Bytes::from_static(b"fetch"),
+                    value: Bytes::from_static(b"yes"),
+                },
+            ],
+        }));
+        assert_eq!(
+            encode(&hit, &plan).unwrap(),
+            (
+                ReplyEncodeStatus::Written,
+                BytesMut::from(&b"ME key exp=60 fetch=yes\r\n"[..]),
+            )
+        );
+        assert_eq!(
+            encode(&Reply::Debug(DebugReply::Miss), &plan).unwrap(),
+            (ReplyEncodeStatus::Written, BytesMut::from(&b"EN\r\n"[..]),)
+        );
+    }
+
+    #[test]
+    fn encodes_base64_debug_key_without_marker() {
+        let plan = plan(b"me a2V5 b\r\n");
         let reply = Reply::Debug(DebugReply::Hit(DebugHit { fields: vec![] }));
 
         assert_eq!(
-            encode(&reply, &MetaReplyPlan::default()),
-            Err(MetaReplyEncodeError::UnsupportedReply)
+            encode(&reply, &plan).unwrap(),
+            (
+                ReplyEncodeStatus::Written,
+                BytesMut::from(&b"ME a2V5\r\n"[..]),
+            )
         );
+    }
+
+    #[test]
+    fn rejects_invalid_debug_fields_atomically() {
+        let plan = plan(b"me key\r\n");
+        let reply = Reply::Debug(DebugReply::Hit(DebugHit {
+            fields: vec![DebugField {
+                name: Bytes::from_static(b"bad name"),
+                value: Bytes::from_static(b"value"),
+            }],
+        }));
+        let mut out = BytesMut::from(&b"existing"[..]);
+
+        assert_eq!(
+            MetaReplyEncoder::new().encode(&reply, &plan, &mut out),
+            Err(MetaReplyEncodeError::InvalidData("invalid debug field"))
+        );
+        assert_eq!(out, b"existing".as_slice());
     }
 
     #[test]
@@ -968,6 +1096,45 @@ mod tests {
         assert_eq!(
             frontend_output,
             b"VA 2 Otag t60 c42 k/region/cluster/key\r\n43\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn completes_debug_vertical_slice() {
+        let mut request_decoder = MetaRequestDecoder::new();
+        let mut frontend_input = BytesMut::from(&b"me /region/cluster/key Pproxy\r\n"[..]);
+        let DecodedMetaCommand::Request {
+            request,
+            reply_plan,
+        } = request_decoder
+            .decode(&mut frontend_input)
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected request");
+        };
+
+        let mut backend_output = BytesMut::new();
+        let expectation = MetaRequestEncoder::new()
+            .encode(&request, &mut backend_output)
+            .unwrap();
+        assert_eq!(backend_output, b"me key\r\n".as_slice());
+
+        let mut reply_decoder = MetaReplyDecoder::new();
+        let mut backend_input = BytesMut::from(&b"ME key exp=60 fetch=yes\r\n"[..]);
+        let reply = reply_decoder
+            .decode(&expectation, &mut backend_input)
+            .unwrap()
+            .unwrap();
+
+        let mut frontend_output = BytesMut::new();
+        assert_eq!(
+            MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
+            Ok(ReplyEncodeStatus::Written)
+        );
+        assert_eq!(
+            frontend_output,
+            b"ME /region/cluster/key exp=60 fetch=yes\r\n".as_slice()
         );
     }
 }
