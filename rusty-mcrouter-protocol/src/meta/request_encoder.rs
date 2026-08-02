@@ -3,9 +3,7 @@ use thiserror::Error;
 
 use crate::{
     key::{Key, MAX_KEY_BYTES},
-    request::{
-        ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction, DeleteRequest, Request,
-    },
+    request::{ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction, Request},
 };
 
 use super::{command, wire, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES};
@@ -36,7 +34,7 @@ impl MetaRequestEncoder {
                 })
             }
             Request::Delete(request) => {
-                encode_delete(request, out).map(|()| MetaReplyExpectation::Delete)
+                command::delete::encode_request(request, out).map(|()| MetaReplyExpectation::Delete)
             }
             Request::Arithmetic(request) => {
                 encode_arithmetic(request, out).map(|()| MetaReplyExpectation::Arithmetic {
@@ -69,40 +67,6 @@ pub enum MetaRequestEncodeError {
 
     #[error("Meta request exceeds the {maximum}-byte line limit")]
     FrameTooLarge { maximum: usize },
-}
-
-fn encode_delete(
-    request: &DeleteRequest,
-    out: &mut BytesMut,
-) -> Result<(), MetaRequestEncodeError> {
-    let line_start = out.len();
-    out.extend_from_slice(b"md ");
-    let key_is_base64 = write_backend_key(out, &request.key)?;
-
-    if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
-    }
-    if let Some(cas) = request.compare_cas {
-        write_u64_flag(out, b'C', cas);
-    }
-    if let Some(cas) = request.override_cas {
-        write_u64_flag(out, b'E', cas);
-    }
-    if let Some(flags) = request.client_flags {
-        write_u64_flag(out, b'F', u64::from(flags));
-    }
-    if request.invalidate {
-        wire::write_bare_flag(out, b'I');
-    }
-    if let Some(ttl) = request.ttl {
-        write_i32_flag(out, b'T', ttl);
-    }
-    if request.remove_value {
-        wire::write_bare_flag(out, b'x');
-    }
-
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
-    Ok(())
 }
 
 fn encode_arithmetic(

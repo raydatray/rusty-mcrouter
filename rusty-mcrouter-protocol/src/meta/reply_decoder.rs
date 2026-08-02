@@ -3,8 +3,8 @@ use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 
 use crate::reply::{
-    ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, DeleteReply, ErrorReply,
-    GetHit, GetReply, Reply,
+    ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, ErrorReply, GetHit,
+    GetReply, Reply,
 };
 
 use super::command;
@@ -158,7 +158,7 @@ fn parse_line(
     match expectation {
         MetaReplyExpectation::Get(shape) => command::get::parse_reply(*shape, line),
         MetaReplyExpectation::Store { cas, size } => command::store::parse_reply(*cas, *size, line),
-        MetaReplyExpectation::Delete => parse_delete_line(line),
+        MetaReplyExpectation::Delete => command::delete::parse_reply(line),
         MetaReplyExpectation::Arithmetic { value, cas, ttl } => {
             parse_arithmetic_line(*value, *cas, *ttl, line)
         }
@@ -298,25 +298,6 @@ fn validate_arithmetic_success(
     }
 }
 
-fn parse_delete_line(line: &[u8]) -> Result<ParsedLine, MetaReplyDecodeError> {
-    let mut tokens = split_tokens(line);
-    let code = tokens
-        .next()
-        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
-    if tokens.next().is_some() {
-        return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
-    }
-
-    let reply = match code {
-        b"HD" => DeleteReply::Success,
-        b"NS" => DeleteReply::NotStored,
-        b"EX" => DeleteReply::Exists,
-        b"NF" => DeleteReply::NotFound,
-        _ => return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
-    };
-    Ok(ParsedLine::Reply(Reply::Delete(reply)))
-}
-
 fn parse_error_reply(line: &[u8]) -> Result<Option<ErrorReply>, MetaReplyDecodeError> {
     if line == b"ERROR" {
         return Ok(Some(ErrorReply::Error));
@@ -375,7 +356,7 @@ pub enum MetaReplyDecodeError {
 mod tests {
     use super::*;
     use crate::meta::GetSuccessShape;
-    use crate::reply::{RecacheState, StoreReply, StoreResult};
+    use crate::reply::{DeleteReply, RecacheState, StoreReply, StoreResult};
 
     const HEADER: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Header);
     const VALUE: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Value);

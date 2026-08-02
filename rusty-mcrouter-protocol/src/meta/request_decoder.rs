@@ -8,14 +8,13 @@ use crate::{
     meta::{KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyPlan},
     request::{
         ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction,
-        ArithmeticTemporalInstructions, DebugRequest, DeleteRequest, Request, StoreMode,
-        StoreRequest,
+        ArithmeticTemporalInstructions, DebugRequest, Request, StoreMode, StoreRequest,
     },
 };
 
 use super::command;
 use super::line_scanner::{scan_line, LineScan};
-use super::numbers::{parse_i32, parse_u32, parse_u64};
+use super::numbers::{parse_i32, parse_u64};
 use super::tokens::{flags, require_no_argument, split_tokens, FlagBudget, FlagError};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
@@ -230,90 +229,11 @@ fn parse_command(
     let mut tokens = split_tokens(line);
     match tokens.next() {
         Some(b"mg") => command::get::parse_request(tokens, key_frame),
-        Some(b"md") => parse_delete(tokens, key_frame),
+        Some(b"md") => command::delete::parse_request(tokens, key_frame),
         Some(b"ma") => parse_arithmetic(tokens, key_frame),
         Some(b"me") => parse_debug(tokens, key_frame),
         _ => Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error)),
     }
-}
-
-fn parse_delete<'a>(
-    mut tokens: impl Iterator<Item = &'a [u8]>,
-    key_frame: Option<&Bytes>,
-) -> Result<DecodedMetaCommand, MetaRequestDecodeError> {
-    let raw_key = tokens
-        .next()
-        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-    let mut compare_cas = None;
-    let mut override_cas = None;
-    let mut client_flags = None;
-    let mut invalidate = false;
-    let mut ttl = None;
-    let mut remove_value = false;
-    let mut reply_plan = MetaReplyPlan::default();
-    let mut return_key = false;
-
-    // 20 line tokens minus `md` and the key. Unreachable today (only 12
-    // distinct valid md flags exist), kept for the same reason as `ms`.
-    for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 2)) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
-            b'b' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                reply_plan.key_encoding = KeyEncoding::Base64;
-            }
-            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_command_line)?),
-            b'F' => client_flags = Some(parse_u32(argument).map_err(bad_command_line)?),
-            b'I' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                invalidate = true;
-            }
-            b'k' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                return_key = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Key)
-                    .map_err(bad_command_line)?;
-            }
-            b'O' => {
-                if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
-                    return Err(recoverable_client_error(BAD_COMMAND_LINE));
-                }
-                reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Opaque)
-                    .map_err(bad_command_line)?;
-            }
-            b'q' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
-            }
-            b'T' => ttl = Some(parse_i32(argument).map_err(bad_command_line)?),
-            b'x' => {
-                require_no_argument(argument).map_err(bad_command_line)?;
-                remove_value = true;
-            }
-            b'P' | b'L' => require_hint_argument(argument)?,
-            _ => return Err(recoverable_client_error(INVALID_FLAG)),
-        }
-    }
-
-    let key = resolve_key(raw_key, key_frame, return_key, &mut reply_plan)?;
-    Ok(DecodedMetaCommand::Request {
-        request: Request::Delete(DeleteRequest {
-            key,
-            compare_cas,
-            override_cas,
-            client_flags,
-            invalidate,
-            ttl,
-            remove_value,
-        }),
-        reply_plan,
-    })
 }
 
 fn parse_arithmetic<'a>(
@@ -489,7 +409,10 @@ fn parse_key(
     Key::new(bytes).map_err(|_| recoverable_client_error(BAD_COMMAND_LINE))
 }
 
-fn bytes_from_frame(raw: &[u8], frame: Option<&Bytes>) -> Result<Bytes, MetaRequestDecodeError> {
+pub fn bytes_from_frame(
+    raw: &[u8],
+    frame: Option<&Bytes>,
+) -> Result<Bytes, MetaRequestDecodeError> {
     let Some(frame) = frame else {
         return Ok(Bytes::copy_from_slice(raw));
     };
