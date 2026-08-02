@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use memchr::memchr;
 use thiserror::Error;
 
-use crate::reply::{ErrorReply, GetHit, GetReply, RecacheState, Reply};
+use crate::reply::{ErrorReply, GetHit, GetReply, RecacheState, Reply, StoreReply, StoreResult};
 
 use super::{numbers, seen_flags::SeenFlags, GetSuccessShape, MetaReplyExpectation};
 
@@ -156,6 +156,7 @@ fn parse_line(
 
     match expectation {
         MetaReplyExpectation::Get(shape) => parse_get_line(*shape, line),
+        MetaReplyExpectation::Store { cas, size } => parse_store_line(*cas, *size, line),
         _ => Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
     }
 }
@@ -199,6 +200,55 @@ fn parse_get_line(shape: GetSuccessShape, line: &[u8]) -> Result<ParsedLine, Met
         }
         _ => Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
     }
+}
+
+fn parse_store_line(
+    expect_cas: bool,
+    expect_size: bool,
+    line: &[u8],
+) -> Result<ParsedLine, MetaReplyDecodeError> {
+    let mut tokens = line
+        .split(|byte| *byte == b' ')
+        .filter(|token| !token.is_empty());
+    let code = tokens
+        .next()
+        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+    let result = parse_store_attributes(tokens)?;
+    if (expect_cas && result.cas.is_none()) || (expect_size && result.size.is_none()) {
+        return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
+    }
+
+    let reply = match code {
+        b"HD" => StoreReply::Success(result),
+        b"NS" => StoreReply::NotStored(result),
+        b"EX" => StoreReply::Exists(result),
+        b"NF" => StoreReply::NotFound(result),
+        _ => return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
+    };
+    Ok(ParsedLine::Reply(Reply::Store(reply)))
+}
+
+fn parse_store_attributes<'a>(
+    tokens: impl Iterator<Item = &'a [u8]>,
+) -> Result<StoreResult, MetaReplyDecodeError> {
+    let mut result = StoreResult::default();
+    let mut seen = SeenFlags::default();
+
+    for token in tokens {
+        let (&flag, argument) = token
+            .split_first()
+            .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+        if !seen.insert(flag) {
+            return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
+        }
+
+        match flag {
+            b'c' => result.cas = Some(parse_u64(argument)?),
+            b's' => result.size = Some(parse_u64(argument)?),
+            _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
+        }
+    }
+    Ok(result)
 }
 
 fn parse_error_reply(line: &[u8]) -> Result<Option<ErrorReply>, MetaReplyDecodeError> {
@@ -332,6 +382,14 @@ mod tests {
     const VALUE: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Value);
     const CONDITIONAL: MetaReplyExpectation =
         MetaReplyExpectation::Get(GetSuccessShape::HeaderOrValue);
+    const STORE: MetaReplyExpectation = MetaReplyExpectation::Store {
+        cas: false,
+        size: false,
+    };
+    const STORE_WITH_FIELDS: MetaReplyExpectation = MetaReplyExpectation::Store {
+        cas: true,
+        size: true,
+    };
     fn decode(expectation: &MetaReplyExpectation, input: &[u8]) -> Reply {
         let mut decoder = MetaReplyDecoder::new();
         let mut src = BytesMut::from(input);
@@ -343,6 +401,77 @@ mod tests {
     #[test]
     fn decodes_get_miss() {
         assert_eq!(decode(&HEADER, b"EN\r\n"), Reply::Get(GetReply::Miss));
+    }
+
+    #[test]
+    fn decodes_all_store_outcomes() {
+        for (input, expected) in [
+            (
+                b"HD c42 s3\r\n".as_slice(),
+                StoreReply::Success(StoreResult {
+                    cas: Some(42),
+                    size: Some(3),
+                }),
+            ),
+            (
+                b"NS c0 s3\r\n".as_slice(),
+                StoreReply::NotStored(StoreResult {
+                    cas: Some(0),
+                    size: Some(3),
+                }),
+            ),
+            (
+                b"EX c41 s3\r\n".as_slice(),
+                StoreReply::Exists(StoreResult {
+                    cas: Some(41),
+                    size: Some(3),
+                }),
+            ),
+            (
+                b"NF c0 s3\r\n".as_slice(),
+                StoreReply::NotFound(StoreResult {
+                    cas: Some(0),
+                    size: Some(3),
+                }),
+            ),
+        ] {
+            assert_eq!(decode(&STORE_WITH_FIELDS, input), Reply::Store(expected));
+        }
+    }
+
+    #[test]
+    fn decodes_store_attributes_in_any_order() {
+        assert_eq!(
+            decode(&STORE_WITH_FIELDS, b"HD s3 c42\r\n"),
+            Reply::Store(StoreReply::Success(StoreResult {
+                cas: Some(42),
+                size: Some(3),
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_store_reply_missing_expected_fields() {
+        let mut decoder = MetaReplyDecoder::new();
+        let mut src = BytesMut::from(&b"HD c42\r\n"[..]);
+
+        assert_eq!(
+            decoder.decode(&STORE_WITH_FIELDS, &mut src),
+            Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_store_codes_and_attributes() {
+        for input in [
+            b"EN\r\n".as_slice(),
+            b"HD f1\r\n".as_slice(),
+            b"HD c1 c2\r\n".as_slice(),
+        ] {
+            let mut decoder = MetaReplyDecoder::new();
+            let mut src = BytesMut::from(input);
+            assert!(decoder.decode(&STORE, &mut src).is_err(), "input={input:?}");
+        }
     }
 
     #[test]
