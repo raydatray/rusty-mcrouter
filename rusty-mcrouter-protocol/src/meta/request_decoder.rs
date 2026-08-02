@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Buf, Bytes, BytesMut};
+use memchr::memchr;
 use thiserror::Error;
 
 use crate::errors::ParseError;
@@ -13,9 +14,18 @@ use crate::{
     },
 };
 
+use super::{numbers, seen_flags::SeenFlags};
+
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
-pub const MAX_FLAGS: usize = 64;
+/// memcached's meta parser rejects `mg`/`ms`/`md` lines with more than 20
+/// space-separated tokens as "options flags are too long"; `ma` and `me` use
+/// a different upstream parser with no token budget (verified against
+/// memcached 1.6.45). Upstream applies the budget before validating flags; we
+/// count in-line instead, so a line that is over budget *and* malformed
+/// earlier reports the earlier flag error. The accepted/rejected request sets
+/// are identical.
+pub const MAX_LINE_TOKENS: usize = 20;
 pub const MAX_OPAQUE_BYTES: usize = 31;
 
 const MAX_ZERO_COPY_KEY_FRAME: usize = 1024;
@@ -25,6 +35,7 @@ const INVALID_FLAG: &[u8] = b"invalid flag";
 const DUPLICATE_FLAG: &[u8] = b"duplicate flag";
 const BAD_DATA_CHUNK: &[u8] = b"bad data chunk";
 const OBJECT_TOO_LARGE: &[u8] = b"object too large for cache";
+const OPTIONS_FLAGS_TOO_LONG: &[u8] = b"options flags are too long";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodedMetaCommand {
@@ -106,10 +117,7 @@ impl MetaRequestDecoder {
         }
 
         let search_start = *scanned;
-        let Some(newline) = src[search_start..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map(|offset| search_start + offset)
+        let Some(newline) = memchr(b'\n', &src[search_start..]).map(|offset| search_start + offset)
         else {
             if src.len() >= MAX_COMMAND_LINE_BYTES {
                 return Err(FatalDecodeError::FrameTooLarge {
@@ -265,14 +273,15 @@ fn parse_get<'a>(
     let mut no_lru_bump = false;
     let mut temporal = GetTemporalInstructions::default();
     let mut reply_plan = MetaReplyPlan::default();
-    let mut seen = [false; 256];
+    let mut seen = SeenFlags::default();
     let mut flag_count = 0;
     let mut return_key = false;
 
     for token in tokens {
         flag_count += 1;
-        if flag_count > MAX_FLAGS {
-            return Err(recoverable_client_error(BAD_COMMAND_LINE));
+        // 20 line tokens minus `mg` and the key.
+        if flag_count > MAX_LINE_TOKENS - 2 {
+            return Err(recoverable_client_error(OPTIONS_FLAGS_TOO_LONG));
         }
 
         let (&flag, argument) = token
@@ -281,10 +290,9 @@ fn parse_get<'a>(
         if !flag.is_ascii_alphabetic() {
             return Err(recoverable_client_error(INVALID_FLAG));
         }
-        if seen[flag as usize] {
+        if !seen.insert(flag) {
             return Err(recoverable_client_error(DUPLICATE_FLAG));
         }
-        seen[flag as usize] = true;
 
         match flag {
             b'b' => {
@@ -321,7 +329,7 @@ fn parse_get<'a>(
                 if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
                     return Err(recoverable_client_error(BAD_COMMAND_LINE));
                 }
-                reply_plan.opaque = Some(Bytes::copy_from_slice(argument));
+                reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
                 push_output(&mut reply_plan, MetaOutputToken::Opaque)?;
             }
             b'q' => {
@@ -370,7 +378,7 @@ fn parse_get<'a>(
 
     let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
     if return_key {
-        reply_plan.external_key = Some(Bytes::copy_from_slice(key.as_bytes()));
+        reply_plan.external_key = Some(key.clone_bytes());
     }
 
     Ok(DecodedMetaCommand::Request {
@@ -446,14 +454,18 @@ fn parse_store_fields<'a>(
     let mut invalidate = false;
     let mut vivify_ttl = None;
     let mut reply_plan = MetaReplyPlan::default();
-    let mut seen = [false; 256];
+    let mut seen = SeenFlags::default();
     let mut flag_count = 0;
     let mut return_key = false;
 
     for token in tokens {
         flag_count += 1;
-        if flag_count > MAX_FLAGS {
-            return Err(recoverable_client_error(BAD_COMMAND_LINE));
+        // 20 line tokens minus `ms`, the key, and the datalen. Unreachable
+        // today (only 16 distinct valid ms flags exist, and duplicates are
+        // rejected), but kept so the budget survives future flag leniency.
+        // Raised here rather than in `parse_store` so the body is swallowed.
+        if flag_count > MAX_LINE_TOKENS - 3 {
+            return Err(recoverable_client_error(OPTIONS_FLAGS_TOO_LONG));
         }
 
         let (&flag, argument) = token
@@ -462,10 +474,9 @@ fn parse_store_fields<'a>(
         if !flag.is_ascii_alphabetic() {
             return Err(recoverable_client_error(INVALID_FLAG));
         }
-        if seen[flag as usize] {
+        if !seen.insert(flag) {
             return Err(recoverable_client_error(DUPLICATE_FLAG));
         }
-        seen[flag as usize] = true;
 
         match flag {
             b'b' => {
@@ -504,7 +515,7 @@ fn parse_store_fields<'a>(
                 if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
                     return Err(recoverable_client_error(BAD_COMMAND_LINE));
                 }
-                reply_plan.opaque = Some(Bytes::copy_from_slice(argument));
+                reply_plan.opaque = Some(bytes_from_frame(argument, key_frame)?);
                 push_output(&mut reply_plan, MetaOutputToken::Opaque)?;
             }
             b'q' => {
@@ -528,7 +539,7 @@ fn parse_store_fields<'a>(
 
     let key = parse_key(raw_key, reply_plan.key_encoding, key_frame)?;
     if return_key {
-        reply_plan.external_key = Some(Bytes::copy_from_slice(key.as_bytes()));
+        reply_plan.external_key = Some(key.clone_bytes());
     }
 
     Ok(StoreHeader {
@@ -561,19 +572,7 @@ fn parse_key(
             if raw.is_empty() || raw.iter().any(|byte| *byte <= b' ' || *byte == 0x7f) {
                 return Err(recoverable_client_error(BAD_COMMAND_LINE));
             }
-            match frame {
-                Some(frame) => {
-                    let start = (raw.as_ptr() as usize)
-                        .checked_sub(frame.as_ptr() as usize)
-                        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-                    let end = start
-                        .checked_add(raw.len())
-                        .filter(|end| *end <= frame.len())
-                        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
-                    frame.slice(start..end)
-                }
-                None => Bytes::copy_from_slice(raw),
-            }
+            bytes_from_frame(raw, frame)?
         }
         KeyEncoding::Base64 => Bytes::from(
             STANDARD
@@ -585,6 +584,20 @@ fn parse_key(
     Key::new(bytes).map_err(|_| recoverable_client_error(BAD_COMMAND_LINE))
 }
 
+fn bytes_from_frame(raw: &[u8], frame: Option<&Bytes>) -> Result<Bytes, MetaRequestDecodeError> {
+    let Some(frame) = frame else {
+        return Ok(Bytes::copy_from_slice(raw));
+    };
+    let start = (raw.as_ptr() as usize)
+        .checked_sub(frame.as_ptr() as usize)
+        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+    let end = start
+        .checked_add(raw.len())
+        .filter(|end| *end <= frame.len())
+        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+    Ok(frame.slice(start..end))
+}
+
 fn require_no_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
     if argument.is_empty() {
         Ok(())
@@ -594,25 +607,15 @@ fn require_no_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
 }
 
 fn parse_u64(raw: &[u8]) -> Result<u64, MetaRequestDecodeError> {
-    parse_number(raw)
+    numbers::parse_u64(raw).ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))
 }
 
 fn parse_u32(raw: &[u8]) -> Result<u32, MetaRequestDecodeError> {
-    parse_number(raw)
+    numbers::parse_u32(raw).ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))
 }
 
 fn parse_i32(raw: &[u8]) -> Result<i32, MetaRequestDecodeError> {
-    parse_number(raw)
-}
-
-fn parse_number<T: std::str::FromStr>(raw: &[u8]) -> Result<T, MetaRequestDecodeError> {
-    if raw.is_empty() {
-        return Err(recoverable_client_error(BAD_COMMAND_LINE));
-    }
-    std::str::from_utf8(raw)
-        .ok()
-        .and_then(|raw| raw.parse().ok())
-        .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))
+    numbers::parse_i32(raw).ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))
 }
 
 fn push_temporal(
@@ -1163,6 +1166,36 @@ mod tests {
             decode_error(&rejected),
             recoverable_client_error(BAD_COMMAND_LINE)
         );
+    }
+
+    fn repeated_p_flags(count: usize) -> Vec<u8> {
+        (0..count)
+            .map(|index| format!("P{index}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .into_bytes()
+    }
+
+    #[test]
+    fn enforces_get_flag_token_budget() {
+        // Exactly 19 distinct valid mg flags exist: one over memcached's
+        // budget of 18 (20 line tokens minus the command and the key).
+        let over = b"mg AAAA b c f h k l q s t u v C1 E1 N30 R30 T30 Otag Pp Lx\r\n";
+        assert_eq!(
+            decode_error(over),
+            recoverable_client_error(OPTIONS_FLAGS_TOO_LONG)
+        );
+
+        // The same line minus one flag sits at the budget and must parse.
+        let DecodedMetaCommand::Request {
+            request: Request::Get(request),
+            reply_plan,
+        } = decode(b"mg AAAA b c f h k l q s t u v C1 E1 N30 R30 T30 Otag Pp\r\n")
+        else {
+            panic!("expected get request at the flag budget");
+        };
+        assert!(request.return_value);
+        assert_eq!(reply_plan.opaque.as_deref(), Some(b"tag".as_slice()));
     }
 
     #[test]
