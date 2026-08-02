@@ -7,7 +7,7 @@ use crate::{
     request::{GetRequest, GetTemporalInstruction, Request},
 };
 
-use super::MAX_COMMAND_LINE_BYTES;
+use super::{GetSuccessShape, MetaReplyExpectation, MAX_COMMAND_LINE_BYTES};
 
 const MAX_BASE64_KEY_BYTES: usize = MAX_KEY_BYTES.div_ceil(3) * 4;
 
@@ -24,10 +24,10 @@ impl MetaRequestEncoder {
         &self,
         request: &Request,
         out: &mut BytesMut,
-    ) -> Result<(), MetaRequestEncodeError> {
+    ) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
         let checkpoint = out.len();
         let result = match request {
-            Request::Get(request) => encode_get(request, out),
+            Request::Get(request) => encode_get(request, out).map(MetaReplyExpectation::Get),
             _ => Err(MetaRequestEncodeError::UnsupportedRequest),
         };
         if result.is_err() {
@@ -52,7 +52,10 @@ pub enum MetaRequestEncodeError {
     FrameTooLarge { maximum: usize },
 }
 
-fn encode_get(request: &GetRequest, out: &mut BytesMut) -> Result<(), MetaRequestEncodeError> {
+fn encode_get(
+    request: &GetRequest,
+    out: &mut BytesMut,
+) -> Result<GetSuccessShape, MetaRequestEncodeError> {
     let line_start = out.len();
     out.extend_from_slice(b"mg ");
     let key_is_base64 = write_key(out, &request.key)?;
@@ -106,7 +109,11 @@ fn encode_get(request: &GetRequest, out: &mut BytesMut) -> Result<(), MetaReques
         });
     }
     out.extend_from_slice(b"\r\n");
-    Ok(())
+    Ok(match (request.return_value, request.check_cas.is_some()) {
+        (false, _) => GetSuccessShape::Header,
+        (true, false) => GetSuccessShape::Value,
+        (true, true) => GetSuccessShape::HeaderOrValue,
+    })
 }
 
 fn write_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
@@ -193,7 +200,7 @@ mod tests {
 
     fn encode(request: &Request) -> Result<BytesMut, MetaRequestEncodeError> {
         let mut out = BytesMut::new();
-        MetaRequestEncoder::new().encode(request, &mut out)?;
+        let _expectation = MetaRequestEncoder::new().encode(request, &mut out)?;
         Ok(out)
     }
 
@@ -218,6 +225,32 @@ mod tests {
         assert_eq!(
             encode(&parse(b"mg key\r\n")).unwrap(),
             b"mg key\r\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn returns_get_reply_shape() {
+        let mut out = BytesMut::new();
+        let encoder = MetaRequestEncoder::new();
+
+        let header = parse(b"mg key\r\n");
+        assert_eq!(
+            encoder.encode(&header, &mut out),
+            Ok(MetaReplyExpectation::Get(GetSuccessShape::Header))
+        );
+
+        out.clear();
+        let value = parse(b"mg key v\r\n");
+        assert_eq!(
+            encoder.encode(&value, &mut out),
+            Ok(MetaReplyExpectation::Get(GetSuccessShape::Value))
+        );
+
+        out.clear();
+        let conditional = parse(b"mg key v C42\r\n");
+        assert_eq!(
+            encoder.encode(&conditional, &mut out),
+            Ok(MetaReplyExpectation::Get(GetSuccessShape::HeaderOrValue))
         );
     }
 

@@ -6,7 +6,7 @@ pub enum GetReply {
     Miss,        // EN
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GetHit {
     pub value: Option<Bytes>,             // v, returned as the VA body
     pub client_flags: Option<u32>,        // f
@@ -19,8 +19,9 @@ pub struct GetHit {
     pub stale: bool,                      // X
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum RecacheState {
+    #[default]
     None,
     Won,        // W
     AlreadyWon, // Z
