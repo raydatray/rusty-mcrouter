@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rusty_mcrouter_protocol::reply::GetReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -46,7 +47,7 @@ impl MockBackend {
     }
 
     pub fn miss() -> Self {
-        Self::replying(Reply::Get { hits: vec![] })
+        Self::replying(Reply::Get(GetReply::Miss))
     }
 
     pub fn received(&self) -> Vec<Request> {
@@ -106,7 +107,9 @@ impl BackendFactory for MockBackendFactory {
         }
         self.connected.lock().unwrap().push(addr.to_string());
         Ok(MockBackend::replying(
-            self.reply.clone().unwrap_or(Reply::Get { hits: vec![] }),
+            self.reply
+                .clone()
+                .unwrap_or(Reply::Get(GetReply::Miss)),
         ))
     }
 }
