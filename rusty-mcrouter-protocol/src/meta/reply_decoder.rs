@@ -140,6 +140,13 @@ fn parse_line(
             ttl,
         } => command::arithmetic::parse_reply(*expect_value, *cas, *ttl, line, value),
         MetaReplyExpectation::Debug { key } => command::debug::parse_reply(key, line),
+        MetaReplyExpectation::Version => {
+            let version = line
+                .strip_prefix(b"VERSION ")
+                .ok_or(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH))?;
+
+            Ok(Reply::Version(Bytes::copy_from_slice(version)))
+        }
     }
 }
 
@@ -209,7 +216,7 @@ pub fn invalid_flag(_: FlagError) -> MetaReplyDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::command::debug::MAX_DEBUG_FIELDS;
+    use crate::meta::{command::debug::MAX_DEBUG_FIELDS, MetaRequestEncoder};
     use crate::reply::{
         ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, DeleteReply, GetHit,
         GetReply, RecacheState, StoreReply, StoreResult,
@@ -253,9 +260,65 @@ mod tests {
         }
     }
 
+    fn version_expectation() -> MetaReplyExpectation {
+        let mut request = BytesMut::new();
+        MetaRequestEncoder::new().encode_version_probe(&mut request)
+    }
+
     #[test]
     fn decodes_get_miss() {
         assert_eq!(decode(&HEADER, b"EN\r\n"), Reply::Get(GetReply::Miss));
+    }
+
+    #[test]
+    fn decodes_version_reply_at_every_split_point() {
+        let expectation = version_expectation();
+        let input = b"VERSION 1.6.39\r\n";
+
+        for split in 0..=input.len() {
+            let decoder = MetaReplyDecoder::new();
+            let mut src = BytesMut::from(&input[..split]);
+
+            if split < input.len() {
+                assert_eq!(decoder.decode(&expectation, &mut src), Ok(None));
+                src.extend_from_slice(&input[split..]);
+            }
+
+            assert_eq!(
+                decoder.decode(&expectation, &mut src),
+                Ok(Some(Reply::Version(Bytes::from_static(b"1.6.39")))),
+                "split={split}"
+            );
+            assert!(src.is_empty(), "split={split}");
+        }
+    }
+
+    #[test]
+    fn rejects_non_version_success_for_version_probe() {
+        let expectation = version_expectation();
+
+        for input in [
+            b"VERSION\r\n".as_slice(),
+            b"version 1.6.39\r\n".as_slice(),
+            b"HD\r\n".as_slice(),
+        ] {
+            let decoder = MetaReplyDecoder::new();
+            let mut src = BytesMut::from(input);
+
+            assert_eq!(
+                decoder.decode(&expectation, &mut src),
+                Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
+                "input={input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_probe_accepts_standard_error_reply() {
+        assert_eq!(
+            decode(&version_expectation(), b"SERVER_ERROR warming up\r\n"),
+            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"warming up"))))
+        );
     }
 
     #[test]

@@ -69,6 +69,9 @@ impl MetaReplyEncoder {
             Reply::Arithmetic(reply) => command::arithmetic::encode_reply(reply, plan, out),
             Reply::Debug(reply) => command::debug::encode_reply(reply, plan, out),
             Reply::Error(reply) => encode_error(reply, out),
+            Reply::Version(_) => Err(MetaReplyEncodeError::InvalidData(
+                "version reply is backend only",
+            )),
         };
         if result.is_err() {
             out.truncate(checkpoint);
@@ -434,6 +437,24 @@ mod tests {
             .unwrap(),
             BytesMut::from(&b"CLIENT_ERROR bad command\r\n"[..])
         );
+    }
+
+    #[test]
+    fn rejects_backend_version_reply_atomically() {
+        let plan = plan(b"mg key\r\n");
+        let mut out = BytesMut::from(&b"existing"[..]);
+
+        assert_eq!(
+            MetaReplyEncoder::new().encode(
+                &Reply::Version(Bytes::from_static(b"1.6.39")),
+                &plan,
+                &mut out,
+            ),
+            Err(MetaReplyEncodeError::InvalidData(
+                "version reply is backend only"
+            ))
+        );
+        assert_eq!(out, b"existing".as_slice());
     }
 
     #[test]

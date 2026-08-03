@@ -60,7 +60,33 @@ impl Client {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.tx
-            .send(ClientCommand { request, reply_tx })
+            .send(ClientCommand::Request { request, reply_tx })
+            .await
+            .map_err(|_| NetError::ClientClosed)?;
+
+        match reply_rx.await {
+            Ok(result) => result,
+            Err(_) => Err(NetError::ClientClosed),
+        }
+    }
+
+    pub async fn probe_version(&self) -> Result<Reply> {
+        match self.reply_timeout {
+            Some(dur) => match tokio::time::timeout(dur, self.probe_version_inner()).await {
+                Ok(result) => result,
+                Err(_) => Err(NetError::Timeout {
+                    phase: TimeoutPhase::Reply,
+                }),
+            },
+            None => self.probe_version_inner().await,
+        }
+    }
+
+    async fn probe_version_inner(&self) -> Result<Reply> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        self.tx
+            .send(ClientCommand::VersionProbe { reply_tx })
             .await
             .map_err(|_| NetError::ClientClosed)?;
 
@@ -106,6 +132,89 @@ mod tests {
         let (a, b) = tokio::join!(client.send(get(b"a")), client.send(get(b"b")));
         assert_eq!(a.unwrap(), Reply::Get(GetReply::Miss));
         assert_eq!(b.unwrap(), Reply::Get(GetReply::Miss));
+    }
+
+    #[tokio::test]
+    async fn probes_backend_version() {
+        let addr = scripted_backend(vec![
+            Step::ReadRequests(1),
+            Step::Write(b"VERSION 1.6.39\r\n"),
+        ])
+        .await;
+        let client = Client::connect(addr).await.unwrap();
+
+        assert_eq!(
+            client.probe_version().await.unwrap(),
+            Reply::Version(Bytes::from_static(b"1.6.39"))
+        );
+    }
+
+    #[tokio::test]
+    async fn pipelines_version_probe_with_routed_request() {
+        let addr = scripted_backend(vec![
+            Step::ReadRequests(2),
+            Step::Write(b"VERSION 1.6.39\r\nEN\r\n"),
+        ])
+        .await;
+        let client = Client::connect(addr).await.unwrap();
+
+        let (version, get_reply) = tokio::join!(
+            biased;
+            client.probe_version(),
+            client.send(get(b"key")),
+        );
+
+        assert_eq!(
+            version.unwrap(),
+            Reply::Version(Bytes::from_static(b"1.6.39"))
+        );
+        assert_eq!(get_reply.unwrap(), Reply::Get(GetReply::Miss));
+    }
+
+    #[tokio::test]
+    async fn version_probe_returns_standard_error_reply() {
+        let addr = scripted_backend(vec![
+            Step::ReadRequests(1),
+            Step::Write(b"SERVER_ERROR warming up\r\n"),
+        ])
+        .await;
+        let client = Client::connect(addr).await.unwrap();
+
+        assert_eq!(
+            client.probe_version().await.unwrap(),
+            Reply::Error(rusty_mcrouter_protocol::reply::ErrorReply::Server(Some(
+                Bytes::from_static(b"warming up")
+            )))
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_version_reply_tears_down_connection() {
+        let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Write(b"VERSION\r\n")]).await;
+        let client = Client::connect(addr).await.unwrap();
+
+        assert!(matches!(
+            client.probe_version().await,
+            Err(NetError::Decode(_))
+        ));
+        assert!(matches!(
+            client.send(get(b"key")).await,
+            Err(NetError::ClientClosed)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn version_probe_obeys_reply_timeout() {
+        let addr = scripted_backend(vec![Step::ReadRequests(1), Step::Hang]).await;
+        let cfg = reply_only_cfg(Some(Duration::from_millis(100)));
+        let client = Client::connect_with_config(addr, cfg).await.unwrap();
+
+        assert!(matches!(
+            client.probe_version().await,
+            Err(NetError::Timeout {
+                phase: TimeoutPhase::Reply
+            })
+        ));
     }
 
     #[tokio::test]

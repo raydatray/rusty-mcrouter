@@ -6,6 +6,7 @@ mod get;
 mod store;
 
 pub use arithmetic::{ArithmeticReply, ArithmeticResult};
+use bytes::Bytes;
 pub use debug::{DebugField, DebugHit, DebugReply};
 pub use delete::DeleteReply;
 pub use error::ErrorReply;
@@ -20,4 +21,5 @@ pub enum Reply {
     Error(ErrorReply),
     Get(GetReply),
     Store(StoreReply),
+    Version(Bytes),
 }

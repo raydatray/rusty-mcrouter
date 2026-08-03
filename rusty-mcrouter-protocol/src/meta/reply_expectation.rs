@@ -19,6 +19,7 @@ pub enum MetaReplyExpectation {
     Debug {
         key: Bytes,
     },
+    Version,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
