@@ -143,10 +143,19 @@ impl ClientConnection {
     /// error: the oneshot fails, the connection and its FIFO stay intact, and
     /// `write_buf` is untouched because the encoder truncates on error.
     fn encode_command(&mut self, cmd: ClientCommand) {
-        match self.encoder.encode(&cmd.request, &mut self.write_buf) {
-            Ok(expectation) => self.pending.push_back((expectation, cmd.reply_tx)),
-            Err(error) => {
-                let _ = cmd.reply_tx.send(Err(NetError::Encode(error)));
+        match cmd {
+            ClientCommand::Request { request, reply_tx } => {
+                match self.encoder.encode(&request, &mut self.write_buf) {
+                    Ok(expectation) => self.pending.push_back((expectation, reply_tx)),
+                    Err(error) => {
+                        let _ = reply_tx.send(Err(NetError::Encode(error)));
+                    }
+                }
+            }
+            ClientCommand::VersionProbe { reply_tx } => {
+                let expectation = self.encoder.encode_version_probe(&mut self.write_buf);
+
+                self.pending.push_back((expectation, reply_tx));
             }
         }
     }

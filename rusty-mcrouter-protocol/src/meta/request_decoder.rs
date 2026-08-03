@@ -1287,6 +1287,18 @@ mod tests {
     }
 
     #[test]
+    fn version_is_not_a_frontend_request() {
+        let mut decoder = MetaRequestDecoder::new();
+        let mut src = BytesMut::from(&b"version\r\nmn\r\n"[..]);
+
+        assert_eq!(
+            decoder.decode(&mut src),
+            Err(MetaRequestDecodeError::Recoverable(ErrorReply::Error))
+        );
+        assert_eq!(src, b"mn\r\n".as_slice());
+    }
+
+    #[test]
     fn oversized_partial_line_is_fatal_and_untouched() {
         let mut decoder = MetaRequestDecoder::new();
         let mut src = BytesMut::from(vec![b'x'; MAX_COMMAND_LINE_BYTES + 1].as_slice());

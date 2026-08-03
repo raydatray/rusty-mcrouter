@@ -46,6 +46,12 @@ impl MetaRequestEncoder {
         }
         result
     }
+
+    /// Encodes a backend-only health probe. Takes no `Request` since it cannot enter routing graph.
+    pub fn encode_version_probe(&self, out: &mut BytesMut) -> MetaReplyExpectation {
+        out.extend_from_slice(b"version\r\n");
+        MetaReplyExpectation::Version
+    }
 }
 
 /// Writes the backend form of `key`: the routing prefix is stripped, and a
@@ -177,6 +183,16 @@ mod tests {
     fn encodes_basic_debug() {
         let request = request(b"me key\r\n");
         assert_eq!(encode(&request).unwrap(), b"me key\r\n".as_slice());
+    }
+
+    #[test]
+    fn encodes_version_probe_and_returns_its_expectation() {
+        let mut out = BytesMut::from(&b"existing"[..]);
+
+        let expectation = MetaRequestEncoder::new().encode_version_probe(&mut out);
+
+        assert_eq!(expectation, MetaReplyExpectation::Version);
+        assert_eq!(out, b"existingversion\r\n".as_slice());
     }
 
     #[test]
