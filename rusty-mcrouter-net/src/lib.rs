@@ -4,6 +4,7 @@ use thiserror::Error;
 mod backend;
 pub mod classify;
 mod client;
+mod destination;
 pub mod error;
 mod server;
 
