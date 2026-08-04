@@ -2,7 +2,9 @@ use rusty_mcrouter_protocol::meta::{MetaReplyDecodeError, MetaRequestEncodeError
 use thiserror::Error;
 
 mod backend;
+pub mod classify;
 mod client;
+pub mod error;
 mod server;
 
 #[cfg(any(test, feature = "testing"))]
