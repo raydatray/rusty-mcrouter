@@ -362,4 +362,228 @@ mod tests {
         })
         .await;
     }
+
+    // ── ports of the old Client suite ───────────────────────────────────
+
+    #[tokio::test]
+    async fn pipelines_requests() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(2),
+                Step::Write(b"EN\r\nEN\r\n"),
+            ]])
+            .await;
+            let (handle, _log) = spawn_to(&server, Config::default());
+
+            let (a, b) = tokio::join!(handle.send(get(b"a")), handle.send(get(b"b")));
+            assert_eq!(a.unwrap(), Reply::Get(GetReply::Miss));
+            assert_eq!(b.unwrap(), Reply::Get(GetReply::Miss));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn matches_replies_fifo() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(3),
+                Step::Write(b"VA 1\r\n1\r\n"),
+                Step::Write(b"VA 1\r\n2\r\n"),
+                Step::Write(b"VA 1\r\n3\r\n"),
+            ]])
+            .await;
+            let (handle, _log) = spawn_to(&server, Config::default());
+
+            let (r1, r2, r3) = tokio::join!(
+                handle.send(get(b"k")),
+                handle.send(get(b"k")),
+                handle.send(get(b"k")),
+            );
+            assert_eq!(hit_data(r1.unwrap()).as_ref(), b"1");
+            assert_eq!(hit_data(r2.unwrap()).as_ref(), b"2");
+            assert_eq!(hit_data(r3.unwrap()).as_ref(), b"3");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reassembles_reply_across_partial_reads() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(1),
+                Step::WriteChunked(b"VA 3\r\nbar\r\n"),
+            ]])
+            .await;
+            let (handle, _log) = spawn_to(&server, Config::default());
+
+            assert_eq!(
+                hit_data(handle.send(get(b"foo")).await.unwrap()).as_ref(),
+                b"bar"
+            );
+        })
+        .await;
+    }
+
+    /// Encode failure fails only its own request: the connection, its FIFO,
+    /// and the rest of the batch stay intact.
+    #[tokio::test]
+    async fn encode_failure_fails_only_that_request() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(1),
+                Step::Write(b"EN\r\n"),
+            ]])
+            .await;
+            let (handle, _log) = spawn_to(&server, Config::default());
+
+            // routing prefix strips to an empty backend key -> encode error
+            let bad = rusty_mcrouter_protocol::test_support::request(b"mg /region/cluster/ v\r\n");
+            let result = handle.send(bad).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(SendError::Local(crate::error::LocalError::Encode(_)))
+                ),
+                "got {result:?}"
+            );
+
+            assert_eq!(
+                handle.send(get(b"ok")).await.unwrap(),
+                Reply::Get(GetReply::Miss)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn probe_version_roundtrip() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(1),
+                Step::Write(b"VERSION 1.6.39\r\n"),
+            ]])
+            .await;
+            let (handle, _log) = spawn_to(&server, Config::default());
+
+            assert_eq!(
+                handle.send_probe().await.unwrap(),
+                Reply::Version(Bytes::from_static(b"1.6.39"))
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn probe_pipelines_with_routed_request() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(2),
+                Step::Write(b"VERSION 1.6.39\r\nEN\r\n"),
+            ]])
+            .await;
+            let (handle, _log) = spawn_to(&server, Config::default());
+
+            let (version, get_reply) = tokio::join!(
+                biased;
+                handle.send_probe(),
+                handle.send(get(b"key")),
+            );
+            assert_eq!(
+                version.unwrap(),
+                Reply::Version(Bytes::from_static(b"1.6.39"))
+            );
+            assert_eq!(get_reply.unwrap(), Reply::Get(GetReply::Miss));
+        })
+        .await;
+    }
+
+    /// try_send fail-fast on a full channel (mcrouter maxPending ->
+    /// LOCAL_ERROR). join! polls both sends before the actor task ever
+    /// runs, so the second try_send deterministically sees a full queue.
+    #[tokio::test]
+    async fn queue_full_fails_fast() {
+        run_local(async {
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Hang]]).await;
+            let cfg = Config {
+                max_pending: 1,
+                reply_timeout: Some(Duration::from_millis(50)),
+                ..Config::default()
+            };
+            let (handle, _log) = spawn_to(&server, cfg);
+
+            let (r1, r2) = tokio::join!(handle.send(get(b"a")), handle.send(get(b"b")));
+            assert!(
+                matches!(r2, Err(SendError::Local(crate::error::LocalError::QueueFull))),
+                "got {r2:?}"
+            );
+            assert!(
+                matches!(r1, Err(SendError::Request(RequestError::Timeout { .. }))),
+                "got {r1:?}"
+            );
+        })
+        .await;
+    }
+
+    /// CloseIdle on a quiescent connection closes it benignly (Closed, no
+    /// Down) and the next send reconnects. The script's trailing
+    /// ReadRequests doubles as "wait for the client to close" — it returns
+    /// on EOF, letting the serial server move to the second script.
+    #[tokio::test]
+    async fn close_idle_when_quiescent_closes_and_reconnects() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![
+                vec![
+                    Step::ReadRequests(1),
+                    Step::Write(b"EN\r\n"),
+                    Step::ReadRequests(2), // parks until the client closes
+                ],
+                vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
+            ])
+            .await;
+            let (handle, log) = spawn_to(&server, Config::default());
+
+            handle.send(get(b"a")).await.unwrap();
+            handle.close_idle();
+            wait_for(&log, &ConnectionEvent::Closed).await;
+
+            handle.send(get(b"b")).await.unwrap();
+            assert_eq!(server.accept_count(), 2);
+            assert!(
+                !log.borrow()
+                    .iter()
+                    .any(|e| matches!(e, ConnectionEvent::Down(_))),
+                "close_idle must never produce Down: {:?}",
+                log.borrow(),
+            );
+        })
+        .await;
+    }
+
+    /// CloseIdle racing an inflight request is ignored: the sweep's verdict
+    /// is stale, the reply still arrives, the connection survives.
+    #[tokio::test]
+    async fn close_idle_ignored_when_busy() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(1),
+                Step::WriteChunked(b"VA 3\r\nbar\r\n"), // ~11ms of reply
+            ]])
+            .await;
+            let (handle, log) = spawn_to(&server, Config::default());
+
+            let (reply, ()) = tokio::join!(handle.send(get(b"k")), async {
+                tokio::time::sleep(Duration::from_millis(3)).await;
+                handle.close_idle(); // lands while the reply is mid-flight
+            });
+            assert_eq!(hit_data(reply.unwrap()).as_ref(), b"bar");
+            assert_eq!(server.accept_count(), 1);
+            assert!(
+                !log.borrow().contains(&ConnectionEvent::Closed),
+                "busy CloseIdle must be ignored: {:?}",
+                log.borrow(),
+            );
+        })
+        .await;
+    }
 }
