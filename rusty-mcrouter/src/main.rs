@@ -1,5 +1,6 @@
 use clap::Parser;
 use rusty_mcrouter_config::parse_file;
+use rusty_mcrouter_net::{destination, tko::TkoTrackerMap};
 use tokio::sync::mpsc;
 
 use std::{
@@ -7,6 +8,7 @@ use std::{
     net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 mod proxy;
 
@@ -51,6 +53,66 @@ struct Args {
         help = "number of SO_REUSEPORT listening sockets (defaults to num_proxies)"
     )]
     num_listening_sockets: Option<usize>,
+
+    #[command(flatten)]
+    options: RouterOptions,
+}
+
+/// Router-level destination/TKO options. CLI flags with mcrouter's names and
+/// defaults (mcrouter_options_list.h) — upstream treats these as command-line
+/// options, not config-file keys, and so do we.
+#[derive(clap::Args, Clone, Debug)]
+struct RouterOptions {
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "per-request reply timeout, ms; also the connect timeout default"
+    )]
+    server_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "extra connect attempts after a connect TIMEOUT (other connect errors never retry)"
+    )]
+    connect_timeout_retries: usize,
+
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "consecutive soft failures (timeouts) before a server is marked TKO"
+    )]
+    failures_until_tko: u64,
+
+    #[arg(long, default_value_t = 10_000, help = "first probe delay after a TKO mark, ms")]
+    probe_delay_initial_ms: u64,
+
+    #[arg(long, default_value_t = 60_000, help = "probe backoff ceiling, ms")]
+    probe_delay_max_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = 60_000,
+        help = "idle connections are closed within at most 2x this interval, ms; 0 disables"
+    )]
+    reset_inactive_connection_interval_ms: u64,
+
+    #[arg(long, help = "disable TKO tracking entirely (no fast-fail, no probes)")]
+    disable_tko_tracking: bool,
+}
+
+fn destination_defaults(o: &RouterOptions) -> destination::Config {
+    destination::Config {
+        // connect_timeout defaults to the server timeout, like mcrouter
+        // (McRouteHandleProvider-inl.h:197-205); pools may override both
+        connect_timeout: Some(Duration::from_millis(o.server_timeout_ms)),
+        reply_timeout: Some(Duration::from_millis(o.server_timeout_ms)),
+        connect_timeout_retries: o.connect_timeout_retries,
+        failures_until_tko: o.failures_until_tko,
+        probe_delay_initial: Duration::from_millis(o.probe_delay_initial_ms),
+        probe_delay_max: Duration::from_millis(o.probe_delay_max_ms),
+        disable_tko_tracking: o.disable_tko_tracking,
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -82,6 +144,12 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("could not resolve listen address: {}", args.listen))?;
 
     let config = Arc::new(parse_file(&args.config)?);
+
+    // the ONE cross-thread object: per-server health shared by every proxy
+    // thread's destinations, atomics only
+    let tko_map = TkoTrackerMap::new();
+    let defaults = destination_defaults(&args.options);
+    let sweep_interval = Duration::from_millis(args.options.reset_inactive_connection_interval_ms);
 
     let (work_txs, work_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
         .map(|_| mpsc::channel::<std::net::TcpStream>(WORK_CHANNEL_CAPACITY))
@@ -128,6 +196,9 @@ fn main() -> anyhow::Result<()> {
             proxies: proxies.clone(),
             thread_mode: ThreadMode::SameThread,
             listener_config,
+            tko_map: Arc::clone(&tko_map),
+            defaults: defaults.clone(),
+            sweep_interval,
         };
 
         let (ready_tx, ready_rx) =

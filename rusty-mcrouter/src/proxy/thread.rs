@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, rc::Rc, sync::mpsc::SyncSender};
 
 use rusty_mcrouter_core::build_route;
-use rusty_mcrouter_net::{ClientFactory, Server};
+use rusty_mcrouter_net::{destination, DestinationFactory, Server};
 use tokio::{runtime::Builder, task::LocalSet};
 
 use crate::proxy::{ConnectionWorker, ListenerConfig, Proxy, ProxyThreadConfig};
@@ -29,6 +29,9 @@ pub fn proxy_thread_main(
             proxies,
             thread_mode,
             listener_config,
+            tko_map,
+            defaults,
+            sweep_interval,
         } = cfg;
 
         // bind the listening socket if this thread owns one.
@@ -66,8 +69,13 @@ pub fn proxy_thread_main(
             .transpose()?;
 
         // each thread builds its own route graph. `Rc<dyn DynRoute>` is
-        // thread-local and never shared across threads.
-        let route = match build_route(&config, &ClientFactory).await {
+        // thread-local and never shared across threads. Backends are lazy:
+        // building over dead servers succeeds, they just start life failing
+        // (and TKO via the shared tracker map).
+        let dest_map = destination::Map::new(tko_map);
+        let _sweep = dest_map.spawn_idle_sweep(sweep_interval);
+        let factory = DestinationFactory::new(Rc::clone(&dest_map));
+        let route = match build_route(&config, &factory, &defaults) {
             Ok(r) => r,
             Err(e) => {
                 let _ = ready_tx.send(Err(anyhow::anyhow!("build_route failed: {e}")));
