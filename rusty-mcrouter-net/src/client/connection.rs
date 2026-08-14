@@ -155,6 +155,9 @@ impl Connection {
                         // Timed-out slots remain only to preserve FIFO alignment;
                         // once every slot is a tombstone, closing is quiescent.
                         if self.inflight.iter().all(|slot| slot.reply_tx.is_none()) {
+                            // Their replies belong to the old stream and must not
+                            // become expectations on the replacement connection.
+                            self.inflight.clear();
                             return PipelineExit::Closed;
                         }
                     }

@@ -67,8 +67,12 @@ impl ConnectionHandle {
             .unwrap_or(Err(SendError::Local(crate::error::LocalError::Shutdown)))
     }
 
-    // fire-and-forget from idle sweep - if the queue is full, it is not idle
-    fn send_close_idle(&self) {
-        let _ = self.tx.send(ConnectionCommand::CloseIdle);
+    /// Fire-and-forget from the idle sweep. try_send, not send: the async
+    /// send would need an await (the previous version dropped its future
+    /// unawaited, sending nothing), and a full queue is proof we're not
+    /// idle anyway.
+    #[allow(dead_code)] // production caller is DestinationMap's idle sweep (next step)
+    pub(crate) fn close_idle(&self) {
+        let _ = self.tx.try_send(ConnectionCommand::CloseIdle);
     }
 }
