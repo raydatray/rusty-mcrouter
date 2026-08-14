@@ -238,4 +238,128 @@ mod tests {
         })
         .await;
     }
+
+    /// Refused is a definitive kernel answer: fail immediately, burn no
+    /// retry budget (mcrouter retries connect TIMEOUTS only,
+    /// AsyncMcClientImpl.cpp:574-577).
+    #[tokio::test]
+    async fn connect_refused_fails_fast_without_retry() {
+        run_local(async {
+            // bind-then-drop: the port is (almost certainly) unbound
+            let addr = {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                listener.local_addr().unwrap()
+            };
+            let cfg = Config {
+                connect_timeout: Some(Duration::from_secs(5)),
+                connect_timeout_retries: 3, // must NOT be consumed by refusal
+                ..Config::default()
+            };
+            let (sink, log) = event_log();
+            let handle = ConnectionHandle::spawn(Arc::from(addr.to_string()), cfg, sink);
+
+            let start = Instant::now();
+            let result = handle.send(get(b"a")).await;
+            assert!(
+                matches!(result, Err(SendError::Connect(ConnectError::Failed(_)))),
+                "got {result:?}"
+            );
+            assert!(
+                start.elapsed() < Duration::from_secs(1),
+                "refused must not wait out connect_timeout or retries"
+            );
+            assert!(log
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, ConnectionEvent::Down(DownReason::ConnectFailed(_)))));
+        })
+        .await;
+    }
+
+    /// Retries apply to connect timeouts ONLY, and each one costs a full
+    /// connect_timeout: total wait = connect_timeout * (retries + 1).
+    /// 192.0.2.0/24 is TEST-NET-1 (RFC 5737): routed and dropped, so the
+    /// connect hangs until the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn connect_timeout_consumes_retries_then_fails() {
+        run_local(async {
+            let cfg = Config {
+                connect_timeout: Some(Duration::from_millis(100)),
+                connect_timeout_retries: 2,
+                ..Config::default()
+            };
+            let (sink, log) = event_log();
+            let handle = ConnectionHandle::spawn(Arc::from("192.0.2.1:12345"), cfg, sink);
+
+            let start = Instant::now();
+            let result = handle.send(get(b"a")).await;
+            assert!(
+                matches!(result, Err(SendError::Connect(ConnectError::Timeout))),
+                "got {result:?}"
+            );
+            assert!(
+                start.elapsed() >= Duration::from_millis(300),
+                "2 retries must cost 3 connect_timeouts, elapsed {:?}",
+                start.elapsed()
+            );
+            assert!(log.borrow().contains(&ConnectionEvent::Down(
+                DownReason::ConnectFailed(ConnectError::Timeout)
+            )));
+        })
+        .await;
+    }
+
+    /// A malformed reply poisons the stream: the request fails with the
+    /// real decode error, Down(Protocol) fires — and unlike the old client,
+    /// the next send gets a fresh connection instead of ClientClosed.
+    #[tokio::test]
+    async fn protocol_error_tears_down_and_reconnects() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![
+                vec![Step::ReadRequests(1), Step::Write(b"WAT\r\n")],
+                vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
+            ])
+            .await;
+            let (handle, log) = spawn_to(&server, Config::default());
+
+            let poisoned = handle.send(get(b"a")).await;
+            assert!(
+                matches!(
+                    poisoned,
+                    Err(SendError::Protocol(crate::error::ProtocolError::Decode(_)))
+                ),
+                "got {poisoned:?}"
+            );
+            wait_for(&log, &ConnectionEvent::Down(DownReason::Protocol)).await;
+
+            assert_eq!(
+                handle.send(get(b"b")).await.unwrap(),
+                Reply::Get(GetReply::Miss)
+            );
+            assert_eq!(server.accept_count(), 2);
+        })
+        .await;
+    }
+
+    /// Dropping every handle closes the channel; the actor exits instead of
+    /// reconnecting. (Indirect observation: no further accepts occur even
+    /// though a second script is available.)
+    #[tokio::test]
+    async fn dropping_handle_stops_actor() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![
+                vec![Step::ReadRequests(1), Step::Write(b"EN\r\n"), Step::Close],
+                vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
+            ])
+            .await;
+            let (handle, _log) = spawn_to(&server, Config::default());
+
+            handle.send(get(b"a")).await.unwrap();
+            drop(handle);
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(server.accept_count(), 1, "dead actor must not reconnect");
+        })
+        .await;
+    }
 }
