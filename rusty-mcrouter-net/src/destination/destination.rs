@@ -77,7 +77,7 @@ impl Destination {
     }
 
     pub fn stats(&self) -> Stats {
-        self.stats.borrow().clone()
+        *self.stats.borrow()
     }
 
     pub(crate) fn close_idle_connection(&self) {
@@ -122,16 +122,14 @@ impl Destination {
         }
 
         if code.is_error() {
-            if code.is_hard_tko_error() {
-                if self.tracker.record_hard_failure(self.token, code) {
-                    self.tracker.emit(TkoEvent::MarkHardTko, code, None);
-                    self.start_probing();
-                }
-            } else if code.is_soft_tko_error() {
-                if self.tracker.record_soft_failure(self.token, code) {
-                    self.tracker.emit(TkoEvent::MarkSoftTko, code, None);
-                    self.start_probing();
-                }
+            if code.is_hard_tko_error() && self.tracker.record_hard_failure(self.token, code) {
+                self.tracker.emit(TkoEvent::MarkHardTko, code, None);
+                self.start_probing();
+            } else if code.is_soft_tko_error()
+                && self.tracker.record_soft_failure(self.token, code)
+            {
+                self.tracker.emit(TkoEvent::MarkSoftTko, code, None);
+                self.start_probing();
             }
             return;
         }

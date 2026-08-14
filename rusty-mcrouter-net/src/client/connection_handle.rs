@@ -71,7 +71,6 @@ impl ConnectionHandle {
     /// send would need an await (the previous version dropped its future
     /// unawaited, sending nothing), and a full queue is proof we're not
     /// idle anyway.
-    #[allow(dead_code)] // production caller is DestinationMap's idle sweep (next step)
     pub(crate) fn close_idle(&self) {
         let _ = self.tx.try_send(ConnectionCommand::CloseIdle);
     }
@@ -79,9 +78,6 @@ impl ConnectionHandle {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
     use bytes::Bytes;
     use rusty_mcrouter_protocol::reply::GetReply;
     use rusty_mcrouter_protocol::test_support::get;
@@ -91,13 +87,13 @@ mod tests {
     use crate::client::types::DownReason;
     use crate::error::{ConnectError, RequestError};
     use crate::test_support::{
-        event_log, run_local, scripted_backend_serial, ScriptedServer, Step,
+        event_log, run_local, scripted_backend_serial, ConnectionEventLog, ScriptedServer, Step,
     };
 
     fn spawn_to(
         server: &ScriptedServer,
         cfg: Config,
-    ) -> (ConnectionHandle, Rc<RefCell<Vec<ConnectionEvent>>>) {
+    ) -> (ConnectionHandle, ConnectionEventLog) {
         let (sink, log) = event_log();
         let handle = ConnectionHandle::spawn(Arc::from(server.addr.to_string()), cfg, sink);
         (handle, log)
@@ -110,7 +106,7 @@ mod tests {
         hit.value.expect("hit with value")
     }
 
-    async fn wait_for(log: &Rc<RefCell<Vec<ConnectionEvent>>>, ev: &ConnectionEvent) {
+    async fn wait_for(log: &ConnectionEventLog, ev: &ConnectionEvent) {
         while !log.borrow().contains(ev) {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }

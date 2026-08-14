@@ -28,13 +28,13 @@ pub async fn run_local<F: Future>(fut: F) -> F::Output {
     tokio::task::LocalSet::new().run_until(fut).await
 }
 
+/// Shared handle to the events a [`ConnectionEvent`] collector has seen.
+pub type ConnectionEventLog = Rc<RefCell<Vec<ConnectionEvent>>>;
+
 /// Collector for [`ConnectionEvent`]s: asserting on the exact sequence is
 /// how tests distinguish a benign close (`[Up, Closed]`) from health
 /// evidence (`[Up, Down(..)]`).
-pub fn event_log() -> (
-    Box<dyn Fn(ConnectionEvent)>,
-    Rc<RefCell<Vec<ConnectionEvent>>>,
-) {
+pub fn event_log() -> (Box<dyn Fn(ConnectionEvent)>, ConnectionEventLog) {
     let log = Rc::new(RefCell::new(Vec::new()));
     let sink = {
         let log = Rc::clone(&log);

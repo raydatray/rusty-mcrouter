@@ -259,7 +259,7 @@ impl TkoTracker {
         map.emit(&TkoEventRecord {
             event,
             server: &self.key,
-            pool: pool.map(|p| &*p.name()),
+            pool: pool.map(|p| p.name()),
             reason,
             consecutive_failures: self.consecutive_failures(),
             global_soft_tkos: self.global.soft_tkos.load(Ordering::Relaxed),
