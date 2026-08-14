@@ -259,13 +259,10 @@ impl Connection {
             {
                 Some(reply) => {
                     let slot = self.inflight.pop_front().expect("front checked above");
-                    match slot.reply_tx {
-                        Some(tx) => {
-                            let _ = tx.send(Ok(reply));
-                        }
-                        // tombstone, late reply. decode and discard to keep
-                        // FIFO aligned
-                        None => {}
+                    // a None reply_tx is a tombstone: the late reply was
+                    // decoded and is discarded here to keep FIFO aligned
+                    if let Some(tx) = slot.reply_tx {
+                        let _ = tx.send(Ok(reply));
                     }
                 }
                 None => return Ok(()), // partial frame - wait
