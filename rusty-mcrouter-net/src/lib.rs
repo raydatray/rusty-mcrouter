@@ -14,7 +14,9 @@ pub mod mock_memcached;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 
-pub use crate::backend::{Backend, BackendFactory};
+pub use crate::backend::{
+    Backend, BackendFactory, BackendFactoryError, DestinationFactory, PoolHealth,
+};
 pub use crate::server::Server;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
