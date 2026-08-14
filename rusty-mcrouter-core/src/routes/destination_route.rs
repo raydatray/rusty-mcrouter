@@ -23,8 +23,8 @@ impl<B: Backend> Route for DestinationRoute<B> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use rusty_mcrouter_net::testing::MockBackend;
-    use rusty_mcrouter_net::{NetError, TimeoutPhase};
+    use rusty_mcrouter_net::error::{ProtocolError, RequestError, SendError};
+    use rusty_mcrouter_net::test_support::MockBackend;
     use rusty_mcrouter_protocol::reply::{ErrorReply, GetHit, GetReply, StoreReply, StoreResult};
     use rusty_mcrouter_protocol::test_support::{get, store};
     use std::sync::Arc;
@@ -54,7 +54,8 @@ mod tests {
 
     #[tokio::test]
     async fn propagates_backend_protocol_error() {
-        let backend = MockBackend::failing(NetError::Desync("bad reply"));
+        let backend =
+            MockBackend::failing(SendError::Protocol(ProtocolError::Desync("bad reply")));
         let route = DestinationRoute::<MockBackend>::new(backend);
 
         let result = route.route(get(b"foo")).await;
@@ -63,17 +64,16 @@ mod tests {
 
     #[tokio::test]
     async fn propagates_backend_timeout_as_route_error() {
-        let backend = MockBackend::failing(NetError::Timeout {
-            phase: TimeoutPhase::Reply,
-        });
+        let backend =
+            MockBackend::failing(SendError::Request(RequestError::Timeout { sent: true }));
         let route = DestinationRoute::<MockBackend>::new(backend);
 
         let result = route.route(get(b"foo")).await;
         assert!(matches!(
             result,
-            Err(RouteError::Backend(NetError::Timeout {
-                phase: TimeoutPhase::Reply
-            }))
+            Err(RouteError::Backend(SendError::Request(
+                RequestError::Timeout { sent: true }
+            )))
         ));
     }
 

@@ -1214,6 +1214,7 @@ dependencies = [
  "rusty-mcrouter-config",
  "rusty-mcrouter-net",
  "rusty-mcrouter-protocol",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
