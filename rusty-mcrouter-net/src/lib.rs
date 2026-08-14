@@ -6,6 +6,7 @@ pub mod classify;
 pub mod client;
 pub mod error;
 mod server;
+mod tko;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod mock_memcached;
