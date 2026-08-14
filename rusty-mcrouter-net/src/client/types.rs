@@ -6,6 +6,7 @@ use tokio::{sync::oneshot, time::Instant};
 use crate::error::{ConnectError, SendError};
 
 /// reported to the owning destination
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConnectionEvent {
     Up,
     Down(DownReason), // hard TKO
