@@ -76,3 +76,166 @@ impl ConnectionHandle {
         let _ = self.tx.try_send(ConnectionCommand::CloseIdle);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use bytes::Bytes;
+    use rusty_mcrouter_protocol::reply::GetReply;
+    use rusty_mcrouter_protocol::test_support::get;
+    use rusty_mcrouter_protocol::Reply;
+
+    use super::*;
+    use crate::client::types::DownReason;
+    use crate::error::{ConnectError, RequestError};
+    use crate::test_support::{
+        event_log, run_local, scripted_backend_serial, ScriptedServer, Step,
+    };
+
+    fn spawn_to(
+        server: &ScriptedServer,
+        cfg: Config,
+    ) -> (ConnectionHandle, Rc<RefCell<Vec<ConnectionEvent>>>) {
+        let (sink, log) = event_log();
+        let handle = ConnectionHandle::spawn(Arc::from(server.addr.to_string()), cfg, sink);
+        (handle, log)
+    }
+
+    fn hit_data(reply: Reply) -> Bytes {
+        let Reply::Get(GetReply::Hit(hit)) = reply else {
+            panic!("expected get hit, got {reply:?}");
+        };
+        hit.value.expect("hit with value")
+    }
+
+    async fn wait_for(log: &Rc<RefCell<Vec<ConnectionEvent>>>, ev: &ConnectionEvent) {
+        while !log.borrow().contains(ev) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_connect_no_io_until_first_send() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(1),
+                Step::Write(b"EN\r\n"),
+            ]])
+            .await;
+            let (handle, _log) = spawn_to(&server, Config::default());
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(server.accept_count(), 0, "spawn must perform no I/O");
+
+            assert_eq!(
+                handle.send(get(b"a")).await.unwrap(),
+                Reply::Get(GetReply::Miss)
+            );
+            assert_eq!(server.accept_count(), 1);
+        })
+        .await;
+    }
+
+    /// THE D1 regression test: an idle remote close is benign — Closed, no
+    /// Down, and the next send silently reconnects. (mcrouter hard-TKOs
+    /// idle EOFs; this divergence is deliberate.)
+    #[tokio::test]
+    async fn idle_eof_is_benign_and_reconnects() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![
+                vec![Step::ReadRequests(1), Step::Write(b"EN\r\n"), Step::Close],
+                vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
+            ])
+            .await;
+            let (handle, log) = spawn_to(&server, Config::default());
+
+            handle.send(get(b"a")).await.unwrap();
+            // wait until the actor OBSERVES the idle EOF; racing into the
+            // next send would exercise the mid-use path instead
+            wait_for(&log, &ConnectionEvent::Closed).await;
+
+            handle.send(get(b"b")).await.unwrap();
+
+            assert_eq!(server.accept_count(), 2);
+            assert!(
+                !log.borrow()
+                    .iter()
+                    .any(|e| matches!(e, ConnectionEvent::Down(_))),
+                "idle close must never produce Down: {:?}",
+                log.borrow(),
+            );
+        })
+        .await;
+    }
+
+    /// The faithful contrast to the test above: a close with a request
+    /// inflight IS health evidence — the caller fails Dropped and Down(Eof)
+    /// fires (mcrouter: REMOTE_ERROR + onDown -> handleTko).
+    #[tokio::test]
+    async fn mid_use_drop_fails_dropped_and_emits_down() {
+        run_local(async {
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
+            let (handle, log) = spawn_to(&server, Config::default());
+
+            let result = handle.send(get(b"a")).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(SendError::Request(RequestError::Dropped { .. }))
+                ),
+                "got {result:?}"
+            );
+            wait_for(&log, &ConnectionEvent::Down(DownReason::Eof)).await;
+        })
+        .await;
+    }
+
+    /// The tombstone triad end to end: expire_deadlines tombstones B,
+    /// next_deadline skips it, deliver_replies consumes B's LATE reply so
+    /// C's caller gets C — and the connection survives the timeout
+    /// (accept_count stays 1).
+    ///
+    /// Real time, not start_paused: paused-time auto-advance races real
+    /// loopback I/O (the old suite documented the same hazard).
+    #[tokio::test]
+    async fn late_reply_to_timed_out_request_keeps_fifo_aligned() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(1),
+                Step::Write(b"VA 1\r\nA\r\n"),
+                Step::ReadRequests(3), // B and C arrive; no reply until C is in
+                Step::Write(b"VA 1\r\nB\r\n"), // B's late reply
+                Step::Write(b"VA 1\r\nC\r\n"),
+            ]])
+            .await;
+            let cfg = Config {
+                reply_timeout: Some(Duration::from_millis(100)),
+                ..Config::default()
+            };
+            let (handle, _log) = spawn_to(&server, cfg);
+
+            assert_eq!(hit_data(handle.send(get(b"k")).await.unwrap()).as_ref(), b"A");
+
+            let b = handle.send(get(b"k")).await;
+            assert!(
+                matches!(
+                    b,
+                    Err(SendError::Request(RequestError::Timeout { sent: true }))
+                ),
+                "got {b:?}"
+            );
+
+            // without the tombstone, C's caller would receive "B" here
+            assert_eq!(hit_data(handle.send(get(b"k")).await.unwrap()).as_ref(), b"C");
+            assert_eq!(
+                server.accept_count(),
+                1,
+                "a reply timeout must not tear down the connection"
+            );
+        })
+        .await;
+    }
+}
