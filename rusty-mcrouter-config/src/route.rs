@@ -65,17 +65,21 @@ pub struct HashConfig {
     pub salt: Option<String>,
 }
 
-/// Failover-eligible conditions and the `failover_errors` config vocabulary (parsed
-/// alias-aware via [`FromStr`]). Covers only what rusty can observe today (transport
-/// errors + a backend `SERVER_ERROR`); mcrouter codes with no rusty analogue
-/// (`busy`/`tko`/`shutdown`) are rejected rather than silently ignored.
+/// Failover-eligible conditions and the `failover_errors` config vocabulary
+/// (parsed alias-aware via [`FromStr`]). Mirrors the router's canonical
+/// ResultCode names one-to-one — config stays net-independent, and core maps
+/// this enum onto ResultCode at route-build time. mcrouter codes with no
+/// rusty analogue (`busy`/`shutdown`) are rejected rather than silently
+/// ignored.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FailoverErrorKind {
     Timeout,
-    Io,
-    Protocol,
-    ClientClosed,
-    ServerError,
+    ConnectTimeout,
+    ConnectError,
+    RemoteError,
+    ConnectionDropped,
+    LocalError,
+    Tko,
 }
 
 impl FromStr for FailoverErrorKind {
@@ -84,10 +88,12 @@ impl FromStr for FailoverErrorKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "timeout" => Ok(FailoverErrorKind::Timeout),
-            "connect_error" | "io_error" => Ok(FailoverErrorKind::Io),
-            "protocol_error" => Ok(FailoverErrorKind::Protocol),
-            "client_closed" => Ok(FailoverErrorKind::ClientClosed),
-            "server_error" | "remote_error" => Ok(FailoverErrorKind::ServerError),
+            "connect_timeout" => Ok(FailoverErrorKind::ConnectTimeout),
+            "connect_error" => Ok(FailoverErrorKind::ConnectError),
+            "remote_error" | "server_error" => Ok(FailoverErrorKind::RemoteError),
+            "connection_dropped" => Ok(FailoverErrorKind::ConnectionDropped),
+            "local_error" => Ok(FailoverErrorKind::LocalError),
+            "tko" => Ok(FailoverErrorKind::Tko),
             other => Err(format!("unknown failover error `{other}`")),
         }
     }
@@ -514,44 +520,33 @@ mod tests {
 
     #[test]
     fn failover_error_kind_parses_canonical_names() {
-        assert_eq!(
-            "timeout".parse::<FailoverErrorKind>(),
-            Ok(FailoverErrorKind::Timeout)
-        );
-        assert_eq!(
-            "protocol_error".parse::<FailoverErrorKind>(),
-            Ok(FailoverErrorKind::Protocol)
-        );
-        assert_eq!(
-            "client_closed".parse::<FailoverErrorKind>(),
-            Ok(FailoverErrorKind::ClientClosed)
-        );
+        let table = [
+            ("timeout", FailoverErrorKind::Timeout),
+            ("connect_timeout", FailoverErrorKind::ConnectTimeout),
+            ("connect_error", FailoverErrorKind::ConnectError),
+            ("remote_error", FailoverErrorKind::RemoteError),
+            ("connection_dropped", FailoverErrorKind::ConnectionDropped),
+            ("local_error", FailoverErrorKind::LocalError),
+            ("tko", FailoverErrorKind::Tko),
+        ];
+        for (name, expected) in table {
+            assert_eq!(name.parse::<FailoverErrorKind>(), Ok(expected), "{name}");
+        }
     }
 
     #[test]
     fn failover_error_kind_accepts_aliases() {
         assert_eq!(
-            "connect_error".parse::<FailoverErrorKind>(),
-            Ok(FailoverErrorKind::Io)
-        );
-        assert_eq!(
-            "io_error".parse::<FailoverErrorKind>(),
-            Ok(FailoverErrorKind::Io)
-        );
-        assert_eq!(
             "server_error".parse::<FailoverErrorKind>(),
-            Ok(FailoverErrorKind::ServerError)
-        );
-        assert_eq!(
-            "remote_error".parse::<FailoverErrorKind>(),
-            Ok(FailoverErrorKind::ServerError)
+            Ok(FailoverErrorKind::RemoteError)
         );
     }
 
     #[test]
     fn failover_error_kind_rejects_unknown_names() {
-        assert!("tko".parse::<FailoverErrorKind>().is_err());
         assert!("busy".parse::<FailoverErrorKind>().is_err());
+        assert!("shutdown".parse::<FailoverErrorKind>().is_err());
+        assert!("io_error".parse::<FailoverErrorKind>().is_err());
         assert!("".parse::<FailoverErrorKind>().is_err());
     }
 
@@ -618,7 +613,7 @@ mod tests {
             failover_errors,
             FailoverErrorsConfig::All(vec![
                 FailoverErrorKind::Timeout,
-                FailoverErrorKind::ServerError
+                FailoverErrorKind::RemoteError
             ])
         );
     }
@@ -647,10 +642,10 @@ mod tests {
     #[test]
     fn failover_errors_unknown_name_is_error() {
         let err = serde_json::from_str::<RouteHandleConfig>(
-            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": ["tko"] }"#,
+            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": ["busy"] }"#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("tko"), "got: {err}");
+        assert!(err.to_string().contains("busy"), "got: {err}");
     }
 
     #[test]

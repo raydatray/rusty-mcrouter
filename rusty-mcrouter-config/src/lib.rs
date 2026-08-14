@@ -6,7 +6,7 @@ mod pool;
 mod route;
 
 pub use crate::document::{ConfigDocument, PrefixedRoute, RouteEntry};
-pub use crate::pool::PoolConfig;
+pub use crate::pool::{PoolConfig, PoolTkoTrackerConfig};
 pub use crate::route::{
     FailoverErrorKind, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc,
     RouteHandleConfig,
