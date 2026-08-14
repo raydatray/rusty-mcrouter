@@ -1,14 +1,16 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::{collections::BTreeMap, rc::Rc, time::Duration};
 
 use rusty_mcrouter_config::{
-    ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, RouteEntry,
-    RouteHandleConfig,
+    ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
+    PoolTkoTrackerConfig, RouteEntry, RouteHandleConfig,
 };
-use rusty_mcrouter_net::{Backend, BackendFactory, NetError};
+use rusty_mcrouter_net::{destination, Backend, BackendFactory, BackendFactoryError, PoolHealth};
 use thiserror::Error;
 
 use crate::{
-    failover::{FailoverErrors, FailoverPolicy, InOrderPolicy, LeastFailuresPolicy},
+    failover::{
+        code_of_kind, FailoverErrors, FailoverPolicy, InOrderPolicy, LeastFailuresPolicy,
+    },
     routes::{DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, Route},
     selectors::{Ch3, Crc32, Salted, Selector, SelectorBuildError},
 };
@@ -24,13 +26,16 @@ pub enum BuildError {
     #[error("FailoverRoute has zero children; refusing to construct an empty failover")]
     EmptyFailover,
 
-    #[error("failed to connect to backend `{server}` of pool `{pool}`: {source}")]
-    ConnectFailed {
+    #[error("invalid server `{server}` in pool `{pool}`: {source}")]
+    InvalidServer {
         pool: String,
         server: String,
         #[source]
-        source: NetError,
+        source: BackendFactoryError,
     },
+
+    #[error("invalid tko_tracker for pool `{pool}`: {reason}")]
+    InvalidPoolTkoTracker { pool: String, reason: &'static str },
 
     #[error("`PoolRoute|...` shorthand requires exactly 1 arg, got {got}")]
     PoolRouteShorthandArity { got: usize },
@@ -52,36 +57,48 @@ pub enum BuildError {
 type Result<T> = std::result::Result<T, BuildError>;
 
 /// Builds the route graph from `config`, constructing backends via `factory`
-/// (production: `&ClientFactory`; tests: `&MockBackendFactory`, no sockets).
-pub async fn build_route<F: BackendFactory>(
+/// (production: `&DestinationFactory`; tests: `&MockBackendFactory`).
+///
+/// SYNC and I/O-free: backends are lazy, so building over a dead server
+/// succeeds — it just starts life failing (and TKOs). `defaults` carries the
+/// router-level destination config; pools override it via `server_timeout` /
+/// `connect_timeout`.
+pub fn build_route<F: BackendFactory>(
     config: &ConfigDocument,
     factory: &F,
+    defaults: &destination::Config,
 ) -> Result<Rc<dyn DynRoute>> {
     let entry = match &config.route {
         RouteEntry::Single(handle) => handle,
         RouteEntry::Prefixed(_) => return Err(BuildError::PrefixRoutingNotImplemented),
     };
 
-    let mut route_builder = RouteBuilder::new(config, factory);
-    route_builder.build_handle(entry).await
+    let mut route_builder = RouteBuilder::new(config, factory, defaults);
+    route_builder.build_handle(entry)
 }
 
 struct RouteBuilder<'a, F: BackendFactory> {
     config: &'a ConfigDocument,
     factory: &'a F,
+    defaults: &'a destination::Config,
     pool_cache: BTreeMap<String, Vec<Rc<DestinationRoute<F::Backend>>>>,
 }
 
 impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
-    fn new(config: &'a ConfigDocument, factory: &'a F) -> Self {
+    fn new(
+        config: &'a ConfigDocument,
+        factory: &'a F,
+        defaults: &'a destination::Config,
+    ) -> Self {
         Self {
             config,
             factory,
+            defaults,
             pool_cache: BTreeMap::new(),
         }
     }
 
-    async fn build_handle(&mut self, handle: &RouteHandleConfig) -> Result<Rc<dyn DynRoute>> {
+    fn build_handle(&mut self, handle: &RouteHandleConfig) -> Result<Rc<dyn DynRoute>> {
         match handle {
             RouteHandleConfig::NullRoute => Ok(NullRoute.into_dyn()),
 
@@ -90,7 +107,7 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
             }
 
             RouteHandleConfig::PoolRoute { pool, hash } => {
-                let destinations = self.get_or_build_destinations(pool).await?;
+                let destinations = self.get_or_build_destinations(pool)?;
                 build_pool_handle(pool, hash, destinations)
             }
 
@@ -101,11 +118,11 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
             } => {
                 let mut built = Vec::with_capacity(children.len());
                 for child in children {
-                    built.push(Box::pin(self.build_handle(child)).await?);
+                    built.push(self.build_handle(child)?);
                 }
                 let errors = build_failover_errors(failover_errors);
-                let policy = build_failover_policy(failover_policy, built.len());
-                FailoverRoute::new(built, errors, policy)
+                let (policy, max_tries) = build_failover_policy(failover_policy, built.len());
+                FailoverRoute::new(built, errors, policy, max_tries)
                     .map(Route::into_dyn)
                     .ok_or(BuildError::EmptyFailover)
             }
@@ -123,7 +140,7 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
                     if args.len() != 1 {
                         return Err(BuildError::PoolRouteShorthandArity { got: args.len() });
                     }
-                    let destinations = self.get_or_build_destinations(&args[0]).await?;
+                    let destinations = self.get_or_build_destinations(&args[0])?;
                     build_pool_handle(&args[0], &HashConfig::default(), destinations)
                 }
                 other => Err(BuildError::RouteTypeNotImplemented {
@@ -137,7 +154,7 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
         }
     }
 
-    async fn get_or_build_destinations(
+    fn get_or_build_destinations(
         &mut self,
         pool_name: &str,
     ) -> Result<Vec<Rc<DestinationRoute<F::Backend>>>> {
@@ -159,15 +176,23 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
             });
         }
 
+        let dest_cfg = pool_destination_config(self.defaults, pool_config);
+        let pool_health = PoolHealth {
+            pool_name,
+            fail_open: pool_config
+                .tko_tracker
+                .as_ref()
+                .map(|cfg| resolve_fail_open(pool_name, cfg, pool_config.servers.len()))
+                .transpose()?,
+        };
+
         let mut destinations = Vec::with_capacity(pool_config.servers.len());
 
         for server in &pool_config.servers {
-            // todo - this is an eager connect and will fail if any backend is down, this should become lazy
             let backend = self
                 .factory
-                .connect(server.as_str())
-                .await
-                .map_err(|source| BuildError::ConnectFailed {
+                .make(server.as_str(), &dest_cfg, &pool_health)
+                .map_err(|source| BuildError::InvalidServer {
                     pool: pool_name.to_string(),
                     server: server.clone(),
                     source,
@@ -180,6 +205,58 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
 
         Ok(destinations)
     }
+}
+
+/// Pool-level overrides on the router defaults.
+///
+/// THE D2 GUARDRAIL (verified mcrouter behavior, McRouteHandleProvider-inl.h
+/// :197-205): a pool `server_timeout` override drags `connect_timeout` down
+/// with it unless `connect_timeout` is explicitly set. Without this,
+/// connect_timeout > reply_timeout lets callers overshoot their deadline
+/// while a connect is pending.
+fn pool_destination_config(
+    defaults: &destination::Config,
+    pool: &PoolConfig,
+) -> destination::Config {
+    let mut cfg = defaults.clone();
+    if let Some(ms) = pool.server_timeout_ms {
+        cfg.reply_timeout = Some(Duration::from_millis(ms));
+        cfg.connect_timeout = Some(Duration::from_millis(ms));
+    }
+    if let Some(ms) = pool.connect_timeout_ms {
+        cfg.connect_timeout = Some(Duration::from_millis(ms));
+    }
+    cfg
+}
+
+/// Resolves the pool tko_tracker block to concrete (enter, exit) thresholds.
+/// num takes precedence over percent; percent resolves as pct * servers / 100
+/// (verified if/else-if, McRouteHandleProvider-inl.h:256-275). Validation
+/// ports both upstream checkLogics (:276-282).
+fn resolve_fail_open(
+    pool_name: &str,
+    cfg: &PoolTkoTrackerConfig,
+    num_servers: usize,
+) -> Result<(u64, u64)> {
+    let resolve = |num: Option<u64>, pct: Option<u64>| {
+        num.or_else(|| pct.map(|p| p * num_servers as u64 / 100))
+            .unwrap_or(0)
+    };
+    let enter = resolve(cfg.num_tko_threshold_upper, cfg.percent_tko_threshold_upper);
+    let exit = resolve(cfg.num_tko_threshold_lower, cfg.percent_tko_threshold_lower);
+    if enter == 0 || exit == 0 {
+        return Err(BuildError::InvalidPoolTkoTracker {
+            pool: pool_name.to_string(),
+            reason: "both tko threshold upper and lower must be configured",
+        });
+    }
+    if exit > enter {
+        return Err(BuildError::InvalidPoolTkoTracker {
+            pool: pool_name.to_string(),
+            reason: "tko upper threshold must be >= lower threshold",
+        });
+    }
+    Ok((enter, exit))
 }
 
 fn build_pool_handle<B: Backend>(
@@ -206,26 +283,38 @@ fn build_selector(hash: &HashConfig, n: usize) -> Result<Box<dyn Selector>> {
 }
 
 fn build_failover_errors(cfg: &FailoverErrorsConfig) -> FailoverErrors {
+    let codes = |kinds: &Vec<rusty_mcrouter_config::FailoverErrorKind>| {
+        kinds.iter().copied().map(code_of_kind).collect::<Vec<_>>()
+    };
     match cfg {
         FailoverErrorsConfig::Default => FailoverErrors::default(),
-        FailoverErrorsConfig::All(kinds) => FailoverErrors::new(
-            Some(kinds.clone()),
-            Some(kinds.clone()),
-            Some(kinds.clone()),
-        ),
+        FailoverErrorsConfig::All(kinds) => {
+            let mapped = codes(kinds);
+            FailoverErrors::new(Some(mapped.clone()), Some(mapped.clone()), Some(mapped))
+        }
         FailoverErrorsConfig::PerOp {
             gets,
             updates,
             deletes,
-        } => FailoverErrors::new(gets.clone(), updates.clone(), deletes.clone()),
+        } => FailoverErrors::new(
+            gets.as_ref().map(codes),
+            updates.as_ref().map(codes),
+            deletes.as_ref().map(codes),
+        ),
     }
 }
 
-fn build_failover_policy(cfg: &FailoverPolicyConfig, n: usize) -> Box<dyn FailoverPolicy> {
+/// Returns the policy plus the route's try budget (attempts INCLUDING the
+/// primary). InOrder has no configured budget: every child may be tried,
+/// matching mcrouter's default of children.size().
+fn build_failover_policy(
+    cfg: &FailoverPolicyConfig,
+    n: usize,
+) -> (Box<dyn FailoverPolicy>, usize) {
     match cfg {
-        FailoverPolicyConfig::InOrder => Box::new(InOrderPolicy),
+        FailoverPolicyConfig::InOrder => (Box::new(InOrderPolicy), n),
         FailoverPolicyConfig::LeastFailures { max_tries } => {
-            Box::new(LeastFailuresPolicy::new(n, *max_tries))
+            (Box::new(LeastFailuresPolicy::new(n)), *max_tries)
         }
     }
 }
@@ -235,13 +324,24 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use rusty_mcrouter_config::parse;
-    use rusty_mcrouter_net::testing::MockBackendFactory;
+    use rusty_mcrouter_net::test_support::MockBackendFactory;
     use rusty_mcrouter_protocol::reply::{ErrorReply, GetReply};
     use rusty_mcrouter_protocol::test_support::get;
     use rusty_mcrouter_protocol::Reply;
 
-    async fn expect_err<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> BuildError {
-        match build_route(cfg, factory).await {
+    fn defaults() -> destination::Config {
+        destination::Config::default()
+    }
+
+    fn build<F: BackendFactory>(
+        cfg: &ConfigDocument,
+        factory: &F,
+    ) -> Result<Rc<dyn DynRoute>> {
+        build_route(cfg, factory, &defaults())
+    }
+
+    fn expect_err<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> BuildError {
+        match build(cfg, factory) {
             Err(e) => e,
             Ok(_) => panic!("expected build_route to fail, but it succeeded"),
         }
@@ -250,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn builds_null_route_from_bare_string() {
         let cfg = parse(r#"{"route": "NullRoute"}"#).unwrap();
-        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = route.route_dyn(get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
@@ -258,7 +358,7 @@ mod tests {
     #[tokio::test]
     async fn builds_null_route_from_object_form() {
         let cfg = parse(r#"{"route": {"type": "NullRoute"}}"#).unwrap();
-        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = route.route_dyn(get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
@@ -266,7 +366,7 @@ mod tests {
     #[tokio::test]
     async fn builds_error_route_from_object_with_message() {
         let cfg = parse(r#"{"route": {"type": "ErrorRoute", "message": "boom"}}"#).unwrap();
-        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = route.route_dyn(get(b"foo")).await.unwrap();
         assert_eq!(
             reply,
@@ -277,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn builds_error_route_from_shorthand_with_message_arg() {
         let cfg = parse(r#"{"route": "ErrorRoute|nope"}"#).unwrap();
-        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = route.route_dyn(get(b"foo")).await.unwrap();
         assert_eq!(
             reply,
@@ -289,7 +389,7 @@ mod tests {
     async fn builds_pool_route_from_shorthand() {
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
         let cfg = parse(json).unwrap();
-        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = route.route_dyn(get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
@@ -298,49 +398,49 @@ mod tests {
     async fn builds_pool_route_from_object_form() {
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": {"type": "PoolRoute", "pool": "P"}}"#;
         let cfg = parse(json).unwrap();
-        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = route.route_dyn(get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
-    #[tokio::test]
-    async fn errors_when_pool_not_found() {
+    #[test]
+    fn errors_when_pool_not_found() {
         let cfg = parse(r#"{"route": "PoolRoute|missing"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new());
         assert!(matches!(err, BuildError::PoolNotFound { ref name } if name == "missing"));
     }
 
-    #[tokio::test]
-    async fn errors_when_pool_has_zero_servers() {
+    #[test]
+    fn errors_when_pool_has_zero_servers() {
         let cfg = parse(r#"{"pools": {"E": {"servers": []}}, "route": "PoolRoute|E"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new());
         assert!(matches!(err, BuildError::EmptyPool { ref name } if name == "E"));
     }
 
-    #[tokio::test]
-    async fn errors_on_unknown_object_route_type() {
+    #[test]
+    fn errors_on_unknown_object_route_type() {
         let cfg = parse(r#"{"route": {"type": "AllSyncRoute", "children": []}}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new());
         assert!(matches!(
             err,
             BuildError::RouteTypeNotImplemented { ref kind } if kind == "AllSyncRoute"
         ));
     }
 
-    #[tokio::test]
-    async fn errors_on_unknown_shorthand_kind() {
+    #[test]
+    fn errors_on_unknown_shorthand_kind() {
         let cfg = parse(r#"{"route": "AllSyncRoute|x"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new());
         assert!(matches!(
             err,
             BuildError::RouteTypeNotImplemented { ref kind } if kind == "AllSyncRoute"
         ));
     }
 
-    #[tokio::test]
-    async fn errors_on_empty_failover_children() {
+    #[test]
+    fn errors_on_empty_failover_children() {
         let cfg = parse(r#"{"route": {"type": "FailoverRoute", "children": []}}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new());
         assert!(matches!(err, BuildError::EmptyFailover));
     }
 
@@ -348,7 +448,7 @@ mod tests {
     async fn builds_failover_route_with_pool_children() {
         let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"]}}"#;
         let cfg = parse(json).unwrap();
-        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = route.route_dyn(get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
@@ -357,7 +457,7 @@ mod tests {
     async fn builds_nested_failover() {
         let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": [{"type": "FailoverRoute", "children": ["PoolRoute|A"]}, "PoolRoute|B"]}}"#;
         let cfg = parse(json).unwrap();
-        let route = build_route(&cfg, &MockBackendFactory::new()).await.unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = route.route_dyn(get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
@@ -369,7 +469,7 @@ mod tests {
         let factory = MockBackendFactory::replying(Reply::Error(ErrorReply::Server(Some(
             Bytes::from_static(b"down"),
         ))));
-        let route = build_route(&cfg, &factory).await.unwrap();
+        let route = build(&cfg, &factory).unwrap();
         let reply = route.route_dyn(get(b"foo")).await.unwrap();
         assert_eq!(
             reply,
@@ -377,58 +477,144 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn errors_on_unresolved_bare_reference() {
+    #[test]
+    fn errors_on_unresolved_bare_reference() {
         let cfg = parse(r#"{"route": "route:made-up"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new());
         assert!(matches!(
             err,
             BuildError::UnresolvedReference { ref name } if name == "route:made-up"
         ));
     }
 
-    #[tokio::test]
-    async fn errors_on_prefixed_routes() {
+    #[test]
+    fn errors_on_prefixed_routes() {
         let json = r#"{"pools": {"A": {"servers": ["x:1"]}}, "routes": [{"aliases": ["/a/"], "route": "PoolRoute|A"}]}"#;
         let cfg = parse(json).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
+        let err = expect_err(&cfg, &MockBackendFactory::new());
         assert!(matches!(err, BuildError::PrefixRoutingNotImplemented));
     }
 
-    #[tokio::test]
-    async fn errors_on_pool_route_shorthand_with_wrong_arity() {
+    #[test]
+    fn errors_on_pool_route_shorthand_with_wrong_arity() {
         let cfg = parse(r#"{"route": "PoolRoute|a|b"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new()).await;
-        assert!(matches!(
-            err,
-            BuildError::PoolRouteShorthandArity { got: 2 }
-        ));
+        let err = expect_err(&cfg, &MockBackendFactory::new());
+        assert!(matches!(err, BuildError::PoolRouteShorthandArity { got: 2 }));
     }
 
-    #[tokio::test]
-    async fn errors_on_connect_failure_with_clear_message() {
+    #[test]
+    fn errors_on_invalid_server_with_clear_message() {
         let cfg =
             parse(r#"{"pools": {"P": {"servers": ["127.0.0.1:1"]}}, "route": "PoolRoute|P"}"#)
                 .unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::failing("127.0.0.1:1")).await;
-        let BuildError::ConnectFailed { pool, server, .. } = &err else {
-            panic!("expected ConnectFailed, got {err:?}");
+        let err = expect_err(&cfg, &MockBackendFactory::failing("127.0.0.1:1"));
+        let BuildError::InvalidServer { pool, server, .. } = &err else {
+            panic!("expected InvalidServer, got {err:?}");
         };
         assert_eq!(pool, "P");
         assert_eq!(server, "127.0.0.1:1");
     }
 
-    #[tokio::test]
-    async fn pool_referenced_twice_shares_destinations() {
+    #[test]
+    fn pool_referenced_twice_shares_destinations() {
         let factory = MockBackendFactory::new();
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
         let cfg = parse(json).unwrap();
-        let mut builder = RouteBuilder::new(&cfg, &factory);
-        let d1 = builder.get_or_build_destinations("P").await.unwrap();
-        let d2 = builder.get_or_build_destinations("P").await.unwrap();
+        let d = defaults();
+        let mut builder = RouteBuilder::new(&cfg, &factory, &d);
+        let d1 = builder.get_or_build_destinations("P").unwrap();
+        let d2 = builder.get_or_build_destinations("P").unwrap();
         assert!(
             Rc::ptr_eq(&d1[0], &d2[0]),
             "destinations should be shared across references"
         );
+    }
+
+    // ── pool config derivation ───────────────────────────────────────────
+
+    fn pool_json(json: &str) -> PoolConfig {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// The D2 guardrail: a pool server_timeout drags connect_timeout down
+    /// with it, so a latency-critical pool can't accidentally wait out a
+    /// router-default connect while its caller's deadline has passed.
+    #[test]
+    fn pool_server_timeout_drags_connect_timeout() {
+        let pool = pool_json(r#"{ "servers": ["a:1"], "server_timeout": 200 }"#);
+        let cfg = pool_destination_config(&defaults(), &pool);
+        assert_eq!(cfg.reply_timeout, Some(Duration::from_millis(200)));
+        assert_eq!(cfg.connect_timeout, Some(Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn explicit_pool_connect_timeout_wins() {
+        let pool = pool_json(
+            r#"{ "servers": ["a:1"], "server_timeout": 200, "connect_timeout": 50 }"#,
+        );
+        let cfg = pool_destination_config(&defaults(), &pool);
+        assert_eq!(cfg.reply_timeout, Some(Duration::from_millis(200)));
+        assert_eq!(cfg.connect_timeout, Some(Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn pool_without_overrides_keeps_router_defaults() {
+        let pool = pool_json(r#"{ "servers": ["a:1"] }"#);
+        let cfg = pool_destination_config(&defaults(), &pool);
+        assert_eq!(cfg.reply_timeout, defaults().reply_timeout);
+        assert_eq!(cfg.connect_timeout, defaults().connect_timeout);
+    }
+
+    // ── fail-open threshold resolution ───────────────────────────────────
+
+    fn tko_cfg(json: &str) -> PoolTkoTrackerConfig {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn resolves_num_thresholds() {
+        let cfg = tko_cfg(r#"{ "num_tko_threshold_upper": 3, "num_tko_threshold_lower": 1 }"#);
+        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), (3, 1));
+    }
+
+    #[test]
+    fn resolves_percent_thresholds_against_pool_size() {
+        let cfg = tko_cfg(
+            r#"{ "percent_tko_threshold_upper": 30, "percent_tko_threshold_lower": 10 }"#,
+        );
+        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), (3, 1));
+    }
+
+    /// Verified upstream precedence: num beats percent when both are set.
+    #[test]
+    fn num_takes_precedence_over_percent() {
+        let cfg = tko_cfg(
+            r#"{ "num_tko_threshold_upper": 5, "percent_tko_threshold_upper": 10,
+                 "num_tko_threshold_lower": 2 }"#,
+        );
+        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), (5, 2));
+    }
+
+    #[test]
+    fn rejects_missing_or_zero_thresholds() {
+        let cfg = tko_cfg(r#"{ "num_tko_threshold_upper": 3 }"#);
+        assert!(matches!(
+            resolve_fail_open("p", &cfg, 10),
+            Err(BuildError::InvalidPoolTkoTracker { .. })
+        ));
+        let cfg = tko_cfg(r#"{}"#);
+        assert!(matches!(
+            resolve_fail_open("p", &cfg, 10),
+            Err(BuildError::InvalidPoolTkoTracker { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_lower_above_upper() {
+        let cfg = tko_cfg(r#"{ "num_tko_threshold_upper": 1, "num_tko_threshold_lower": 3 }"#);
+        assert!(matches!(
+            resolve_fail_open("p", &cfg, 10),
+            Err(BuildError::InvalidPoolTkoTracker { .. })
+        ));
     }
 }

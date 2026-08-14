@@ -13,14 +13,14 @@ pub use pool_route::PoolRoute;
 
 use std::{future::Future, pin::Pin, rc::Rc};
 
-use rusty_mcrouter_net::NetError;
+use rusty_mcrouter_net::error::SendError;
 use rusty_mcrouter_protocol::{Reply, Request};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RouteError {
     #[error("backend error: {0}")]
-    Backend(#[from] NetError),
+    Backend(#[from] SendError),
 
     #[error("selector returned index {idx} but pool has {len} children")]
     SelectorOutOfRange { idx: usize, len: usize },

@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use rusty_mcrouter_protocol::{Reply, Request};
 
-use crate::failover::{FailoverErrors, FailoverPolicy};
+use crate::failover::{route_code, FailoverErrors, FailoverPolicy};
 
 use super::{DynRoute, Result, Route};
 
@@ -10,6 +10,9 @@ pub struct FailoverRoute {
     children: Vec<Rc<dyn DynRoute>>,
     errors: FailoverErrors,
     policy: Box<dyn FailoverPolicy>,
+    /// Total attempts INCLUDING the primary. Lives here (not in the policy)
+    /// so the route can grant free tries for TKO fast-fails.
+    max_tries: usize,
 }
 
 impl FailoverRoute {
@@ -17,6 +20,7 @@ impl FailoverRoute {
         children: Vec<Rc<dyn DynRoute>>,
         errors: FailoverErrors,
         policy: Box<dyn FailoverPolicy>,
+        max_tries: usize,
     ) -> Option<Self> {
         if children.is_empty() {
             return None;
@@ -25,21 +29,37 @@ impl FailoverRoute {
             children,
             errors,
             policy,
+            max_tries: max_tries.max(1),
         })
     }
 }
 
+/// mcrouter FailoverRoute.h:221-230 (verified): "We didn't do any work for
+/// TKO or hard TKO. Don't count it as a try." A fast-failed child costs
+/// nothing, so it must not consume failover budget.
+fn is_free_try(result: &Result<Reply>) -> bool {
+    route_code(result).is_some_and(|c| c.is_tko_or_hard_tko())
+}
+
 impl Route for FailoverRoute {
     async fn route(&self, req: Request) -> Result<Reply> {
+        let mut tries = 0usize;
+
         let primary = self.children[0].route_dyn(req.clone()).await;
         let primary_failed = self.errors.should_failover(&req, &primary);
         self.policy.record_outcome(0, primary_failed);
         if !primary_failed {
             return primary;
         }
+        if !is_free_try(&primary) {
+            tries += 1;
+        }
 
         let mut last = primary;
         for idx in self.policy.failover_order(&req, self.children.len()) {
+            if tries >= self.max_tries {
+                break;
+            }
             let Some(child) = self.children.get(idx) else {
                 continue;
             };
@@ -48,6 +68,9 @@ impl Route for FailoverRoute {
             self.policy.record_outcome(idx, failed);
             if !failed {
                 return reply;
+            }
+            if !is_free_try(&reply) {
+                tries += 1;
             }
             last = reply;
         }
@@ -61,8 +84,9 @@ mod tests {
     use crate::failover::InOrderPolicy;
     use crate::routes::{DestinationRoute, RouteError};
     use bytes::Bytes;
-    use rusty_mcrouter_net::testing::MockBackend;
-    use rusty_mcrouter_net::{NetError, TimeoutPhase};
+    use rusty_mcrouter_net::classify::ResultCode;
+    use rusty_mcrouter_net::error::{ConnectError, LocalError, RequestError, SendError};
+    use rusty_mcrouter_net::test_support::MockBackend;
     use rusty_mcrouter_protocol::reply::{
         ArithmeticReply, ArithmeticResult, ErrorReply, GetReply, StoreReply, StoreResult,
     };
@@ -83,27 +107,38 @@ mod tests {
         DestinationRoute::new(backend).into_dyn()
     }
 
-    fn timeout() -> NetError {
-        NetError::Timeout {
-            phase: TimeoutPhase::Reply,
+    fn timeout() -> SendError {
+        SendError::Request(RequestError::Timeout { sent: true })
+    }
+
+    fn tko() -> SendError {
+        SendError::Tko {
+            reason: ResultCode::Timeout,
         }
     }
 
     fn in_order(children: Vec<Rc<dyn DynRoute>>) -> FailoverRoute {
-        FailoverRoute::new(children, FailoverErrors::default(), Box::new(InOrderPolicy)).unwrap()
+        let max_tries = children.len();
+        FailoverRoute::new(
+            children,
+            FailoverErrors::default(),
+            Box::new(InOrderPolicy),
+            max_tries,
+        )
+        .unwrap()
     }
 
     #[tokio::test]
     async fn transport_errors_fail_over_to_a_healthy_backup() {
         for err in [
-            NetError::Timeout {
-                phase: TimeoutPhase::Reply,
-            },
-            NetError::Timeout {
-                phase: TimeoutPhase::Connect,
-            },
-            NetError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
-            NetError::ClientClosed,
+            timeout(),
+            SendError::Connect(ConnectError::Timeout),
+            SendError::Connect(ConnectError::Failed(std::io::ErrorKind::ConnectionRefused)),
+            SendError::Request(RequestError::Dropped {
+                kind: std::io::ErrorKind::ConnectionReset,
+            }),
+            SendError::Local(LocalError::QueueFull),
+            tko(),
         ] {
             let primary = MockBackend::failing(err);
             let backup = MockBackend::replying(numeric(1));
@@ -165,7 +200,9 @@ mod tests {
         ]);
         assert!(matches!(
             route.route(get(b"k")).await,
-            Err(RouteError::Backend(NetError::Timeout { .. }))
+            Err(RouteError::Backend(SendError::Request(
+                RequestError::Timeout { .. }
+            )))
         ));
     }
 
@@ -179,13 +216,20 @@ mod tests {
         let route = in_order(vec![dest(MockBackend::failing(timeout()))]);
         assert!(matches!(
             route.route(get(b"k")).await,
-            Err(RouteError::Backend(NetError::Timeout { .. }))
+            Err(RouteError::Backend(SendError::Request(
+                RequestError::Timeout { .. }
+            )))
         ));
     }
 
     #[test]
     fn empty_children_is_rejected() {
-        let route = FailoverRoute::new(vec![], FailoverErrors::default(), Box::new(InOrderPolicy));
+        let route = FailoverRoute::new(
+            vec![],
+            FailoverErrors::default(),
+            Box::new(InOrderPolicy),
+            1,
+        );
         assert!(route.is_none());
     }
 
@@ -198,13 +242,74 @@ mod tests {
             vec![dest(primary.clone()), dest(backup.clone())],
             FailoverErrors::new(None, Some(vec![]), None),
             Box::new(InOrderPolicy),
+            2,
         )
         .unwrap();
 
         assert!(matches!(
             route.route(store(b"k", b"v")).await,
-            Err(RouteError::Backend(NetError::Timeout { .. }))
+            Err(RouteError::Backend(SendError::Request(
+                RequestError::Timeout { .. }
+            )))
         ));
         assert!(backup.received().is_empty());
+    }
+
+    /// max_tries counts ATTEMPTS including the primary: with a budget of 1,
+    /// a failing (non-TKO) primary exhausts it and no backup is tried.
+    #[tokio::test]
+    async fn max_tries_budget_stops_the_walk() {
+        let primary = MockBackend::failing(timeout());
+        let backup = MockBackend::replying(numeric(1));
+        let route = FailoverRoute::new(
+            vec![dest(primary.clone()), dest(backup.clone())],
+            FailoverErrors::default(),
+            Box::new(InOrderPolicy),
+            1,
+        )
+        .unwrap();
+
+        assert!(route.route(get(b"k")).await.is_err());
+        assert!(
+            backup.received().is_empty(),
+            "budget of 1 must not reach the backup"
+        );
+    }
+
+    /// The verified mcrouter rule (FailoverRoute.h:221-230): TKO fast-fails
+    /// did no work, so they cost no budget — with max_tries=1, a TKO'd
+    /// primary still lets the walk reach a real backup.
+    #[tokio::test]
+    async fn tko_fast_fail_is_a_free_try() {
+        let primary = MockBackend::failing(tko());
+        let backup = MockBackend::replying(numeric(1));
+        let route = FailoverRoute::new(
+            vec![dest(primary.clone()), dest(backup.clone())],
+            FailoverErrors::default(),
+            Box::new(InOrderPolicy),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(1));
+    }
+
+    /// Hard-TKO-class connect failures are also free (is_tko_or_hard_tko).
+    #[tokio::test]
+    async fn connect_errors_are_free_tries() {
+        let a = MockBackend::failing(SendError::Connect(ConnectError::Failed(
+            std::io::ErrorKind::ConnectionRefused,
+        )));
+        let b = MockBackend::failing(SendError::Connect(ConnectError::Timeout));
+        let c = MockBackend::replying(numeric(3));
+        let route = FailoverRoute::new(
+            vec![dest(a.clone()), dest(b.clone()), dest(c.clone())],
+            FailoverErrors::default(),
+            Box::new(InOrderPolicy),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(3));
     }
 }

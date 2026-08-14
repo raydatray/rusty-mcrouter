@@ -18,15 +18,16 @@ impl FailoverPolicy for InOrderPolicy {
     }
 }
 
+/// Orders backups healthiest-first. The try BUDGET is deliberately not this
+/// policy's job: FailoverRoute owns max_tries so it can grant free tries for
+/// TKO fast-fails (which cost no work and shouldn't consume budget).
 pub struct LeastFailuresPolicy {
-    max_tries: usize,
     failures: RefCell<Vec<u32>>,
 }
 
 impl LeastFailuresPolicy {
-    pub fn new(n: usize, max_tries: usize) -> Self {
+    pub fn new(n: usize) -> Self {
         Self {
-            max_tries: max_tries.max(1),
             failures: RefCell::new(vec![0; n]),
         }
     }
@@ -37,7 +38,6 @@ impl FailoverPolicy for LeastFailuresPolicy {
         let failures = self.failures.borrow();
         let mut backups: Vec<usize> = (1..n).collect();
         backups.sort_by_key(|&i| failures.get(i).copied().unwrap_or(0));
-        backups.truncate(self.max_tries.saturating_sub(1));
         backups
     }
 
@@ -80,25 +80,25 @@ mod tests {
 
     #[test]
     fn least_failures_starts_in_config_order() {
-        let policy = LeastFailuresPolicy::new(4, 4);
+        let policy = LeastFailuresPolicy::new(4);
         assert_eq!(policy.failover_order(&request(), 4), vec![1, 2, 3]);
     }
 
     #[test]
     fn least_failures_never_includes_the_primary() {
-        let policy = LeastFailuresPolicy::new(3, 3);
+        let policy = LeastFailuresPolicy::new(3);
         assert!(!policy.failover_order(&request(), 3).contains(&0));
     }
 
     #[test]
-    fn least_failures_caps_at_max_tries() {
-        let policy = LeastFailuresPolicy::new(5, 2);
-        assert_eq!(policy.failover_order(&request(), 5).len(), 1);
+    fn least_failures_returns_the_full_order_budget_is_the_routes_job() {
+        let policy = LeastFailuresPolicy::new(5);
+        assert_eq!(policy.failover_order(&request(), 5).len(), 4);
     }
 
     #[test]
     fn least_failures_prefers_healthier_backups() {
-        let policy = LeastFailuresPolicy::new(4, 4);
+        let policy = LeastFailuresPolicy::new(4);
         policy.record_outcome(1, true);
         policy.record_outcome(1, true);
         policy.record_outcome(2, true);
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn least_failures_resets_a_backup_on_success() {
-        let policy = LeastFailuresPolicy::new(3, 3);
+        let policy = LeastFailuresPolicy::new(3);
         policy.record_outcome(1, true);
         policy.record_outcome(1, true);
         policy.record_outcome(1, false);

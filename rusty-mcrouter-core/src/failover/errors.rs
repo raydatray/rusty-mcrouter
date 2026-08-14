@@ -1,43 +1,50 @@
 use rusty_mcrouter_config::FailoverErrorKind;
-use rusty_mcrouter_net::NetError;
-use rusty_mcrouter_protocol::reply::ErrorReply;
+use rusty_mcrouter_net::classify::{reply_code, ResultCode};
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::routes::{Result, RouteError};
 
-fn classify(result: &Result<Reply>) -> Option<FailoverErrorKind> {
+/// Projects a route-level result onto the canonical semantic code — the
+/// route layer's ONE surface-spanning match. `None` means an internal bug
+/// (e.g. selector out of range): surface it, never retry it.
+pub(crate) fn route_code(result: &Result<Reply>) -> Option<ResultCode> {
     match result {
-        Err(RouteError::Backend(net)) => match net {
-            NetError::Timeout { .. } => Some(FailoverErrorKind::Timeout),
-            NetError::Io(_) => Some(FailoverErrorKind::Io),
-            NetError::Encode(_) | NetError::Decode(_) | NetError::Desync(_) => {
-                Some(FailoverErrorKind::Protocol)
-            }
-            NetError::ClientClosed => Some(FailoverErrorKind::ClientClosed),
-            NetError::NoAddresses | NetError::WorkerClosed { .. } => None,
-        },
+        Ok(reply) => Some(reply_code(reply)),
+        Err(RouteError::Backend(err)) => Some(err.code()),
         Err(RouteError::SelectorOutOfRange { .. }) => None,
-        Ok(Reply::Error(ErrorReply::Server(_))) => Some(FailoverErrorKind::ServerError),
-        Ok(_) => None,
     }
 }
 
-fn is_failover_error(result: &Result<Reply>) -> bool {
-    classify(result).is_some()
+/// Config vocabulary -> canonical code. The config crate stays
+/// net-independent, so its enum mirrors ResultCode names and the mapping
+/// lives here, at route-build time.
+pub(crate) fn code_of_kind(kind: FailoverErrorKind) -> ResultCode {
+    match kind {
+        FailoverErrorKind::Timeout => ResultCode::Timeout,
+        FailoverErrorKind::ConnectTimeout => ResultCode::ConnectTimeout,
+        FailoverErrorKind::ConnectError => ResultCode::ConnectError,
+        FailoverErrorKind::RemoteError => ResultCode::RemoteError,
+        FailoverErrorKind::ConnectionDropped => ResultCode::ConnectionDropped,
+        FailoverErrorKind::LocalError => ResultCode::LocalError,
+        FailoverErrorKind::Tko => ResultCode::Tko,
+    }
 }
 
+/// Per-op failover eligibility. `None` = the default failover set
+/// (mcrouter McResUtil.h:78, via ResultCode::is_failover_error);
+/// `Some(vec![])` is the idempotency lever that blocks failover entirely.
 #[derive(Debug, Default)]
 pub struct FailoverErrors {
-    gets: Option<Vec<FailoverErrorKind>>,
-    updates: Option<Vec<FailoverErrorKind>>,
-    deletes: Option<Vec<FailoverErrorKind>>,
+    gets: Option<Vec<ResultCode>>,
+    updates: Option<Vec<ResultCode>>,
+    deletes: Option<Vec<ResultCode>>,
 }
 
 impl FailoverErrors {
     pub(crate) fn new(
-        gets: Option<Vec<FailoverErrorKind>>,
-        updates: Option<Vec<FailoverErrorKind>>,
-        deletes: Option<Vec<FailoverErrorKind>>,
+        gets: Option<Vec<ResultCode>>,
+        updates: Option<Vec<ResultCode>>,
+        deletes: Option<Vec<ResultCode>>,
     ) -> Self {
         Self {
             gets,
@@ -47,40 +54,42 @@ impl FailoverErrors {
     }
 
     pub(crate) fn should_failover(&self, req: &Request, result: &Result<Reply>) -> bool {
+        let Some(code) = route_code(result) else {
+            return false;
+        };
         let custom = match req {
             Request::Get(_) => self.gets.as_deref(),
             Request::Store(_) => self.updates.as_deref(),
             Request::Delete(_) => self.deletes.as_deref(),
             // Arithmetic is not idempotent and debug is diagnostic; neither
-            // takes a per-op override, so both use the built-in classifier.
+            // takes a per-op override, so both use the default set.
             Request::Arithmetic(_) | Request::Debug(_) => None,
         };
         match custom {
-            None => is_failover_error(result),
-            Some(kinds) => classify(result).is_some_and(|k| kinds.contains(&k)),
+            None => code.is_failover_error(),
+            Some(codes) => codes.contains(&code),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
-    use rusty_mcrouter_net::TimeoutPhase;
-    use rusty_mcrouter_protocol::meta::MetaReplyDecodeError;
+    use rusty_mcrouter_net::error::{ConnectError, LocalError, RequestError, SendError};
     use rusty_mcrouter_protocol::reply::{
-        ArithmeticReply, ArithmeticResult, DeleteReply, GetReply, StoreReply, StoreResult,
+        ArithmeticReply, ArithmeticResult, DeleteReply, ErrorReply, GetReply, StoreReply,
+        StoreResult,
     };
     use rusty_mcrouter_protocol::test_support::{delete, get, store};
 
-    fn backend(err: NetError) -> Result<Reply> {
+    use super::*;
+
+    fn backend(err: SendError) -> Result<Reply> {
         Err(RouteError::Backend(err))
     }
 
     fn timeout() -> Result<Reply> {
-        backend(NetError::Timeout {
-            phase: TimeoutPhase::Reply,
-        })
+        backend(SendError::Request(RequestError::Timeout { sent: true }))
     }
 
     fn server_error() -> Result<Reply> {
@@ -94,24 +103,28 @@ mod tests {
     }
 
     #[test]
-    fn both_surfaces_are_failover_errors() {
+    fn both_surfaces_are_failover_errors_by_default() {
         let cases = [
-            backend(NetError::Timeout {
-                phase: TimeoutPhase::Reply,
-            }),
-            backend(NetError::Timeout {
-                phase: TimeoutPhase::Connect,
-            }),
-            backend(NetError::Io(std::io::Error::from(
-                std::io::ErrorKind::BrokenPipe,
+            timeout(),
+            backend(SendError::Connect(ConnectError::Timeout)),
+            backend(SendError::Connect(ConnectError::Failed(
+                std::io::ErrorKind::ConnectionRefused,
             ))),
-            backend(NetError::Decode(MetaReplyDecodeError::UnexpectedEof)),
-            backend(NetError::Desync("bad")),
-            backend(NetError::ClientClosed),
+            backend(SendError::Request(RequestError::Dropped {
+                kind: std::io::ErrorKind::ConnectionReset,
+            })),
+            backend(SendError::Local(LocalError::QueueFull)),
+            backend(SendError::Tko {
+                reason: ResultCode::Timeout,
+            }),
             server_error(),
         ];
+        let errors = FailoverErrors::default();
         for case in &cases {
-            assert!(is_failover_error(case), "expected failover for {case:?}");
+            assert!(
+                errors.should_failover(&get(b"k"), case),
+                "expected failover for {case:?}"
+            );
         }
     }
 
@@ -127,34 +140,54 @@ mod tests {
                     ..ArithmeticResult::default()
                 },
             ))),
+            // our-fault replies would fail identically on every box
             Ok(Reply::Error(ErrorReply::Error)),
             Ok(Reply::Error(ErrorReply::Client(Some(Bytes::from_static(
                 b"bad",
             ))))),
             Err(RouteError::SelectorOutOfRange { idx: 3, len: 2 }),
-            backend(NetError::NoAddresses),
-            backend(NetError::WorkerClosed { worker: 0 }),
         ];
+        let errors = FailoverErrors::default();
         for case in &cases {
             assert!(
-                !is_failover_error(case),
+                !errors.should_failover(&get(b"k"), case),
                 "expected no failover for {case:?}"
             );
         }
     }
 
     #[test]
-    fn classify_maps_each_surface_to_its_kind() {
-        assert_eq!(classify(&timeout()), Some(FailoverErrorKind::Timeout));
+    fn route_code_projects_both_surfaces() {
+        assert_eq!(route_code(&timeout()), Some(ResultCode::Timeout));
+        assert_eq!(route_code(&server_error()), Some(ResultCode::RemoteError));
+        assert_eq!(route_code(&miss()), Some(ResultCode::Success));
         assert_eq!(
-            classify(&server_error()),
-            Some(FailoverErrorKind::ServerError)
+            route_code(&Err(RouteError::SelectorOutOfRange { idx: 1, len: 1 })),
+            None
         );
-        assert_eq!(classify(&miss()), None);
     }
 
     #[test]
-    fn default_uses_the_built_in_classifier_for_every_op() {
+    fn config_kinds_map_one_to_one() {
+        let table = [
+            (FailoverErrorKind::Timeout, ResultCode::Timeout),
+            (FailoverErrorKind::ConnectTimeout, ResultCode::ConnectTimeout),
+            (FailoverErrorKind::ConnectError, ResultCode::ConnectError),
+            (FailoverErrorKind::RemoteError, ResultCode::RemoteError),
+            (
+                FailoverErrorKind::ConnectionDropped,
+                ResultCode::ConnectionDropped,
+            ),
+            (FailoverErrorKind::LocalError, ResultCode::LocalError),
+            (FailoverErrorKind::Tko, ResultCode::Tko),
+        ];
+        for (kind, code) in table {
+            assert_eq!(code_of_kind(kind), code);
+        }
+    }
+
+    #[test]
+    fn default_uses_the_failover_set_for_every_op() {
         let errors = FailoverErrors::default();
         assert!(errors.should_failover(&get(b"k"), &timeout()));
         assert!(errors.should_failover(&store(b"k", b"v"), &timeout()));
@@ -176,8 +209,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_list_matches_only_named_kinds() {
-        let errors = FailoverErrors::new(Some(vec![FailoverErrorKind::ServerError]), None, None);
+    fn explicit_list_matches_only_named_codes() {
+        let errors = FailoverErrors::new(Some(vec![ResultCode::RemoteError]), None, None);
         assert!(errors.should_failover(&get(b"k"), &server_error()));
         assert!(!errors.should_failover(&get(b"k"), &timeout()));
     }
