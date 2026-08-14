@@ -349,3 +349,142 @@ impl Connection {
 fn far_future() -> Instant {
     Instant::now() + std::time::Duration::from_secs(86_400)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use rusty_mcrouter_protocol::meta::MetaReplyExpectation;
+    use rusty_mcrouter_protocol::Reply;
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::client::config::Config;
+
+    type ReplyRx = oneshot::Receiver<Result<Reply, SendError>>;
+
+    fn connection() -> Connection {
+        let (_tx, rx) = mpsc::channel(1);
+        Connection::new(
+            Arc::from("127.0.0.1:0"),
+            Config::default(),
+            rx,
+            Box::new(|_| {}),
+        )
+    }
+
+    fn live_slot(deadline: Option<Instant>) -> (Inflight, ReplyRx) {
+        let (tx, rx) = oneshot::channel();
+        let slot = Inflight {
+            expectation: MetaReplyExpectation::Delete,
+            reply_tx: Some(tx),
+            deadline,
+        };
+        (slot, rx)
+    }
+
+    fn tombstone(deadline: Option<Instant>) -> Inflight {
+        Inflight {
+            expectation: MetaReplyExpectation::Delete,
+            reply_tx: None,
+            deadline,
+        }
+    }
+
+    fn pending_cmd(deadline: Option<Instant>) -> (Command, ReplyRx) {
+        let (tx, rx) = oneshot::channel();
+        let cmd = Command {
+            payload: Payload::VersionProbe,
+            reply_tx: tx,
+            deadline,
+        };
+        (cmd, rx)
+    }
+
+    /// The regression test for `min` over `Option<Instant>`: `None < Some`
+    /// under Option's Ord, so a naive min(pending, inflight) returns None
+    /// whenever pending is empty — the STEADY STATE — silently disarming
+    /// the reply-timeout timer.
+    #[tokio::test]
+    async fn next_deadline_takes_min_and_survives_missing_sides() {
+        let mut c = connection();
+        let t1 = Instant::now() + Duration::from_millis(100);
+        let t2 = Instant::now() + Duration::from_millis(200);
+
+        assert_eq!(c.next_deadline(), None);
+
+        // inflight only — the (None, Some) case
+        let (slot, _rx) = live_slot(Some(t2));
+        c.inflight.push_back(slot);
+        assert_eq!(c.next_deadline(), Some(t2));
+
+        // pending earlier than inflight — real min
+        let (cmd, _rx2) = pending_cmd(Some(t1));
+        c.pending.push_back(cmd);
+        assert_eq!(c.next_deadline(), Some(t1));
+    }
+
+    /// Tombstones' deadlines are spent; only the first LIVE slot arms the
+    /// timer, and an all-tombstone queue arms nothing.
+    #[tokio::test]
+    async fn next_deadline_skips_tombstones() {
+        let mut c = connection();
+        let t_tomb = Instant::now() + Duration::from_millis(10);
+        let t_live = Instant::now() + Duration::from_millis(200);
+
+        c.inflight.push_back(tombstone(Some(t_tomb)));
+        let (slot, _rx) = live_slot(Some(t_live));
+        c.inflight.push_back(slot);
+        assert_eq!(c.next_deadline(), Some(t_live));
+
+        c.inflight.pop_back();
+        assert_eq!(c.next_deadline(), None);
+    }
+
+    /// The two queues get opposite treatments, keyed by the idempotency
+    /// signal: pending was never written (remove entirely, sent: false);
+    /// inflight is owed a reply by the server (tombstone the slot so the
+    /// late reply is decoded and discarded, sent: true).
+    #[tokio::test(start_paused = true)]
+    async fn expire_pops_pending_but_tombstones_inflight() {
+        let mut c = connection();
+        let past = Instant::now();
+        let future = Instant::now() + Duration::from_secs(60);
+
+        let (cmd_expired, mut rx_pending) = pending_cmd(Some(past));
+        let (cmd_live, _rx_keep) = pending_cmd(Some(future));
+        c.pending.push_back(cmd_expired);
+        c.pending.push_back(cmd_live);
+
+        let (slot_expired, mut rx_inflight) = live_slot(Some(past));
+        let (slot_live, _rx_live) = live_slot(Some(future));
+        c.inflight.push_back(slot_expired);
+        c.inflight.push_back(slot_live);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        c.expire_deadlines();
+
+        // pending: expired front REMOVED, never-sent signal
+        assert_eq!(c.pending.len(), 1);
+        assert!(matches!(
+            rx_pending.try_recv().unwrap(),
+            Err(SendError::Request(RequestError::Timeout { sent: false }))
+        ));
+
+        // inflight: slot KEPT for FIFO alignment, caller failed as sent
+        assert_eq!(c.inflight.len(), 2);
+        assert!(c.inflight[0].reply_tx.is_none(), "expired slot must become a tombstone");
+        assert!(c.inflight[1].reply_tx.is_some(), "unexpired slot must stay live");
+        assert!(matches!(
+            rx_inflight.try_recv().unwrap(),
+            Err(SendError::Request(RequestError::Timeout { sent: true }))
+        ));
+
+        // deadlines without a timeout configured never expire
+        let (cmd_no_deadline, mut rx_nd) = pending_cmd(None);
+        c.pending.push_front(cmd_no_deadline);
+        c.expire_deadlines();
+        assert_eq!(c.pending.len(), 2);
+        assert!(rx_nd.try_recv().is_err(), "no-deadline command must not be failed");
+    }
+}
