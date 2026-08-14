@@ -215,7 +215,7 @@ fn failover_custom_errors_parses_per_op_lists() {
     assert_eq!(
         *failover_errors,
         FailoverErrorsConfig::PerOp {
-            gets: Some(vec![FailoverErrorKind::ServerError]),
+            gets: Some(vec![FailoverErrorKind::RemoteError]),
             updates: Some(vec![]),
             deletes: None,
         }
