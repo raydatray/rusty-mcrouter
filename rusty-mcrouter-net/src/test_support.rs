@@ -17,8 +17,9 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::backend::{Backend, BackendFactory, BackendFactoryError, PoolHealth};
 use crate::client::ConnectionEvent;
-use crate::{Backend, BackendFactory, NetError, Result};
+use crate::error::SendError;
 
 /// Runs a future inside a fresh `LocalSet`. The client actor is spawned via
 /// `spawn_local`, which panics in a bare `#[tokio::test]`; every actor test
@@ -42,9 +43,10 @@ pub fn event_log() -> (
     (sink, log)
 }
 
-/// Recording in-process `Backend` double: records every request, answers with a
-/// scripted `Reply` (or `NetError` for the failure path). `Clone` shares one
-/// recorder via `Arc`; `Send + Sync` so route tests can spawn it.
+/// Recording in-process `Backend` double: records every request, answers with
+/// a scripted `Reply` (or `SendError` for the failure path — drives failover
+/// and route-behavior tests). `Clone` shares one recorder via `Arc`;
+/// `Send + Sync` so route tests can spawn it.
 #[derive(Clone)]
 pub struct MockBackend {
     inner: Arc<MockState>,
@@ -57,7 +59,7 @@ struct MockState {
 
 enum MockResponse {
     Reply(Reply),
-    Error(NetError),
+    Error(SendError),
 }
 
 impl MockBackend {
@@ -70,7 +72,7 @@ impl MockBackend {
         }
     }
 
-    pub fn failing(err: NetError) -> Self {
+    pub fn failing(err: SendError) -> Self {
         Self {
             inner: Arc::new(MockState {
                 response: MockResponse::Error(err),
@@ -89,7 +91,7 @@ impl MockBackend {
 }
 
 impl Backend for MockBackend {
-    async fn send(&self, req: Request) -> Result<Reply> {
+    async fn send(&self, req: Request) -> Result<Reply, SendError> {
         self.inner.received.lock().unwrap().push(req);
         match &self.inner.response {
             MockResponse::Reply(reply) => Ok(reply.clone()),
@@ -98,13 +100,19 @@ impl Backend for MockBackend {
     }
 }
 
-/// A [`BackendFactory`] handing out [`MockBackend`]s without opening sockets;
-/// `failing(addr)` drives the builder's `ConnectFailed` path deterministically.
+/// A [`BackendFactory`] handing out [`MockBackend`]s without opening sockets.
+///
+/// Two DIFFERENT failure knobs for two different layers:
+/// - `failing(addr)`: `make()` errors for that address — drives the route
+///   BUILDER's invalid-server path
+/// - `MockBackend::failing(SendError)`: `send()` errors — drives
+///   failover/route BEHAVIOR tests (in the lazy world, a dead server still
+///   builds successfully)
 #[derive(Clone, Default)]
 pub struct MockBackendFactory {
     reply: Option<Reply>,
     fail_addr: Option<String>,
-    connected: Arc<Mutex<Vec<String>>>,
+    made: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockBackendFactory {
@@ -126,19 +134,27 @@ impl MockBackendFactory {
         }
     }
 
-    pub fn connected(&self) -> Vec<String> {
-        self.connected.lock().unwrap().clone()
+    /// Every address a backend was made for, in order.
+    pub fn made(&self) -> Vec<String> {
+        self.made.lock().unwrap().clone()
     }
 }
 
 impl BackendFactory for MockBackendFactory {
     type Backend = MockBackend;
 
-    async fn connect(&self, addr: &str) -> Result<MockBackend> {
-        if self.fail_addr.as_deref() == Some(addr) {
-            return Err(NetError::ClientClosed);
+    fn make(
+        &self,
+        server: &str,
+        _cfg: &crate::destination::Config,
+        _pool: &PoolHealth<'_>,
+    ) -> Result<MockBackend, BackendFactoryError> {
+        if self.fail_addr.as_deref() == Some(server) {
+            return Err(BackendFactoryError::InvalidAddress {
+                addr: server.to_string(),
+            });
         }
-        self.connected.lock().unwrap().push(addr.to_string());
+        self.made.lock().unwrap().push(server.to_string());
         Ok(MockBackend::replying(
             self.reply.clone().unwrap_or(Reply::Get(GetReply::Miss)),
         ))
