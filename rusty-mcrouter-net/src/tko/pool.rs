@@ -15,6 +15,19 @@ pub struct FailOpenThresholds {
     pub exit: u64,
 }
 
+/// Outcome of asking the gate for a TKO slot. An enum rather than the old
+/// (bool, bool): `Admitted` with `just_entered` was representable nonsense,
+/// and two adjacent bools at a call site say nothing about which is which.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GateDecision {
+    /// Slot reserved: the counter was incremented, the caller may mark.
+    Admitted,
+    /// Fail-open refused the mark; nothing was counted. `just_entered` is
+    /// true only for the call that crossed `enter`, so EnterFailOpen can be
+    /// emitted exactly once.
+    Refused { just_entered: bool },
+}
+
 pub struct PoolTkoTracker {
     name: Arc<str>,
     thresholds: FailOpenThresholds,
@@ -36,17 +49,19 @@ impl PoolTkoTracker {
         }
     }
 
-    // reserve a TKO slot. returns currently_fail_open, just_entered
-    pub fn inc_num_destinations_tko(&self) -> (bool, bool) {
+    // reserve a TKO slot
+    pub fn inc_num_destinations_tko(&self) -> GateDecision {
         if self.fail_open.load(Ordering::Acquire) {
-            return (true, false);
+            return GateDecision::Refused {
+                just_entered: false,
+            };
         }
 
         let mut cur = self.num_destinations_tko.load(Ordering::Relaxed);
         loop {
             if cur == self.thresholds.enter {
                 self.fail_open.store(true, Ordering::Release);
-                return (true, true);
+                return GateDecision::Refused { just_entered: true };
             }
             match self.num_destinations_tko.compare_exchange_weak(
                 cur,
@@ -54,7 +69,7 @@ impl PoolTkoTracker {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return (false, false),
+                Ok(_) => return GateDecision::Admitted,
                 Err(actual) => cur = actual,
             }
         }
@@ -102,9 +117,9 @@ mod tests {
     #[test]
     fn enter_flip_consumes_the_increment() {
         let g = gate(2, 1);
-        assert_eq!(g.inc_num_destinations_tko(), (false, false));
-        assert_eq!(g.inc_num_destinations_tko(), (false, false));
-        assert_eq!(g.inc_num_destinations_tko(), (true, true)); // crossing call
+        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Admitted);
+        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Admitted);
+        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Refused { just_entered: true }); // crossing call
         assert_eq!(count(&g), 2, "counter must never exceed enter");
         assert!(g.fail_open.load(Ordering::SeqCst));
     }
@@ -114,9 +129,9 @@ mod tests {
     #[test]
     fn inc_while_fail_open_returns_without_incrementing() {
         let g = gate(1, 1);
-        assert_eq!(g.inc_num_destinations_tko(), (false, false));
-        assert_eq!(g.inc_num_destinations_tko(), (true, true));
-        assert_eq!(g.inc_num_destinations_tko(), (true, false));
+        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Admitted);
+        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Refused { just_entered: true });
+        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Refused { just_entered: false });
         assert_eq!(count(&g), 1);
     }
 
@@ -142,10 +157,10 @@ mod tests {
         let g = gate(2, 1);
         g.inc_num_destinations_tko();
         g.inc_num_destinations_tko();
-        assert_eq!(g.inc_num_destinations_tko(), (true, true)); // refused, now open
+        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Refused { just_entered: true }); // refused, now open
         g.dec_num_destinations_tko(); // 2 -> 1
         assert!(g.dec_num_destinations_tko()); // exit flip
-        assert_eq!(g.inc_num_destinations_tko(), (false, false)); // admitted again
+        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Admitted); // admitted again
     }
 
     /// The exit-flip branch requires fail_open: a normal release when the

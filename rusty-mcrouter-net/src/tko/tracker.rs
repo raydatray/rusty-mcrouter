@@ -9,7 +9,7 @@ use crate::{
         counters::TkoCounters,
         events::{TkoEvent, TkoEventRecord},
         map::TkoTrackerMap,
-        pool::PoolTkoTracker,
+        pool::{GateDecision, PoolTkoTracker},
     },
 };
 
@@ -90,8 +90,7 @@ impl TkoTracker {
 
     fn increment_tko_count(&self, kind: TkoKind) -> bool {
         if let Some(pool) = self.pool() {
-            let (fail_open, just_entered) = pool.inc_num_destinations_tko();
-            if fail_open {
+            if let GateDecision::Refused { just_entered } = pool.inc_num_destinations_tko() {
                 if just_entered {
                     self.emit(TkoEvent::EnterFailOpen, self.reason(), Some(&pool));
                 }
