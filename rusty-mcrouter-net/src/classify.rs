@@ -108,7 +108,6 @@ impl ResultCode {
 
     /// Inverse of `as u8`; the TkoTracker stores the marking reason in an
     /// AtomicU8 and round-trips it through here.
-    #[allow(dead_code)] // consumed by tko::tracker once it lands
     pub(crate) fn from_u8(v: u8) -> ResultCode {
         match v {
             1 => ResultCode::BadRequest,
@@ -160,14 +159,23 @@ mod tests {
                 SendError::Local(LocalError::Encode(MetaRequestEncodeError::EmptyBackendKey)),
                 ResultCode::LocalError,
             ),
-            (SendError::Local(LocalError::QueueFull), ResultCode::LocalError),
-            (SendError::Local(LocalError::Shutdown), ResultCode::LocalError),
+            (
+                SendError::Local(LocalError::QueueFull),
+                ResultCode::LocalError,
+            ),
+            (
+                SendError::Local(LocalError::Shutdown),
+                ResultCode::LocalError,
+            ),
             // connect phase: hard TKO evidence
             (
                 SendError::Connect(ConnectError::Failed(io::ErrorKind::ConnectionRefused)),
                 ResultCode::ConnectError,
             ),
-            (SendError::Connect(ConnectError::Timeout), ResultCode::ConnectTimeout),
+            (
+                SendError::Connect(ConnectError::Timeout),
+                ResultCode::ConnectTimeout,
+            ),
             // request phase: connection was up
             (
                 SendError::Request(RequestError::Timeout { sent: false }),
@@ -195,7 +203,9 @@ mod tests {
             ),
             // synthetic fast-fail
             (
-                SendError::Tko { reason: ResultCode::Timeout },
+                SendError::Tko {
+                    reason: ResultCode::Timeout,
+                },
                 ResultCode::Tko,
             ),
         ];
@@ -207,17 +217,26 @@ mod tests {
     #[test]
     fn reply_classification_table() {
         let table: &[(Reply, ResultCode)] = &[
-            (Reply::Error(ErrorReply::Server(None)), ResultCode::RemoteError),
+            (
+                Reply::Error(ErrorReply::Server(None)),
+                ResultCode::RemoteError,
+            ),
             (
                 Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"oom")))),
                 ResultCode::RemoteError,
             ),
-            (Reply::Error(ErrorReply::Client(None)), ResultCode::BadRequest),
+            (
+                Reply::Error(ErrorReply::Client(None)),
+                ResultCode::BadRequest,
+            ),
             (Reply::Error(ErrorReply::Error), ResultCode::BadRequest),
             // authoritative answers are success - including NotFound
             (Reply::Delete(DeleteReply::Success), ResultCode::Success),
             (Reply::Delete(DeleteReply::NotFound), ResultCode::Success),
-            (Reply::Version(Bytes::from_static(b"1.6.39")), ResultCode::Success),
+            (
+                Reply::Version(Bytes::from_static(b"1.6.39")),
+                ResultCode::Success,
+            ),
         ];
         for (reply, expected) in table {
             assert_eq!(reply_code(reply), *expected, "for {reply:?}");
@@ -249,7 +268,11 @@ mod tests {
     fn tko_and_failover_predicate_sets() {
         for code in ALL {
             // soft == { Timeout } (McResUtil.h:96)
-            assert_eq!(code.is_soft_tko_error(), code == ResultCode::Timeout, "for {code:?}");
+            assert_eq!(
+                code.is_soft_tko_error(),
+                code == ResultCode::Timeout,
+                "for {code:?}"
+            );
             // hard == { ConnectError, ConnectTimeout } (McResUtil.h:107)
             assert_eq!(
                 code.is_hard_tko_error(),
@@ -257,7 +280,10 @@ mod tests {
                 "for {code:?}"
             );
             // a code is never both soft and hard
-            assert!(!(code.is_soft_tko_error() && code.is_hard_tko_error()), "for {code:?}");
+            assert!(
+                !(code.is_soft_tko_error() && code.is_hard_tko_error()),
+                "for {code:?}"
+            );
             // free failover tries == hard TKO + synthetic Tko (McResUtil.h:136)
             assert_eq!(
                 code.is_tko_or_hard_tko(),
@@ -288,7 +314,11 @@ mod tests {
             ("tko", ResultCode::Tko),
         ];
         for (name, expected) in table {
-            assert_eq!(ResultCode::from_config_name(name), Some(*expected), "for {name:?}");
+            assert_eq!(
+                ResultCode::from_config_name(name),
+                Some(*expected),
+                "for {name:?}"
+            );
         }
         for bad in ["", "Timeout", "success", "bad_request", "busy", "shutdown"] {
             assert_eq!(ResultCode::from_config_name(bad), None, "for {bad:?}");
