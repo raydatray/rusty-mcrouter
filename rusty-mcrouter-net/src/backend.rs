@@ -6,6 +6,7 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use thiserror::Error;
 
 use crate::destination::{self, Destination, Key, Map};
+use crate::tko::FailOpenThresholds;
 use crate::error::SendError;
 
 /// A backend that sends a request and awaits a reply.
@@ -29,10 +30,10 @@ impl Backend for Rc<Destination> {
 /// Pool identity the factory needs to resolve the fail-open gate.
 pub struct PoolHealth<'a> {
     pub pool_name: &'a str,
-    /// Resolved (enter, exit) fail-open thresholds, if the pool configured a
-    /// tko_tracker block. None = no gate (the default). Threshold resolution
-    /// (num vs percent) is the route builder's job.
-    pub fail_open: Option<(u64, u64)>,
+    /// Resolved fail-open thresholds, if the pool configured a tko_tracker
+    /// block. None = no gate (the default). Threshold resolution (num vs
+    /// percent) is the route builder's job.
+    pub fail_open: Option<FailOpenThresholds>,
 }
 
 impl PoolHealth<'_> {
@@ -98,11 +99,9 @@ impl BackendFactory for DestinationFactory {
             });
         }
 
-        let gate = pool.fail_open.map(|(enter, exit)| {
-            self.map
-                .tko_map()
-                .pool_tracker_for(pool.pool_name, enter, exit)
-        });
+        let gate = pool
+            .fail_open
+            .map(|thresholds| self.map.tko_map().pool_tracker_for(pool.pool_name, thresholds));
         let key = Key {
             addr: Arc::from(server),
             reply_timeout: cfg.reply_timeout,
@@ -176,7 +175,7 @@ mod tests {
             let cfg = destination::Config::default();
             let pool = PoolHealth {
                 pool_name: "gated",
-                fail_open: Some((1, 1)),
+                fail_open: Some(FailOpenThresholds { enter: 1, exit: 1 }),
             };
 
             let a = factory.make("127.0.0.1:9", &cfg, &pool).unwrap();

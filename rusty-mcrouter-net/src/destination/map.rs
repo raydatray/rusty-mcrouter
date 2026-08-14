@@ -104,7 +104,7 @@ mod tests {
     use crate::classify::ResultCode;
     use crate::error::{RequestError, SendError};
     use crate::test_support::{run_local, scripted_backend_serial, Step};
-    use crate::tko::DestToken;
+    use crate::tko::{DestToken, FailOpenThresholds};
 
     fn tko_map() -> Arc<TkoTrackerMap> {
         TkoTrackerMap::with_sink(Box::new(|_| {}))
@@ -166,7 +166,7 @@ mod tests {
         run_local(async {
             let tko = tko_map();
             let map = Map::new(Arc::clone(&tko));
-            let gate = tko.pool_tracker_for("pool", 1, 1);
+            let gate = tko.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
 
             let a1 = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             let a2 = map.destination(
