@@ -6,7 +6,7 @@ use std::{
 use crate::tko::{
     counters::TkoCounters,
     events::{default_sink, TkoEventRecord, TkoEventSink},
-    pool::PoolTkoTracker,
+    pool::{FailOpenThresholds, PoolTkoTracker},
     tracker::TkoTracker,
 };
 
@@ -58,8 +58,7 @@ impl TkoTrackerMap {
     pub fn pool_tracker_for(
         self: &Arc<Self>,
         pool_name: &str,
-        enter: u64,
-        exit: u64,
+        thresholds: FailOpenThresholds,
     ) -> Arc<PoolTkoTracker> {
         let mut pools = self.pool_trackers.lock().unwrap();
         if let Some(existing) = pools.get(pool_name).and_then(Weak::upgrade) {
@@ -67,7 +66,7 @@ impl TkoTrackerMap {
         }
 
         let name: Arc<str> = Arc::from(pool_name);
-        let tracker = Arc::new(PoolTkoTracker::new(Arc::clone(&name), enter, exit));
+        let tracker = Arc::new(PoolTkoTracker::new(Arc::clone(&name), thresholds));
 
         pools.insert(name, Arc::downgrade(&tracker));
 
@@ -144,10 +143,10 @@ mod tests {
     #[test]
     fn pool_tracker_for_dedups_by_name() {
         let map = TkoTrackerMap::with_sink(null_sink());
-        let a = map.pool_tracker_for("pool", 3, 1);
-        let b = map.pool_tracker_for("pool", 3, 1);
+        let a = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
+        let b = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
         assert!(Arc::ptr_eq(&a, &b), "same pool must share one gate");
-        let c = map.pool_tracker_for("other", 3, 1);
+        let c = map.pool_tracker_for("other", FailOpenThresholds { enter: 3, exit: 1 });
         assert!(!Arc::ptr_eq(&a, &c));
     }
 
@@ -230,7 +229,7 @@ mod tests {
     fn pool_reservation_undo_balances_under_contention() {
         let (sink, events) = collecting_sink();
         let map = TkoTrackerMap::with_sink(sink);
-        let gate = map.pool_tracker_for("pool", 8, 1);
+        let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 8, exit: 1 });
         let tracker = map.tracker_for("s:1", 1); // threshold 1: every attempt reserves
         tracker.set_pool_tracker(Arc::clone(&gate));
         let target_wins = 200u64;
@@ -276,7 +275,7 @@ mod tests {
     fn fail_open_hysteresis_emits_enter_and_exit_exactly_once() {
         let (sink, events) = collecting_sink();
         let map = TkoTrackerMap::with_sink(sink);
-        let gate = map.pool_tracker_for("pool", 3, 1);
+        let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
 
         let boxes: Vec<_> = (0..5)
             .map(|i| {

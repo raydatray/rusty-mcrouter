@@ -309,6 +309,7 @@ mod tests {
     use super::*;
     use crate::tko::events::TkoEventSink;
     use crate::tko::map::TkoTrackerMap;
+    use crate::tko::pool::FailOpenThresholds;
 
     fn null_sink() -> TkoEventSink {
         Box::new(|_| {})
@@ -400,7 +401,7 @@ mod tests {
     #[test]
     fn soft_to_hard_conversion_moves_globals_but_not_pool_count() {
         let map = TkoTrackerMap::with_sink(null_sink());
-        let gate = map.pool_tracker_for("pool", 2, 1);
+        let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 2, exit: 1 });
         let a = map.tracker_for("a:11211", 1);
         let b = map.tracker_for("b:11211", 1);
         a.set_pool_tracker(Arc::clone(&gate));
@@ -453,7 +454,7 @@ mod tests {
     #[test]
     fn gate_refusal_leaves_word_unmarked() {
         let map = TkoTrackerMap::with_sink(null_sink());
-        let gate = map.pool_tracker_for("pool", 1, 1);
+        let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
         let a = map.tracker_for("a:11211", 1);
         let b = map.tracker_for("b:11211", 1);
         a.set_pool_tracker(Arc::clone(&gate));

@@ -4,6 +4,7 @@ use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
     PoolTkoTrackerConfig, RouteEntry, RouteHandleConfig,
 };
+use rusty_mcrouter_net::tko::FailOpenThresholds;
 use rusty_mcrouter_net::{destination, Backend, BackendFactory, BackendFactoryError, PoolHealth};
 use thiserror::Error;
 
@@ -229,7 +230,7 @@ fn pool_destination_config(
     cfg
 }
 
-/// Resolves the pool tko_tracker block to concrete (enter, exit) thresholds.
+/// Resolves the pool tko_tracker block to concrete fail-open thresholds.
 /// num takes precedence over percent; percent resolves as pct * servers / 100
 /// (verified if/else-if, McRouteHandleProvider-inl.h:256-275). Validation
 /// ports both upstream checkLogics (:276-282).
@@ -237,7 +238,7 @@ fn resolve_fail_open(
     pool_name: &str,
     cfg: &PoolTkoTrackerConfig,
     num_servers: usize,
-) -> Result<(u64, u64)> {
+) -> Result<FailOpenThresholds> {
     let resolve = |num: Option<u64>, pct: Option<u64>| {
         num.or_else(|| pct.map(|p| p * num_servers as u64 / 100))
             .unwrap_or(0)
@@ -256,7 +257,7 @@ fn resolve_fail_open(
             reason: "tko upper threshold must be >= lower threshold",
         });
     }
-    Ok((enter, exit))
+    Ok(FailOpenThresholds { enter, exit })
 }
 
 fn build_pool_handle<B: Backend>(
@@ -574,7 +575,7 @@ mod tests {
     #[test]
     fn resolves_num_thresholds() {
         let cfg = tko_cfg(r#"{ "num_tko_threshold_upper": 3, "num_tko_threshold_lower": 1 }"#);
-        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), (3, 1));
+        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), FailOpenThresholds { enter: 3, exit: 1 });
     }
 
     #[test]
@@ -582,7 +583,7 @@ mod tests {
         let cfg = tko_cfg(
             r#"{ "percent_tko_threshold_upper": 30, "percent_tko_threshold_lower": 10 }"#,
         );
-        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), (3, 1));
+        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), FailOpenThresholds { enter: 3, exit: 1 });
     }
 
     /// Verified upstream precedence: num beats percent when both are set.
@@ -592,7 +593,7 @@ mod tests {
             r#"{ "num_tko_threshold_upper": 5, "percent_tko_threshold_upper": 10,
                  "num_tko_threshold_lower": 2 }"#,
         );
-        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), (5, 2));
+        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), FailOpenThresholds { enter: 5, exit: 2 });
     }
 
     #[test]

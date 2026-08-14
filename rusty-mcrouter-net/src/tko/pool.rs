@@ -3,22 +3,34 @@ use std::sync::{
     Arc,
 };
 
+/// Fail-open hysteresis thresholds: the gate opens when `enter` destinations
+/// are TKO'd (refusing further marks) and closes again once recoveries drain
+/// the count to `exit`. Named fields because two bare u64s in a tuple invite
+/// a silent swap — and a swapped enter/exit inverts the hysteresis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FailOpenThresholds {
+    /// "upper": TKO'd-destination count at which the pool fails open.
+    pub enter: u64,
+    /// "lower": count at which recoveries close the gate again.
+    pub exit: u64,
+}
+
 pub struct PoolTkoTracker {
     name: Arc<str>,
-    fail_open_enter: u64, // upper threshold to fail open
-    fail_open_exit: u64,  // lower threshold to stop failing open
+    thresholds: FailOpenThresholds,
     fail_open: AtomicBool,
     num_destinations_tko: AtomicU64,
 }
 
 impl PoolTkoTracker {
-    pub(crate) fn new(name: Arc<str>, enter: u64, exit: u64) -> Self {
-        debug_assert!(enter > 0 && exit > 0 && exit <= enter);
+    pub(crate) fn new(name: Arc<str>, thresholds: FailOpenThresholds) -> Self {
+        debug_assert!(
+            thresholds.enter > 0 && thresholds.exit > 0 && thresholds.exit <= thresholds.enter
+        );
 
         Self {
             name,
-            fail_open_enter: enter,
-            fail_open_exit: exit,
+            thresholds,
             fail_open: AtomicBool::new(false),
             num_destinations_tko: AtomicU64::new(0),
         }
@@ -32,7 +44,7 @@ impl PoolTkoTracker {
 
         let mut cur = self.num_destinations_tko.load(Ordering::Relaxed);
         loop {
-            if cur == self.fail_open_enter {
+            if cur == self.thresholds.enter {
                 self.fail_open.store(true, Ordering::Release);
                 return (true, true);
             }
@@ -52,7 +64,7 @@ impl PoolTkoTracker {
     pub fn dec_num_destinations_tko(&self) -> bool {
         let mut cur = self.num_destinations_tko.load(Ordering::Relaxed);
         loop {
-            if self.fail_open.load(Ordering::Acquire) && cur == self.fail_open_exit {
+            if self.fail_open.load(Ordering::Acquire) && cur == self.thresholds.exit {
                 self.fail_open.store(false, Ordering::Release);
                 return true;
             }
@@ -78,7 +90,7 @@ mod tests {
     use super::*;
 
     fn gate(enter: u64, exit: u64) -> PoolTkoTracker {
-        PoolTkoTracker::new(Arc::from("pool"), enter, exit)
+        PoolTkoTracker::new(Arc::from("pool"), FailOpenThresholds { enter, exit })
     }
 
     fn count(g: &PoolTkoTracker) -> u64 {
