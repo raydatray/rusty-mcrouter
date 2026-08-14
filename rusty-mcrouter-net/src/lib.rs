@@ -4,7 +4,6 @@ use thiserror::Error;
 mod backend;
 pub mod classify;
 mod client;
-mod destination;
 pub mod error;
 mod server;
 
@@ -14,7 +13,6 @@ pub mod mock_memcached;
 pub mod testing;
 
 pub use crate::backend::{Backend, BackendFactory, ClientFactory};
-pub use crate::client::{Client, ClientConfig};
 pub use crate::server::Server;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
