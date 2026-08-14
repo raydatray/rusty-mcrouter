@@ -1,0 +1,434 @@
+use std::{
+    cell::{Cell, RefCell},
+    rc::{Rc, Weak},
+    sync::Arc,
+};
+
+use rusty_mcrouter_protocol::{Reply, Request};
+use tokio::time::Instant;
+
+use crate::{
+    classify::{code_of, ResultCode},
+    client::{Config as ClientConfig, ConnectionEvent, ConnectionHandle, DownReason},
+    destination::{config::Config, key::Key, probe, stats::Stats},
+    error::{ConnectError, SendError},
+    tko::{DestToken, TkoEvent, TkoTracker},
+};
+
+pub struct Destination {
+    key: Key,
+    token: DestToken,
+    tracker: Arc<TkoTracker>,
+    conn: ConnectionHandle,
+    cfg: Config,
+    probe: RefCell<Option<tokio::task::JoinHandle<()>>>,
+    stats: RefCell<Stats>,
+    last_active: Cell<Instant>,
+}
+
+impl Destination {
+    pub fn new(key: Key, cfg: Config, tracker: Arc<TkoTracker>) -> Rc<Self> {
+        Rc::new_cyclic(|weak: &Weak<Destination>| {
+            let events = {
+                let weak = weak.clone();
+                Box::new(move |ev| {
+                    if let Some(dest) = weak.upgrade() {
+                        dest.on_conn_event(ev);
+                    }
+                }) as Box<dyn Fn(ConnectionEvent)>
+            };
+
+            let client_cfg = ClientConfig {
+                connect_timeout: cfg.connect_timeout,
+                connect_timeout_retries: cfg.connect_timeout_retries,
+                write_timeout: cfg.reply_timeout,
+                reply_timeout: cfg.reply_timeout,
+                ..ClientConfig::default()
+            };
+
+            let addr = Arc::clone(&key.addr);
+            Destination {
+                key,
+                token: DestToken::allocate(),
+                tracker,
+                conn: ConnectionHandle::spawn(addr, client_cfg, events),
+                cfg,
+                probe: RefCell::new(None),
+                stats: RefCell::new(Stats::default()),
+                last_active: Cell::new(Instant::now()),
+            }
+        })
+    }
+
+    pub(crate) fn is_tko(&self) -> bool {
+        self.tracker.is_tko()
+    }
+
+    pub(crate) fn tracker(&self) -> &Arc<TkoTracker> {
+        &self.tracker
+    }
+
+    pub(crate) fn idle_since(&self) -> Instant {
+        self.last_active.get()
+    }
+
+    pub fn key(&self) -> &Key {
+        &self.key
+    }
+
+    pub fn stats(&self) -> Stats {
+        self.stats.borrow().clone()
+    }
+
+    pub(crate) fn close_idle_connection(&self) {
+        self.conn.close_idle()
+    }
+
+    pub async fn send(self: &Rc<Self>, req: Request) -> Result<Reply, SendError> {
+        self.last_active.set(Instant::now());
+
+        if !self.cfg.disable_tko_tracking && self.tracker.is_tko() {
+            self.stats.borrow_mut().results[ResultCode::Tko as usize] += 1;
+            return Err(SendError::Tko {
+                reason: self.tracker.reason(),
+            });
+        }
+
+        let start = Instant::now();
+        let result = self.conn.send(req).await;
+        let code = code_of(&result);
+
+        self.stats.borrow_mut().record(code, start.elapsed());
+        self.handle_tko(code, false);
+
+        result
+    }
+
+    pub(crate) async fn send_probe(self: &Rc<Self>) {
+        self.last_active.set(Instant::now());
+        self.stats.borrow_mut().probes_sent += 1;
+
+        let start = Instant::now();
+        let result = self.conn.send_probe().await;
+        let code = code_of(&result);
+
+        self.stats.borrow_mut().record(code, start.elapsed());
+        self.handle_tko(code, true);
+    }
+
+    fn handle_tko(self: &Rc<Self>, code: ResultCode, is_probe: bool) {
+        if self.cfg.disable_tko_tracking {
+            return;
+        }
+
+        if code.is_error() {
+            if code.is_hard_tko_error() {
+                if self.tracker.record_hard_failure(self.token, code) {
+                    self.tracker.emit(TkoEvent::MarkHardTko, code, None);
+                    self.start_probing();
+                }
+            } else if code.is_soft_tko_error() {
+                if self.tracker.record_soft_failure(self.token, code) {
+                    self.tracker.emit(TkoEvent::MarkSoftTko, code, None);
+                    self.start_probing();
+                }
+            }
+            return;
+        }
+
+        if self.tracker.is_tko() {
+            if is_probe && self.tracker.record_success(self.token) {
+                self.tracker.emit(TkoEvent::UnMarkTko, code, None);
+                self.stop_probing();
+            }
+            return;
+        }
+
+        self.tracker.record_success(self.token);
+    }
+
+    fn on_conn_event(self: &Rc<Self>, ev: ConnectionEvent) {
+        match ev {
+            ConnectionEvent::Up => self.stats.borrow_mut().connects += 1,
+            ConnectionEvent::Closed => self.stats.borrow_mut().idle_closes += 1,
+            ConnectionEvent::Down(reason) => {
+                let code = match reason {
+                    DownReason::ConnectFailed(ConnectError::Timeout) => ResultCode::ConnectTimeout,
+                    _ => ResultCode::ConnectError,
+                };
+
+                self.handle_tko(code, /* is_probe */ false);
+            }
+        }
+    }
+
+    fn start_probing(self: &Rc<Self>) {
+        let task = tokio::task::spawn_local(probe::probe_loop(
+            Rc::downgrade(self),
+            self.cfg.probe_delay_initial,
+            self.cfg.probe_delay_max,
+        ));
+
+        if let Some(prev) = self.probe.borrow_mut().replace(task) {
+            prev.abort();
+        }
+    }
+
+    fn stop_probing(&self) {
+        self.stats.borrow_mut().probes_sent = 0;
+        if let Some(task) = self.probe.borrow_mut().take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for Destination {
+    fn drop(&mut self) {
+        // the ordering matters, first clear TKO ownership (since we need the
+        // tracker is live and token meaningful), then kill the probe task
+        if self.tracker.remove_destination(self.token) {
+            self.tracker
+                .emit(TkoEvent::RemoveFromConfig, self.tracker.reason(), None);
+        }
+
+        if let Some(task) = self.probe.borrow_mut().take() {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use rusty_mcrouter_protocol::test_support::{get, store};
+
+    use super::*;
+    use crate::test_support::{run_local, scripted_backend_serial, ScriptedServer, Step};
+    use crate::tko::{TkoEventSink, TkoTrackerMap};
+
+    fn collecting_sink() -> (TkoEventSink, Arc<Mutex<Vec<TkoEvent>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let events = Arc::clone(&events);
+            Box::new(move |rec: &crate::tko::TkoEventRecord<'_>| {
+                events.lock().unwrap().push(rec.event);
+            }) as TkoEventSink
+        };
+        (sink, events)
+    }
+
+    fn cfg(failures_until_tko: u64, reply_timeout_ms: u64, probe_initial_ms: u64) -> Config {
+        Config {
+            connect_timeout: Some(Duration::from_millis(1000)),
+            reply_timeout: Some(Duration::from_millis(reply_timeout_ms)),
+            connect_timeout_retries: 0,
+            failures_until_tko,
+            probe_delay_initial: Duration::from_millis(probe_initial_ms),
+            probe_delay_max: Duration::from_millis(probe_initial_ms * 5),
+            disable_tko_tracking: false,
+        }
+    }
+
+    /// Tracker + destination wired the way Map does it, plus the event log.
+    /// The TkoTrackerMap must stay alive (the tracker emits events through a
+    /// Weak to it), so it is returned for the test to hold.
+    #[allow(clippy::type_complexity)]
+    fn dest_for(
+        server: &ScriptedServer,
+        cfg: Config,
+    ) -> (
+        Arc<TkoTrackerMap>,
+        Arc<TkoTracker>,
+        Rc<Destination>,
+        Arc<Mutex<Vec<TkoEvent>>>,
+    ) {
+        let (sink, events) = collecting_sink();
+        let map = TkoTrackerMap::with_sink(sink);
+        let addr: Arc<str> = Arc::from(server.addr.to_string());
+        let tracker = map.tracker_for(&addr, cfg.failures_until_tko);
+        let key = Key {
+            addr,
+            reply_timeout: cfg.reply_timeout,
+        };
+        let dest = Destination::new(key, cfg, Arc::clone(&tracker));
+        (map, tracker, dest, events)
+    }
+
+    async fn wait_until(mut cond: impl FnMut() -> bool) {
+        for _ in 0..2000 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("condition not met within 2s");
+    }
+
+    /// A marked destination fails fast: no connect, no write, no I/O at all.
+    #[tokio::test]
+    async fn tko_fast_fails_with_zero_backend_io() {
+        run_local(async {
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
+            // probe delay far beyond test duration: probes stay out of frame
+            let (_map, tracker, dest, _events) = dest_for(&server, cfg(3, 1000, 10_000));
+
+            // mid-use close: request fails Dropped (non-TKO), the Down(Eof)
+            // event is the hard evidence that marks instantly
+            let r = dest.send(get(b"a")).await;
+            assert!(matches!(r, Err(SendError::Request(_))), "got {r:?}");
+            wait_until(|| tracker.is_tko()).await;
+            assert!(tracker.is_hard_tko());
+
+            let accepts = server.accept_count();
+            for _ in 0..5 {
+                let r = dest.send(get(b"x")).await;
+                assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
+            }
+            assert_eq!(server.accept_count(), accepts, "fast-fail must do zero I/O");
+            assert_eq!(dest.stats().results[ResultCode::Tko as usize], 5);
+        })
+        .await;
+    }
+
+    /// The crown jewel: kill -> hard mark -> probe reconnects and unmarks ->
+    /// traffic resumes. Event stream asserted exactly.
+    #[tokio::test]
+    async fn kill_probe_recover_roundtrip() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![
+                vec![Step::ReadRequests(1), Step::Close], // conn1: mid-use kill
+                vec![Step::ReadRequests(1), Step::Write(b"VERSION 1.6.39\r\n")], // conn2: probe
+                vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")], // conn3: recovered traffic
+            ])
+            .await;
+            let (_map, tracker, dest, events) = dest_for(&server, cfg(3, 1000, 20));
+
+            let _ = dest.send(get(b"a")).await;
+            wait_until(|| tracker.is_tko()).await;
+
+            // probe fires after ~20-30ms, reconnects, VERSION succeeds
+            wait_until(|| !tracker.is_tko()).await;
+
+            assert_eq!(
+                *events.lock().unwrap(),
+                vec![TkoEvent::MarkHardTko, TkoEvent::UnMarkTko]
+            );
+            assert_eq!(dest.stats().probes_sent, 0, "probes_sent resets on unmark");
+
+            assert!(dest.send(get(b"b")).await.is_ok());
+            assert_eq!(server.accept_count(), 3);
+        })
+        .await;
+    }
+
+    /// Reply timeouts are soft evidence: they mark only at the CONSECUTIVE
+    /// threshold, and the mark carries reason Timeout.
+    #[tokio::test]
+    async fn timeouts_mark_soft_at_threshold() {
+        run_local(async {
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(2), Step::Hang]]).await;
+            let (_map, tracker, dest, events) = dest_for(&server, cfg(2, 50, 10_000));
+
+            let r = dest.send(get(b"a")).await;
+            assert!(matches!(
+                r,
+                Err(SendError::Request(crate::error::RequestError::Timeout { sent: true }))
+            ));
+            assert!(!tracker.is_tko(), "one timeout of two must not mark");
+
+            let _ = dest.send(get(b"b")).await;
+            wait_until(|| tracker.is_tko()).await;
+            assert!(tracker.is_soft_tko());
+            assert_eq!(tracker.reason(), ResultCode::Timeout);
+            assert_eq!(*events.lock().unwrap(), vec![TkoEvent::MarkSoftTko]);
+
+            // timeouts never tore the connection down
+            assert_eq!(server.accept_count(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reply_timeout_also_bounds_socket_writes() {
+        run_local(async {
+            // Accept but never read, forcing a large batch to remain in write_all.
+            let server = scripted_backend_serial(vec![vec![Step::Hang]]).await;
+            let (_map, _tracker, dest, _events) = dest_for(&server, cfg(100, 50, 10_000));
+            let request = store(b"key", &vec![b'x'; 1024 * 1024]);
+            let start = Instant::now();
+            let mut sends = Vec::new();
+
+            for _ in 0..32 {
+                let dest = Rc::clone(&dest);
+                let request = request.clone();
+                sends.push(tokio::task::spawn_local(async move {
+                    let _ = dest.send(request).await;
+                }));
+            }
+            for send in sends {
+                send.await.unwrap();
+            }
+
+            assert!(
+                start.elapsed() < Duration::from_millis(500),
+                "write used the 1s client default instead of the 50ms destination timeout: {:?}",
+                start.elapsed()
+            );
+        })
+        .await;
+    }
+
+    /// Config reload drops a TKO'd-and-responsible destination: the mark
+    /// must not be orphaned on the shared tracker.
+    #[tokio::test]
+    async fn drop_while_responsible_unmarks_and_emits_remove_from_config() {
+        run_local(async {
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
+            let (_map, tracker, dest, events) = dest_for(&server, cfg(3, 1000, 10_000));
+
+            let _ = dest.send(get(b"a")).await;
+            wait_until(|| tracker.is_tko()).await;
+
+            drop(dest);
+            assert!(!tracker.is_tko(), "a dying owner must not orphan its TKO");
+            assert_eq!(
+                *events.lock().unwrap(),
+                vec![TkoEvent::MarkHardTko, TkoEvent::RemoveFromConfig]
+            );
+        })
+        .await;
+    }
+
+    /// Two destinations for the same server share one tracker: A's mark
+    /// fast-fails B without B ever touching the network. (Same-thread stand-in
+    /// for the cross-proxy-thread sharing the Arc<TkoTracker> exists for.)
+    #[tokio::test]
+    async fn two_destinations_share_one_verdict() {
+        run_local(async {
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
+            let (_map, tracker, dest_a, _events) = dest_for(&server, cfg(3, 1000, 10_000));
+
+            let key_b = Key {
+                addr: Arc::from(server.addr.to_string()),
+                reply_timeout: Some(Duration::from_millis(1000)),
+            };
+            let dest_b = Destination::new(key_b, cfg(3, 1000, 10_000), Arc::clone(&tracker));
+
+            let _ = dest_a.send(get(b"a")).await;
+            wait_until(|| tracker.is_tko()).await;
+            let accepts = server.accept_count();
+
+            let r = dest_b.send(get(b"b")).await;
+            assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
+            assert_eq!(server.accept_count(), accepts, "B must never connect");
+            assert_eq!(dest_b.stats().results[ResultCode::Tko as usize], 1);
+        })
+        .await;
+    }
+}
