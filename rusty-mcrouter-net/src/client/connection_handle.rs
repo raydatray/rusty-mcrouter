@@ -10,32 +10,32 @@ use tokio::{
 };
 
 use crate::{
-    destination::{
-        client_config::ClientConfig,
-        client_connection::ClientConnection,
-        types::{ClientCommand, ConnectionCommand, ConnectionEvent, Payload},
+    client::{
+        config::Config,
+        connection::Connection,
+        types::{Command, ConnectionCommand, ConnectionEvent, Payload},
     },
     error::SendError,
 };
 
 #[derive(Clone)]
-pub struct ClientConnectionHandle {
+pub struct ConnectionHandle {
     tx: mpsc::Sender<ConnectionCommand>,
     reply_timeout: Option<Duration>,
 }
 
-impl ClientConnectionHandle {
+impl ConnectionHandle {
     pub fn spawn(
         addr: Arc<str>,
-        cfg: ClientConfig,
+        cfg: Config,
         events: Box<dyn Fn(ConnectionEvent)>,
-    ) -> ClientConnectionHandle {
+    ) -> ConnectionHandle {
         let (tx, rx) = mpsc::channel(cfg.max_pending);
         let reply_timeout = cfg.reply_timeout;
 
-        tokio::task::spawn_local(ClientConnection::new(addr, cfg, rx, events).run());
+        tokio::task::spawn_local(Connection::new(addr, cfg, rx, events).run());
 
-        ClientConnectionHandle { tx, reply_timeout }
+        ConnectionHandle { tx, reply_timeout }
     }
 
     pub async fn send(&self, request: Request) -> Result<Reply, SendError> {
@@ -49,7 +49,7 @@ impl ClientConnectionHandle {
     async fn submit(&self, payload: Payload) -> Result<Reply, SendError> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
-        let cmd = ClientCommand {
+        let cmd = Command {
             payload,
             reply_tx,
             deadline: self.reply_timeout.map(|d| Instant::now() + d),

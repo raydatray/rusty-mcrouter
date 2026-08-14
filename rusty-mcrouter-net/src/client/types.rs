@@ -25,14 +25,14 @@ pub(crate) enum Payload {
     VersionProbe,
 }
 
-pub(crate) struct ClientCommand {
+pub(crate) struct Command {
     pub(crate) payload: Payload,
     pub(crate) reply_tx: oneshot::Sender<Result<Reply, SendError>>,
     pub(crate) deadline: Option<Instant>, // armed at enqueue time
 }
 
 pub(crate) enum ConnectionCommand {
-    Command(ClientCommand),
+    Command(Command),
     CloseIdle,
 }
 
