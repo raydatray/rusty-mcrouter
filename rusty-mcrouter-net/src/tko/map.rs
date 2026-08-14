@@ -164,4 +164,238 @@ mod tests {
         assert!(!sus[0].1, "one failure of three is suspect, not TKO");
         assert_eq!(sus[0].2, 1);
     }
+
+    // ── contention suite: std::thread, no tokio ─────────────────────────
+
+    use crate::tko::events::TkoEvent;
+    use std::sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc, Barrier,
+    };
+    use std::time::Duration;
+
+    /// Sink that collects events across threads (sinks fire from whichever
+    /// proxy thread crosses a threshold, so this must be Send + Sync).
+    fn collecting_sink() -> (TkoEventSink, Arc<Mutex<Vec<TkoEvent>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let events = Arc::clone(&events);
+            Box::new(move |rec: &TkoEventRecord<'_>| {
+                events.lock().unwrap().push(rec.event);
+            }) as TkoEventSink
+        };
+        (sink, events)
+    }
+
+    /// THE invariant the whole encoding exists for: across N threads
+    /// hammering soft failures with distinct tokens, every TKO episode has
+    /// EXACTLY one responsible destination — proven because record_success
+    /// (owner-only unmark) must return true for every winner, and the
+    /// underflow debug_asserts in decrement_tko_count arm the double-unmark
+    /// case. The gauge draining to zero proves mark/unmark pairing.
+    #[test]
+    fn responsibility_is_unique_under_contention() {
+        let map = TkoTrackerMap::with_sink(null_sink());
+        let tracker = map.tracker_for("s:1", 3);
+        let target_wins = 200u64;
+        let total_wins = AtomicU64::new(0);
+
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                let tracker = Arc::clone(&tracker);
+                let total_wins = &total_wins;
+                s.spawn(move || {
+                    let token = DestToken::allocate();
+                    while total_wins.load(Ordering::SeqCst) < target_wins {
+                        if tracker.record_soft_failure(token, ResultCode::Timeout) {
+                            // we won responsibility: we and ONLY we may unmark
+                            assert!(tracker.record_success(token));
+                            total_wins.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        });
+
+        assert!(!tracker.is_tko());
+        assert_eq!(map.global_tkos().total(), 0, "gauge must drain to zero");
+    }
+
+    /// Reservation/undo balance: a lost CAS must return its pool
+    /// reservation. With headroom (enter=8) and only 4 concurrent
+    /// reservers, ANY leak accumulates round over round and trips
+    /// fail-open within ~8 rounds of 200 — asserted as: no EnterFailOpen
+    /// ever, and full capacity still available afterwards.
+    #[test]
+    fn pool_reservation_undo_balances_under_contention() {
+        let (sink, events) = collecting_sink();
+        let map = TkoTrackerMap::with_sink(sink);
+        let gate = map.pool_tracker_for("pool", 8, 1);
+        let tracker = map.tracker_for("s:1", 1); // threshold 1: every attempt reserves
+        tracker.set_pool_tracker(Arc::clone(&gate));
+        let target_wins = 200u64;
+        let total_wins = AtomicU64::new(0);
+
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                let tracker = Arc::clone(&tracker);
+                let total_wins = &total_wins;
+                s.spawn(move || {
+                    let token = DestToken::allocate();
+                    while total_wins.load(Ordering::SeqCst) < target_wins {
+                        if tracker.record_soft_failure(token, ResultCode::Timeout) {
+                            assert!(tracker.record_success(token));
+                            total_wins.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        });
+
+        assert!(
+            !events.lock().unwrap().contains(&TkoEvent::EnterFailOpen),
+            "a leaked reservation accumulated into spurious fail-open"
+        );
+        // capacity probe: the pool count drained fully, so 8 fresh boxes
+        // can all be marked
+        for i in 0..8 {
+            let t = map.tracker_for(&format!("probe:{i}"), 1);
+            t.set_pool_tracker(Arc::clone(&gate));
+            assert!(
+                t.record_soft_failure(DestToken::allocate(), ResultCode::Timeout),
+                "probe box {i} refused: pool count did not drain to zero"
+            );
+        }
+    }
+
+    /// End-to-end hysteresis with the event stream: gate {enter:3, exit:1},
+    /// kill 3 -> marked; the 4th keeps failing UNMARKED and EnterFailOpen
+    /// fires exactly once; recover down to the exit threshold ->
+    /// ExitFailOpen exactly once -> marking admitted again.
+    #[test]
+    fn fail_open_hysteresis_emits_enter_and_exit_exactly_once() {
+        let (sink, events) = collecting_sink();
+        let map = TkoTrackerMap::with_sink(sink);
+        let gate = map.pool_tracker_for("pool", 3, 1);
+
+        let boxes: Vec<_> = (0..5)
+            .map(|i| {
+                let t = map.tracker_for(&format!("s:{i}"), 1);
+                t.set_pool_tracker(Arc::clone(&gate));
+                (t, DestToken::allocate())
+            })
+            .collect();
+
+        for (t, tok) in boxes.iter().take(3) {
+            assert!(t.record_hard_failure(*tok, ResultCode::ConnectError));
+        }
+        // 4th and 5th: refused, unmarked; only the crossing call emits
+        assert!(!boxes[3].0.record_hard_failure(boxes[3].1, ResultCode::ConnectError));
+        assert!(!boxes[3].0.is_tko());
+        assert!(!boxes[4].0.record_hard_failure(boxes[4].1, ResultCode::ConnectError));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![TkoEvent::EnterFailOpen],
+            "enter must fire exactly once"
+        );
+
+        // recover marked boxes; the drain to exit=1 flips the gate back
+        for (t, tok) in boxes.iter().take(3) {
+            assert!(t.record_success(*tok));
+        }
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![TkoEvent::EnterFailOpen, TkoEvent::ExitFailOpen],
+            "exit must fire exactly once"
+        );
+
+        // gate admits marks again
+        assert!(boxes[3].0.record_hard_failure(boxes[3].1, ResultCode::ConnectError));
+        assert!(boxes[3].0.is_hard_tko());
+    }
+
+    /// Hard marking under contention: N threads race record_hard_failure
+    /// with distinct tokens; exactly one wins, the global hard gauge counts
+    /// one, and the winner's token is the only one that can unmark.
+    #[test]
+    fn hard_failure_single_winner_under_contention() {
+        let map = TkoTrackerMap::with_sink(null_sink());
+        let tracker = map.tracker_for("s:1", 3);
+        let tokens: Vec<DestToken> = (0..8).map(|_| DestToken::allocate()).collect();
+        let wins = AtomicUsize::new(0);
+        let winner_idx = AtomicUsize::new(usize::MAX);
+
+        std::thread::scope(|s| {
+            for (i, token) in tokens.iter().enumerate() {
+                let tracker = Arc::clone(&tracker);
+                let (wins, winner_idx) = (&wins, &winner_idx);
+                let token = *token;
+                s.spawn(move || {
+                    if tracker.record_hard_failure(token, ResultCode::ConnectError) {
+                        wins.fetch_add(1, Ordering::SeqCst);
+                        winner_idx.store(i, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(wins.load(Ordering::SeqCst), 1, "exactly one winner");
+        assert_eq!(map.global_tkos().hard_tkos.load(Ordering::Relaxed), 1);
+        assert!(tracker.is_hard_tko());
+        assert!(tracker.record_success(tokens[winner_idx.load(Ordering::SeqCst)]));
+        assert_eq!(map.global_tkos().total(), 0);
+    }
+
+    #[test]
+    fn sus_servers_does_not_deadlock_with_final_owner_drops() {
+        const WORKERS: usize = 4;
+        const ROUNDS: usize = 5_000;
+
+        let map = TkoTrackerMap::with_sink(null_sink());
+        let active = Arc::new(AtomicUsize::new(WORKERS));
+        let start = Arc::new(Barrier::new(WORKERS + 1));
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut threads = Vec::with_capacity(WORKERS + 1);
+
+        for worker in 0..WORKERS {
+            let map = Arc::clone(&map);
+            let active = Arc::clone(&active);
+            let start = Arc::clone(&start);
+            let done_tx = done_tx.clone();
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                for round in 0..ROUNDS {
+                    let tracker = map.tracker_for(&format!("churn:{worker}:{round}"), 3);
+                    tracker.record_soft_failure(DestToken::allocate(), ResultCode::Timeout);
+                    std::thread::yield_now();
+                    drop(tracker);
+                }
+                active.fetch_sub(1, Ordering::SeqCst);
+                done_tx.send(()).unwrap();
+            }));
+        }
+
+        let scan_map = Arc::clone(&map);
+        let scan_active = Arc::clone(&active);
+        let scan_start = Arc::clone(&start);
+        let scan_done = done_tx.clone();
+        threads.push(std::thread::spawn(move || {
+            scan_start.wait();
+            while scan_active.load(Ordering::SeqCst) != 0 {
+                let _ = scan_map.sus_servers();
+                std::thread::yield_now();
+            }
+            scan_done.send(()).unwrap();
+        }));
+        drop(done_tx);
+
+        for _ in 0..WORKERS + 1 {
+            done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("tracker churn and suspect scans must not deadlock");
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
 }
