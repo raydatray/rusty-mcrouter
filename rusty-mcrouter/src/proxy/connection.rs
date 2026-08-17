@@ -1,8 +1,12 @@
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::{collections::BTreeMap, rc::Rc};
 
 use bytes::{Bytes, BytesMut};
 use rusty_mcrouter_core::DynRoute;
+use rusty_mcrouter_net::counters::CommandKind;
 use rusty_mcrouter_net::NetError;
+use rusty_mcrouter_observability::frontend::FrontendCounters;
 use rusty_mcrouter_protocol::meta::{
     DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
 };
@@ -41,6 +45,7 @@ pub struct Connection {
     /// hop-local `MetaReplyPlan` (never routed, never crosses threads) and
     /// flips to `Ready` when its outcome exists.
     slots: BTreeMap<usize, Slot>,
+    counters: Arc<FrontendCounters>, //temp - moved out soon
     next_seq: usize,
     next_write: usize,
     in_flight: usize,
@@ -72,6 +77,7 @@ impl Connection {
         local_route: Rc<dyn DynRoute>,
         proxies: ProxySet,
         mode: ThreadMode,
+        counters: Arc<FrontendCounters>,
     ) -> Self {
         let (reader, writer) = stream.into_split();
         let (completed_tx, completed_rx) = mpsc::channel(COMPLETED_CHANNEL_CAPACITY);
@@ -88,6 +94,7 @@ impl Connection {
             decoder: MetaRequestDecoder::new(),
             encoder: MetaReplyEncoder::new(),
             slots: BTreeMap::new(),
+            counters,
             next_seq: 0,
             next_write: 0,
             in_flight: 0,
@@ -145,6 +152,9 @@ impl Connection {
                     request,
                     reply_plan,
                 })) => {
+                    self.counters.request[CommandKind::of(&request) as usize]
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.counters.processing.fetch_add(1, Ordering::Relaxed);
                     let seq = self.take_seq();
                     self.slots.insert(
                         seq,
@@ -157,6 +167,7 @@ impl Connection {
                     self.submit_single(seq, request);
                 }
                 Ok(Some(DecodedMetaCommand::NoOp)) => {
+                    self.counters.noops.fetch_add(1, Ordering::Relaxed);
                     let seq = self.take_seq();
                     self.slots.insert(seq, Slot::ready(SlotOutcome::NoOp));
                 }
@@ -164,6 +175,7 @@ impl Connection {
                 // one malformed command was consumed; its error joins the
                 // pipeline in order and decoding continues.
                 Err(MetaRequestDecodeError::Recoverable(error)) => {
+                    self.counters.parse_errors.fetch_add(1, Ordering::Relaxed);
                     let seq = self.take_seq();
                     self.slots
                         .insert(seq, Slot::ready(SlotOutcome::Reply(Reply::Error(error))));
@@ -186,6 +198,7 @@ impl Connection {
 
     fn complete(&mut self, seq: usize, reply: Reply) {
         self.in_flight = self.in_flight.saturating_sub(1);
+        self.counters.processing.fetch_sub(1, Ordering::Relaxed);
         if let Some(slot) = self.slots.get_mut(&seq) {
             slot.state = SlotState::Ready(SlotOutcome::Reply(reply));
         }
@@ -235,11 +248,17 @@ impl Connection {
             match outcome {
                 SlotOutcome::NoOp => self.encoder.encode_noop(&mut self.write_buf),
                 SlotOutcome::Reply(reply) => {
+                    if matches!(reply, Reply::Error(_)) {
+                        self.counters.failed.fetch_add(1, Ordering::Relaxed);
+                    }
                     if self
                         .encoder
                         .encode(&reply, &slot.plan, &mut self.write_buf)
                         .is_err()
                     {
+                        if !matches!(reply, Reply::Error(_)) {
+                            self.counters.failed.fetch_add(1, Ordering::Relaxed);
+                        }
                         // the reply cannot satisfy this slot's plan (for
                         // example a backend omitted a projected field):
                         // degrade this slot only, never the connection.
@@ -263,12 +282,124 @@ impl Connection {
     }
 }
 
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.counters
+            .processing
+            .fetch_sub(self.in_flight as i64, Ordering::Relaxed);
+    }
+}
+
 impl Slot {
     fn ready(outcome: SlotOutcome) -> Self {
         Self {
             plan: MetaReplyPlan::default(),
             state: SlotState::Ready(outcome),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use rusty_mcrouter_core::{DestinationRoute, Route};
+    use rusty_mcrouter_net::counters::CommandKind;
+    use rusty_mcrouter_net::test_support::{run_local, MockBackend};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+    use crate::proxy::message::ProxyMessage;
+
+    /// a real Connection over a localhost socket pair, with a SameThread
+    /// route into a mock backend. the proxy handle channel is never used
+    /// (SameThread routes inline) but ProxySet demands one.
+    async fn session(
+        counters: Arc<FrontendCounters>,
+    ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+
+        let route = DestinationRoute::new(MockBackend::miss()).into_dyn();
+        let (tx, _rx) = mpsc::channel::<ProxyMessage>(1);
+        let proxies = ProxySet::new(vec![ProxyHandle::new(0, tx)]);
+
+        let conn = Connection::new(
+            server_stream,
+            0,
+            route,
+            proxies,
+            ThreadMode::SameThread,
+            counters,
+        );
+        let task = tokio::task::spawn_local(async move {
+            let _ = conn.run().await;
+        });
+        (client, task)
+    }
+
+    async fn read_lines(client: &mut tokio::net::TcpStream, n: usize) -> Vec<String> {
+        let mut buf = Vec::new();
+        loop {
+            let text = String::from_utf8_lossy(&buf);
+            if text.matches("\r\n").count() >= n {
+                return text
+                    .split("\r\n")
+                    .take(n)
+                    .map(str::to_owned)
+                    .collect();
+            }
+            let mut chunk = [0u8; 1024];
+            let read = client.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "connection closed before {n} replies");
+            buf.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// THE frontend counters test: a pipelined session of mg + mn + garbage
+    /// counts one of each fact, failed counts the CLIENT_ERROR, replies come
+    /// back in pipeline order, and the gauges settle to zero.
+    #[tokio::test]
+    async fn frontend_counters_account_a_pipelined_session() {
+        run_local(async {
+            let counters = FrontendCounters::new();
+            let (mut client, task) = session(Arc::clone(&counters)).await;
+
+            client
+                .write_all(b"mg foo v\r\nmn\r\nnot_a_command\r\n")
+                .await
+                .unwrap();
+
+            let lines = read_lines(&mut client, 3).await;
+            assert_eq!(lines[0], "EN", "mg miss");
+            assert_eq!(lines[1], "MN", "mn answered in pipeline order");
+            // unknown command -> memcached's bare ERROR (CLIENT_ERROR is for
+            // malformed KNOWN commands); either way it's a recoverable parse
+            // error and a client-visible error reply
+            assert_eq!(lines[2], "ERROR", "garbage must answer in pipeline order");
+
+            assert_eq!(
+                counters.request[CommandKind::Get as usize].load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(counters.noops.load(Ordering::Relaxed), 1);
+            assert_eq!(counters.parse_errors.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                counters.failed.load(Ordering::Relaxed),
+                1,
+                "the CLIENT_ERROR is a client-visible error reply"
+            );
+            assert_eq!(counters.processing.load(Ordering::Relaxed), 0);
+
+            // client disconnect ends the session; the gauge must not leak
+            drop(client);
+            task.await.unwrap();
+            assert_eq!(counters.processing.load(Ordering::Relaxed), 0);
+        })
+        .await;
     }
 }
 

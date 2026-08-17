@@ -2,6 +2,7 @@ use std::{net::SocketAddr, rc::Rc, sync::mpsc::SyncSender};
 
 use rusty_mcrouter_core::build_route;
 use rusty_mcrouter_net::{counters::ProxyCounters, destination, DestinationFactory, Server};
+use rusty_mcrouter_observability::frontend::FrontendCounters;
 use tokio::{runtime::Builder, task::LocalSet};
 
 use crate::proxy::{ConnectionWorker, ListenerConfig, Proxy, ProxyThreadConfig};
@@ -77,6 +78,7 @@ pub fn proxy_thread_main(
         // todo(wiring): the /metrics diff moves creation to main so the bin
         // can hand the Vec<Arc<ProxyCounters>> to the scrape sources.
         let proxy_counters = ProxyCounters::new();
+        let frontend_counters = FrontendCounters::new();
         let dest_map = destination::Map::new(tko_map, proxy_counters, counters_registry);
         let _sweep = dest_map.spawn_idle_sweep(sweep_interval);
         let factory = DestinationFactory::new(Rc::clone(&dest_map));
@@ -104,7 +106,14 @@ pub fn proxy_thread_main(
 
         // connection worker
         // - drains handed-off sockets and serves each connection.
-        let worker = ConnectionWorker::new(proxy_id, route, proxies, thread_mode, work_rx);
+        let worker = ConnectionWorker::new(
+            proxy_id,
+            route,
+            proxies,
+            thread_mode,
+            frontend_counters,
+            work_rx,
+        );
 
         match listener {
             Some((server, listener_txs)) => {

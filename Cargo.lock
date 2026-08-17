@@ -1206,6 +1206,7 @@ dependencies = [
  "rusty-mcrouter-config",
  "rusty-mcrouter-core",
  "rusty-mcrouter-net",
+ "rusty-mcrouter-observability",
  "rusty-mcrouter-protocol",
  "testcontainers",
  "tokio",
