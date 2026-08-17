@@ -9,9 +9,7 @@ use rusty_mcrouter_net::{destination, Backend, BackendFactory, BackendFactoryErr
 use thiserror::Error;
 
 use crate::{
-    failover::{
-        code_of_kind, FailoverErrors, FailoverPolicy, InOrderPolicy, LeastFailuresPolicy,
-    },
+    failover::{code_of_kind, FailoverErrors, FailoverPolicy, InOrderPolicy, LeastFailuresPolicy},
     routes::{DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, Route},
     selectors::{Ch3, Crc32, Salted, Selector, SelectorBuildError},
 };
@@ -86,11 +84,7 @@ struct RouteBuilder<'a, F: BackendFactory> {
 }
 
 impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
-    fn new(
-        config: &'a ConfigDocument,
-        factory: &'a F,
-        defaults: &'a destination::Config,
-    ) -> Self {
+    fn new(config: &'a ConfigDocument, factory: &'a F, defaults: &'a destination::Config) -> Self {
         Self {
             config,
             factory,
@@ -308,10 +302,7 @@ fn build_failover_errors(cfg: &FailoverErrorsConfig) -> FailoverErrors {
 /// Returns the policy plus the route's try budget (attempts INCLUDING the
 /// primary). InOrder has no configured budget: every child may be tried,
 /// matching mcrouter's default of children.size().
-fn build_failover_policy(
-    cfg: &FailoverPolicyConfig,
-    n: usize,
-) -> (Box<dyn FailoverPolicy>, usize) {
+fn build_failover_policy(cfg: &FailoverPolicyConfig, n: usize) -> (Box<dyn FailoverPolicy>, usize) {
     match cfg {
         FailoverPolicyConfig::InOrder => (Box::new(InOrderPolicy), n),
         FailoverPolicyConfig::LeastFailures { max_tries } => {
@@ -334,10 +325,7 @@ mod tests {
         destination::Config::default()
     }
 
-    fn build<F: BackendFactory>(
-        cfg: &ConfigDocument,
-        factory: &F,
-    ) -> Result<Rc<dyn DynRoute>> {
+    fn build<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> Result<Rc<dyn DynRoute>> {
         build_route(cfg, factory, &defaults())
     }
 
@@ -500,7 +488,10 @@ mod tests {
     fn errors_on_pool_route_shorthand_with_wrong_arity() {
         let cfg = parse(r#"{"route": "PoolRoute|a|b"}"#).unwrap();
         let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(err, BuildError::PoolRouteShorthandArity { got: 2 }));
+        assert!(matches!(
+            err,
+            BuildError::PoolRouteShorthandArity { got: 2 }
+        ));
     }
 
     #[test]
@@ -550,9 +541,8 @@ mod tests {
 
     #[test]
     fn explicit_pool_connect_timeout_wins() {
-        let pool = pool_json(
-            r#"{ "servers": ["a:1"], "server_timeout": 200, "connect_timeout": 50 }"#,
-        );
+        let pool =
+            pool_json(r#"{ "servers": ["a:1"], "server_timeout": 200, "connect_timeout": 50 }"#);
         let cfg = pool_destination_config(&defaults(), &pool);
         assert_eq!(cfg.reply_timeout, Some(Duration::from_millis(200)));
         assert_eq!(cfg.connect_timeout, Some(Duration::from_millis(50)));
@@ -575,15 +565,20 @@ mod tests {
     #[test]
     fn resolves_num_thresholds() {
         let cfg = tko_cfg(r#"{ "num_tko_threshold_upper": 3, "num_tko_threshold_lower": 1 }"#);
-        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), FailOpenThresholds { enter: 3, exit: 1 });
+        assert_eq!(
+            resolve_fail_open("p", &cfg, 10).unwrap(),
+            FailOpenThresholds { enter: 3, exit: 1 }
+        );
     }
 
     #[test]
     fn resolves_percent_thresholds_against_pool_size() {
-        let cfg = tko_cfg(
-            r#"{ "percent_tko_threshold_upper": 30, "percent_tko_threshold_lower": 10 }"#,
+        let cfg =
+            tko_cfg(r#"{ "percent_tko_threshold_upper": 30, "percent_tko_threshold_lower": 10 }"#);
+        assert_eq!(
+            resolve_fail_open("p", &cfg, 10).unwrap(),
+            FailOpenThresholds { enter: 3, exit: 1 }
         );
-        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), FailOpenThresholds { enter: 3, exit: 1 });
     }
 
     /// Verified upstream precedence: num beats percent when both are set.
@@ -593,7 +588,10 @@ mod tests {
             r#"{ "num_tko_threshold_upper": 5, "percent_tko_threshold_upper": 10,
                  "num_tko_threshold_lower": 2 }"#,
         );
-        assert_eq!(resolve_fail_open("p", &cfg, 10).unwrap(), FailOpenThresholds { enter: 5, exit: 2 });
+        assert_eq!(
+            resolve_fail_open("p", &cfg, 10).unwrap(),
+            FailOpenThresholds { enter: 5, exit: 2 }
+        );
     }
 
     #[test]

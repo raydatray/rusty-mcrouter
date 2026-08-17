@@ -6,8 +6,8 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use thiserror::Error;
 
 use crate::destination::{self, Destination, Key, Map};
-use crate::tko::FailOpenThresholds;
 use crate::error::SendError;
+use crate::tko::FailOpenThresholds;
 
 /// A backend that sends a request and awaits a reply.
 ///
@@ -99,9 +99,11 @@ impl BackendFactory for DestinationFactory {
             });
         }
 
-        let gate = pool
-            .fail_open
-            .map(|thresholds| self.map.tko_map().pool_tracker_for(pool.pool_name, thresholds));
+        let gate = pool.fail_open.map(|thresholds| {
+            self.map
+                .tko_map()
+                .pool_tracker_for(pool.pool_name, thresholds)
+        });
         let key = Key {
             addr: Arc::from(server),
             reply_timeout: cfg.reply_timeout,
@@ -202,11 +204,9 @@ mod tests {
     #[tokio::test]
     async fn rc_destination_implements_backend() {
         run_local(async {
-            let server = scripted_backend_serial(vec![vec![
-                Step::ReadRequests(1),
-                Step::Write(b"EN\r\n"),
-            ]])
-            .await;
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]])
+                    .await;
             let (_tko, factory) = factory();
             let backend = factory
                 .make(

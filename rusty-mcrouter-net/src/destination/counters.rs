@@ -11,8 +11,6 @@ use crate::{
     tko::TkoTracker,
 };
 
-const ZERO_U64: AtomicU64 = AtomicU64::new(0);
-
 pub struct DestinationCounters {
     pub addr: Arc<str>,
     pub tracker: Arc<TkoTracker>,
@@ -29,7 +27,7 @@ impl DestinationCounters {
         Arc::new(Self {
             addr,
             tracker,
-            requests: [ZERO_U64; RESULT_CODE_COUNT],
+            requests: [const { AtomicU64::new(0) }; RESULT_CODE_COUNT],
             probes_sent: AtomicU64::new(0),
             connects: AtomicU64::new(0),
             idle_closes: AtomicU64::new(0),

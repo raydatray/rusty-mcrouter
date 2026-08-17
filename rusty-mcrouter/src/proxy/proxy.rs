@@ -77,8 +77,7 @@ mod tests {
 
     #[tokio::test]
     async fn unrecovered_timeout_becomes_server_error_at_boundary() {
-        let reply =
-            boundary_reply(SendError::Request(RequestError::Timeout { sent: true })).await;
+        let reply = boundary_reply(SendError::Request(RequestError::Timeout { sent: true })).await;
         assert_eq!(
             reply,
             Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
