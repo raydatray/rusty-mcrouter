@@ -1,0 +1,15 @@
+[package]
+name = "rusty-mcrouter-observability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+testing = []
+
+[dependencies]
+rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
