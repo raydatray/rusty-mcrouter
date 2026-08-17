@@ -64,6 +64,32 @@ impl SendError {
 }
 
 impl ResultCode {
+    pub const ALL: [ResultCode; RESULT_CODE_COUNT] = [
+        ResultCode::Success,
+        ResultCode::BadRequest,
+        ResultCode::RemoteError,
+        ResultCode::ConnectionDropped,
+        ResultCode::LocalError,
+        ResultCode::ConnectError,
+        ResultCode::ConnectTimeout,
+        ResultCode::Timeout,
+        ResultCode::Tko,
+    ];
+
+    pub fn prometheus_label(self) -> &'static str {
+        match self {
+            ResultCode::Success => "success",
+            ResultCode::BadRequest => "bad_request",
+            ResultCode::RemoteError => "remote_error",
+            ResultCode::ConnectionDropped => "connection_dropped",
+            ResultCode::LocalError => "local_error",
+            ResultCode::ConnectError => "connect_error",
+            ResultCode::ConnectTimeout => "connect_timeout",
+            ResultCode::Timeout => "timeout",
+            ResultCode::Tko => "tko",
+        }
+    }
+
     pub fn is_error(self) -> bool {
         self != ResultCode::Success
     }
@@ -135,17 +161,7 @@ mod tests {
     use super::*;
     use crate::error::{LocalError, ProtocolError};
 
-    const ALL: [ResultCode; RESULT_CODE_COUNT] = [
-        ResultCode::Success,
-        ResultCode::BadRequest,
-        ResultCode::RemoteError,
-        ResultCode::ConnectionDropped,
-        ResultCode::LocalError,
-        ResultCode::ConnectError,
-        ResultCode::ConnectTimeout,
-        ResultCode::Timeout,
-        ResultCode::Tko,
-    ];
+    const ALL: [ResultCode; RESULT_CODE_COUNT] = ResultCode::ALL;
 
     /// The full SendError -> ResultCode classification table. Every
     /// constructible error shape appears exactly once; if a variant is added

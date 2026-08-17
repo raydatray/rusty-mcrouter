@@ -31,6 +31,15 @@ impl CommandKind {
         }
     }
 
+    pub const ALL: [CommandKind; COMMAND_KIND_COUNT] = [
+        CommandKind::Get,
+        CommandKind::Store,
+        CommandKind::Delete,
+        CommandKind::Arithmetic,
+        CommandKind::Debug,
+        CommandKind::Version,
+    ];
+
     pub fn prometheus_label(self) -> &'static str {
         match self {
             CommandKind::Get => "mg",
@@ -89,15 +98,7 @@ mod tests {
     /// must fit. (same pattern as classify.rs's RESULT_CODE_COUNT test)
     #[test]
     fn command_discriminants_fit_the_array() {
-        const ALL: [CommandKind; COMMAND_KIND_COUNT] = [
-            CommandKind::Get,
-            CommandKind::Store,
-            CommandKind::Delete,
-            CommandKind::Arithmetic,
-            CommandKind::Debug,
-            CommandKind::Version,
-        ];
-        for cmd in ALL {
+        for cmd in CommandKind::ALL {
             assert!((cmd as usize) < COMMAND_KIND_COUNT, "for {cmd:?}");
         }
     }
