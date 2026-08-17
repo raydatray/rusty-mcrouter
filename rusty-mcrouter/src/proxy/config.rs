@@ -1,7 +1,8 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use rusty_mcrouter_config::ConfigDocument;
-use rusty_mcrouter_net::{destination, tko::TkoTrackerMap};
+use rusty_mcrouter_net::{counters::ProxyCounters, destination, tko::TkoTrackerMap};
+use rusty_mcrouter_observability::{bus::EventSender, frontend::FrontendCounters};
 use tokio::sync::mpsc;
 
 use crate::proxy::{message::ProxyMessage, proxy_set::ProxySet};
@@ -20,6 +21,12 @@ pub struct ProxyThreadConfig {
     /// Cross-thread counters: same-server destinations on different threads
     /// share one scrapeable counter block through it (atomics only).
     pub counters_registry: Arc<destination::DestinationCountersRegistry>,
+    /// This thread's counter shards. Created in main so the scrape
+    /// sources hold the same Arcs; this thread is the only writer.
+    pub proxy_counters: Arc<ProxyCounters>,
+    pub frontend_counters: Arc<FrontendCounters>,
+    /// Worker lifecycle events ride the observability bus.
+    pub events: EventSender,
     /// Router-level destination defaults (derived from RouterOptions once in
     /// main); pools override via server_timeout/connect_timeout.
     pub defaults: destination::Config,
