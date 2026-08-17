@@ -1,7 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
-    sync::Arc,
+    sync::{atomic::Ordering, Arc},
 };
 
 use rusty_mcrouter_protocol::{Reply, Request};
@@ -10,8 +10,9 @@ use tokio::time::Instant;
 use crate::{
     classify::{code_of, ResultCode},
     client::{Config as ClientConfig, ConnectionEvent, ConnectionHandle, DownReason},
-    destination::{config::Config, key::Key, probe, stats::Stats},
-    error::{ConnectError, SendError},
+    counters::{CommandKind, ProxyCounters},
+    destination::{config::Config, key::Key, probe, DestinationCounters},
+    error::{ConnectError, LocalError, SendError},
     tko::{DestToken, TkoEvent, TkoTracker},
 };
 
@@ -22,12 +23,19 @@ pub struct Destination {
     conn: ConnectionHandle,
     cfg: Config,
     probe: RefCell<Option<tokio::task::JoinHandle<()>>>,
-    stats: RefCell<Stats>,
+    counters: Arc<DestinationCounters>,
+    shard_counters: Arc<ProxyCounters>,
     last_active: Cell<Instant>,
 }
 
 impl Destination {
-    pub fn new(key: Key, cfg: Config, tracker: Arc<TkoTracker>) -> Rc<Self> {
+    pub fn new(
+        key: Key,
+        cfg: Config,
+        tracker: Arc<TkoTracker>,
+        counters: Arc<DestinationCounters>,
+        shard_counters: Arc<ProxyCounters>,
+    ) -> Rc<Self> {
         Rc::new_cyclic(|weak: &Weak<Destination>| {
             let events = {
                 let weak = weak.clone();
@@ -51,10 +59,16 @@ impl Destination {
                 key,
                 token: DestToken::allocate(),
                 tracker,
-                conn: ConnectionHandle::spawn(addr, client_cfg, events),
+                conn: ConnectionHandle::spawn(
+                    addr,
+                    client_cfg,
+                    events,
+                    Arc::clone(&shard_counters),
+                ),
                 cfg,
                 probe: RefCell::new(None),
-                stats: RefCell::new(Stats::default()),
+                counters,
+                shard_counters,
                 last_active: Cell::new(Instant::now()),
             }
         })
@@ -76,8 +90,8 @@ impl Destination {
         &self.key
     }
 
-    pub fn stats(&self) -> Stats {
-        *self.stats.borrow()
+    pub fn counters(&self) -> &Arc<DestinationCounters> {
+        &self.counters
     }
 
     pub(crate) fn close_idle_connection(&self) {
@@ -86,19 +100,31 @@ impl Destination {
 
     pub async fn send(self: &Rc<Self>, req: Request) -> Result<Reply, SendError> {
         self.last_active.set(Instant::now());
+        let cmd = CommandKind::of(&req);
 
         if !self.cfg.disable_tko_tracking && self.tracker.is_tko() {
-            self.stats.borrow_mut().results[ResultCode::Tko as usize] += 1;
+            self.counters.record_result(ResultCode::Tko);
+            self.shard_counters.record_result(cmd, ResultCode::Tko);
             return Err(SendError::Tko {
                 reason: self.tracker.reason(),
             });
         }
 
         let start = Instant::now();
+        let inflight = InflightGuard::new(&self.counters);
         let result = self.conn.send(req).await;
+        drop(inflight);
         let code = code_of(&result);
+        let latency_us = start.elapsed().as_micros() as u64;
 
-        self.stats.borrow_mut().record(code, start.elapsed());
+        if matches!(&result, Err(SendError::Local(LocalError::QueueFull))) {
+            self.shard_counters
+                .queue_full
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.counters.record_send(code, latency_us);
+        self.shard_counters.record_send(cmd, code, latency_us);
         self.handle_tko(code, false);
 
         result
@@ -106,13 +132,18 @@ impl Destination {
 
     pub(crate) async fn send_probe(self: &Rc<Self>) {
         self.last_active.set(Instant::now());
-        self.stats.borrow_mut().probes_sent += 1;
+        self.counters.probes_sent.fetch_add(1, Ordering::Relaxed);
 
         let start = Instant::now();
+        let inflight = InflightGuard::new(&self.counters);
         let result = self.conn.send_probe().await;
+        drop(inflight);
         let code = code_of(&result);
+        let latency_us = start.elapsed().as_micros() as u64;
 
-        self.stats.borrow_mut().record(code, start.elapsed());
+        self.counters.record_send(code, latency_us);
+        self.shard_counters
+            .record_send(CommandKind::Version, code, latency_us);
         self.handle_tko(code, true);
     }
 
@@ -146,8 +177,12 @@ impl Destination {
 
     fn on_conn_event(self: &Rc<Self>, ev: ConnectionEvent) {
         match ev {
-            ConnectionEvent::Up => self.stats.borrow_mut().connects += 1,
-            ConnectionEvent::Closed => self.stats.borrow_mut().idle_closes += 1,
+            ConnectionEvent::Up => {
+                self.counters.connects.fetch_add(1, Ordering::Relaxed);
+            }
+            ConnectionEvent::Closed => {
+                self.counters.idle_closes.fetch_add(1, Ordering::Relaxed);
+            }
             ConnectionEvent::Down(reason) => {
                 let code = match reason {
                     DownReason::ConnectFailed(ConnectError::Timeout) => ResultCode::ConnectTimeout,
@@ -172,7 +207,7 @@ impl Destination {
     }
 
     fn stop_probing(&self) {
-        self.stats.borrow_mut().probes_sent = 0;
+        self.counters.probes_sent.store(0, Ordering::Relaxed);
         if let Some(task) = self.probe.borrow_mut().take() {
             task.abort();
         }
@@ -194,6 +229,23 @@ impl Drop for Destination {
     }
 }
 
+// we need to decrement on drop so an aborted send (probe task abort) can't
+// leak the inflight gauge
+struct InflightGuard<'a>(&'a DestinationCounters);
+
+impl<'a> InflightGuard<'a> {
+    fn new(counters: &'a DestinationCounters) -> Self {
+        counters.inflight_reqs.fetch_add(1, Ordering::Relaxed);
+        Self(counters)
+    }
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.inflight_reqs.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -202,6 +254,7 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::{get, store};
 
     use super::*;
+    use crate::destination::DestinationCountersRegistry;
     use crate::test_support::{run_local, scripted_backend_serial, ScriptedServer, Step};
     use crate::tko::{TkoEventSink, TkoTrackerMap};
 
@@ -245,11 +298,18 @@ mod tests {
         let map = TkoTrackerMap::with_sink(sink);
         let addr: Arc<str> = Arc::from(server.addr.to_string());
         let tracker = map.tracker_for(&addr, cfg.failures_until_tko);
+        let counters = DestinationCountersRegistry::new().counters_for(&addr, &tracker);
         let key = Key {
             addr,
             reply_timeout: cfg.reply_timeout,
         };
-        let dest = Destination::new(key, cfg, Arc::clone(&tracker));
+        let dest = Destination::new(
+            key,
+            cfg,
+            Arc::clone(&tracker),
+            counters,
+            ProxyCounters::new(),
+        );
         (map, tracker, dest, events)
     }
 
@@ -285,7 +345,7 @@ mod tests {
                 assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
             }
             assert_eq!(server.accept_count(), accepts, "fast-fail must do zero I/O");
-            assert_eq!(dest.stats().results[ResultCode::Tko as usize], 5);
+            assert_eq!(dest.counters().result_count(ResultCode::Tko), 5);
         })
         .await;
     }
@@ -313,7 +373,11 @@ mod tests {
                 *events.lock().unwrap(),
                 vec![TkoEvent::MarkHardTko, TkoEvent::UnMarkTko]
             );
-            assert_eq!(dest.stats().probes_sent, 0, "probes_sent resets on unmark");
+            assert_eq!(
+                dest.counters().probes_sent.load(Ordering::Relaxed),
+                0,
+                "probes_sent resets on unmark"
+            );
 
             assert!(dest.send(get(b"b")).await.is_ok());
             assert_eq!(server.accept_count(), 3);
@@ -413,11 +477,19 @@ mod tests {
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
             let (_map, tracker, dest_a, _events) = dest_for(&server, cfg(3, 1000, 10_000));
 
+            let addr_b: Arc<str> = Arc::from(server.addr.to_string());
+            let counters_b = DestinationCountersRegistry::new().counters_for(&addr_b, &tracker);
             let key_b = Key {
-                addr: Arc::from(server.addr.to_string()),
+                addr: addr_b,
                 reply_timeout: Some(Duration::from_millis(1000)),
             };
-            let dest_b = Destination::new(key_b, cfg(3, 1000, 10_000), Arc::clone(&tracker));
+            let dest_b = Destination::new(
+                key_b,
+                cfg(3, 1000, 10_000),
+                Arc::clone(&tracker),
+                counters_b,
+                ProxyCounters::new(),
+            );
 
             let _ = dest_a.send(get(b"a")).await;
             wait_until(|| tracker.is_tko()).await;
@@ -426,7 +498,107 @@ mod tests {
             let r = dest_b.send(get(b"b")).await;
             assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
             assert_eq!(server.accept_count(), accepts, "B must never connect");
-            assert_eq!(dest_b.stats().results[ResultCode::Tko as usize], 1);
+            assert_eq!(dest_b.counters().result_count(ResultCode::Tko), 1);
+        })
+        .await;
+    }
+
+    /// sends record into the thread shard: {command x result} cell plus the
+    /// latency sum - and a TKO fast-fail bumps its cell WITHOUT contributing
+    /// latency (pins the record_result/record_send split).
+    #[tokio::test]
+    async fn send_records_into_the_thread_shard() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(1),
+                Step::Write(b"EN\r\n"), // send 1: clean miss
+                Step::ReadRequests(1),
+                Step::Close, // send 2: mid-use kill -> hard mark
+            ]])
+            .await;
+
+            let (sink, _events) = collecting_sink();
+            let map = TkoTrackerMap::with_sink(sink);
+            let addr: Arc<str> = Arc::from(server.addr.to_string());
+            let tracker = map.tracker_for(&addr, 3);
+            let counters = DestinationCountersRegistry::new().counters_for(&addr, &tracker);
+            let shard = ProxyCounters::new();
+            let key = Key {
+                addr,
+                reply_timeout: Some(Duration::from_millis(1000)),
+            };
+            let dest = Destination::new(
+                key,
+                cfg(3, 1000, 10_000),
+                Arc::clone(&tracker),
+                counters,
+                Arc::clone(&shard),
+            );
+
+            let get_cell = |code: ResultCode| {
+                shard.requests[CommandKind::Get as usize][code as usize].load(Ordering::Relaxed)
+            };
+
+            dest.send(get(b"a")).await.unwrap();
+            assert_eq!(get_cell(ResultCode::Success), 1);
+            let latency_after_success = shard.latency_us_sum.load(Ordering::Relaxed);
+            assert!(latency_after_success > 0, "a real send must record latency");
+
+            let _ = dest.send(get(b"b")).await; // killed mid-use
+            wait_until(|| tracker.is_tko()).await;
+            let latency_after_mark = shard.latency_us_sum.load(Ordering::Relaxed);
+
+            let r = dest.send(get(b"c")).await;
+            assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
+            assert_eq!(get_cell(ResultCode::Tko), 1);
+            assert_eq!(
+                shard.latency_us_sum.load(Ordering::Relaxed),
+                latency_after_mark,
+                "fast-fail must not contribute latency"
+            );
+        })
+        .await;
+    }
+
+    /// THE guard test: a send future dropped mid-await (aborted task - the
+    /// probe-abort path is the production case) must not leak the inflight
+    /// gauge. Without InflightGuard this wedges at 1 forever.
+    #[tokio::test]
+    async fn inflight_gauge_survives_task_abort() {
+        run_local(async {
+            // accepts, reads the request, never replies - the send parks
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Hang]]).await;
+            // huge reply timeout: the future can only end by abort
+            let (_map, _tracker, dest, _events) = dest_for(&server, cfg(100, 10_000, 10_000));
+            let counters = Arc::clone(dest.counters());
+
+            let task = {
+                let dest = Rc::clone(&dest);
+                tokio::task::spawn_local(async move {
+                    let _ = dest.send(get(b"a")).await;
+                })
+            };
+            wait_until(|| counters.inflight_reqs.load(Ordering::Relaxed) == 1).await;
+
+            task.abort();
+            wait_until(|| counters.inflight_reqs.load(Ordering::Relaxed) == 0).await;
+        })
+        .await;
+    }
+
+    /// the boring sibling: a send that completes normally also settles the
+    /// gauge back to zero.
+    #[tokio::test]
+    async fn inflight_gauge_settles_after_completed_send() {
+        run_local(async {
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]])
+                    .await;
+            let (_map, _tracker, dest, _events) = dest_for(&server, cfg(100, 1000, 10_000));
+
+            dest.send(get(b"a")).await.unwrap();
+            assert_eq!(dest.counters().inflight_reqs.load(Ordering::Relaxed), 0);
         })
         .await;
     }

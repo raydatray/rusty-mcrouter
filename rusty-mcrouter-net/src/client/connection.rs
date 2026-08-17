@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, io, sync::Arc};
+use std::{
+    collections::VecDeque,
+    io,
+    sync::{atomic::Ordering, Arc},
+};
 
 use bytes::BytesMut;
 use rusty_mcrouter_protocol::meta::{MetaReplyDecoder, MetaRequestEncoder};
@@ -14,6 +18,7 @@ use crate::{
         config::Config,
         types::{Command, ConnectionCommand, ConnectionEvent, DownReason, Inflight, Payload},
     },
+    counters::ProxyCounters,
     error::{ConnectError, LocalError, ProtocolError, RequestError, SendError},
 };
 
@@ -22,6 +27,7 @@ pub(crate) struct Connection {
     cfg: Config,
     rx: mpsc::Receiver<ConnectionCommand>,
     events: Box<dyn Fn(ConnectionEvent)>,
+    shard_counters: Arc<ProxyCounters>,
     pending: VecDeque<Command>,   // accepted, not yet written
     inflight: VecDeque<Inflight>, // written, awaiting reply
     encoder: MetaRequestEncoder,
@@ -42,6 +48,7 @@ impl Connection {
         cfg: Config,
         rx: mpsc::Receiver<ConnectionCommand>,
         events: Box<dyn Fn(ConnectionEvent)>,
+        shard_counters: Arc<ProxyCounters>,
     ) -> Connection {
         let read_buf = BytesMut::with_capacity(cfg.read_buf_initial_capacity);
         Connection {
@@ -49,6 +56,7 @@ impl Connection {
             cfg,
             rx,
             events,
+            shard_counters,
             pending: VecDeque::new(),
             inflight: VecDeque::new(),
             encoder: MetaRequestEncoder::new(),
@@ -63,35 +71,48 @@ impl Connection {
             // unconnected - lazy wait for a request
             while self.pending.is_empty() {
                 match self.rx.recv().await {
-                    Some(ConnectionCommand::Command(cmd)) => self.pending.push_back(cmd),
+                    Some(ConnectionCommand::Command(cmd)) => {
+                        self.with_depth_gauges(|c| c.pending.push_back(cmd));
+                    }
                     Some(ConnectionCommand::CloseIdle) => {} // already closed
                     None => return,                          // dropped
                 }
             }
-            self.drain_channel();
+            self.with_depth_gauges(Self::drain_channel);
 
             // connecting
             let stream = match self.connect_with_retries().await {
                 Ok(s) => s,
                 Err(err) => {
                     // fail all pending on down
-                    self.fail_pending(SendError::Connect(err.clone()));
+                    self.with_depth_gauges(|c| {
+                        c.fail_pending(SendError::Connect(err.clone()));
+                    });
+
                     (self.events)(ConnectionEvent::Down(DownReason::ConnectFailed(err)));
                     continue 'lifecycle;
                 }
             };
+            self.shard_counters
+                .connections_opened
+                .fetch_add(1, Ordering::Relaxed);
             (self.events)(ConnectionEvent::Up);
 
             // up
             let exit = self.pipeline(stream).await;
             self.reset_stream_state(); // ALWAYS clear read buffer and ask for a fresh decoder
 
+            self.shard_counters
+                .connections_closed
+                .fetch_add(1, Ordering::Relaxed);
+
             match exit {
                 PipelineExit::Down(reason) => {
                     // for a Down(Protocol), pipeline already failed
                     // inflight with the real decode error, so the queue
                     // is empty and this is a deliberate no-op
-                    self.fail_inflight_dropped(&reason);
+
+                    self.with_depth_gauges(|c| c.fail_inflight_dropped(&reason));
                     (self.events)(ConnectionEvent::Down(reason));
                 }
                 PipelineExit::Closed => (self.events)(ConnectionEvent::Closed),
@@ -110,6 +131,9 @@ impl Connection {
                     Ok(res) => res,
                     Err(_elapsed) if retries_left > 0 => {
                         retries_left -= 1;
+                        self.shard_counters
+                            .connect_retries
+                            .fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     Err(_elapsed) => return Err(ConnectError::Timeout),
@@ -119,6 +143,11 @@ impl Connection {
             match result {
                 Ok(stream) => {
                     let _ = stream.set_nodelay(true);
+                    if retries_left < self.cfg.connect_timeout_retries {
+                        self.shard_counters
+                            .connect_success_after_retry
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     return Ok(stream);
                 }
                 // refused/retry/unreachable/resolution failure - immediately
@@ -133,7 +162,7 @@ impl Connection {
 
         // a slow connect may have consumed the entire deadline budget fail
         // overshooters immediately instead of writing dead requests to wire
-        self.expire_deadlines();
+        self.with_depth_gauges(Self::expire_deadlines);
 
         if let Err(r) = self.flush_pending(&mut writer).await {
             return PipelineExit::Down(r);
@@ -144,8 +173,11 @@ impl Connection {
             tokio::select! {
                 maybe_cmd = self.rx.recv() => match maybe_cmd {
                     Some(ConnectionCommand::Command(cmd)) => {
-                        self.pending.push_back(cmd);
-                        self.drain_channel();
+                        self.with_depth_gauges(|c| {
+                            c.pending.push_back(cmd);
+                            c.drain_channel();
+                        });
+
                         if let Err(r) = self.flush_pending(&mut writer).await {
                             return PipelineExit::Down(r);
                         }
@@ -157,7 +189,7 @@ impl Connection {
                         if self.inflight.iter().all(|slot| slot.reply_tx.is_none()) {
                             // Their replies belong to the old stream and must not
                             // become expectations on the replacement connection.
-                            self.inflight.clear();
+                            self.with_depth_gauges(|c| c.inflight.clear());
                             return PipelineExit::Closed;
                         }
                     }
@@ -170,9 +202,13 @@ impl Connection {
                     // recycle a connection to mark a healthy box down
                     Ok(0) if self.inflight.is_empty() => return PipelineExit::Closed,
                     Ok(0) => return PipelineExit::Down(DownReason::Eof),
-                    Ok(_) => {
-                        if let Err(e) = self.deliver_replies() {
-                            self.fail_inflight(SendError::Protocol(e));
+                    Ok(n) => {
+                        self.shard_counters.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
+
+
+                        if let Err(e) = self.with_depth_gauges(Self::deliver_replies) {
+                            self.with_depth_gauges(|c| {c.fail_inflight(SendError::Protocol(e));
+                            });
                             return PipelineExit::Down(DownReason::Protocol);
                         }
                     }
@@ -182,8 +218,7 @@ impl Connection {
                     Err(e) => return PipelineExit::Down(DownReason::Stream(e.kind())),
                 },
                 _ = sleep_until(deadline.unwrap_or_else(far_future)), if deadline.is_some() => {
-                    self.expire_deadlines();
-                }
+                    self.with_depth_gauges(Self::expire_deadlines);                }
             }
         }
     }
@@ -203,33 +238,49 @@ impl Connection {
     async fn flush_pending(&mut self, writer: &mut OwnedWriteHalf) -> Result<(), DownReason> {
         self.write_buf.clear();
 
-        for command in self.pending.drain(..) {
-            let expectation = match command.payload {
-                Payload::Request(request) => {
-                    match self.encoder.encode(&request, &mut self.write_buf) {
-                        Ok(expectation) => expectation,
-                        Err(err) => {
-                            // fail per request
-                            let _ = command
-                                .reply_tx
-                                .send(Err(SendError::Local(LocalError::Encode(err))));
-                            continue;
+        let encoded = self.with_depth_gauges(|c| {
+            let mut encoded = 0u64;
+
+            for command in c.pending.drain(..) {
+                let expectation = match command.payload {
+                    Payload::Request(request) => {
+                        match c.encoder.encode(&request, &mut c.write_buf) {
+                            Ok(expectation) => expectation,
+                            Err(err) => {
+                                // fail per request
+                                let _ = command
+                                    .reply_tx
+                                    .send(Err(SendError::Local(LocalError::Encode(err))));
+                                continue;
+                            }
                         }
                     }
-                }
-                Payload::VersionProbe => self.encoder.encode_version_probe(&mut self.write_buf),
-            };
-            self.inflight.push_back(Inflight {
-                expectation,
-                reply_tx: Some(command.reply_tx),
-                deadline: command.deadline,
-            });
-        }
+                    Payload::VersionProbe => c.encoder.encode_version_probe(&mut c.write_buf),
+                };
+                c.inflight.push_back(Inflight {
+                    expectation,
+                    reply_tx: Some(command.reply_tx),
+                    deadline: command.deadline,
+                });
+                encoded += 1;
+            }
+            encoded
+        });
 
         if self.write_buf.is_empty() {
             // every drained command failed to encode - nothing went on wire
             return Ok(());
         }
+
+        self.shard_counters
+            .write_batches
+            .fetch_add(1, Ordering::Relaxed);
+        self.shard_counters
+            .batched_requests
+            .fetch_add(encoded, Ordering::Relaxed);
+        self.shard_counters
+            .bytes_written
+            .fetch_add(self.write_buf.len() as u64, Ordering::Relaxed);
 
         let write = writer.write_all(&self.write_buf);
         match self.cfg.write_timeout {
@@ -341,6 +392,41 @@ impl Connection {
         self.read_buf.clear();
         self.decoder = MetaReplyDecoder::new();
     }
+
+    fn with_depth_gauges<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let (p0, i0) = (self.pending.len(), self.inflight.len());
+
+        let out = f(self);
+
+        let dp = self.pending.len() as i64 - p0 as i64;
+        let di = self.inflight.len() as i64 - i0 as i64;
+
+        if dp != 0 {
+            self.shard_counters
+                .pending_reqs
+                .fetch_add(dp, Ordering::Relaxed);
+        }
+
+        if di != 0 {
+            self.shard_counters
+                .inflight_reqs
+                .fetch_add(di, Ordering::Relaxed);
+        }
+
+        out
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.shard_counters
+            .pending_reqs
+            .fetch_sub(self.pending.len() as i64, Ordering::Relaxed);
+
+        self.shard_counters
+            .inflight_reqs
+            .fetch_sub(self.inflight.len() as i64, Ordering::Relaxed);
+    }
 }
 
 fn far_future() -> Instant {
@@ -367,6 +453,7 @@ mod tests {
             Config::default(),
             rx,
             Box::new(|_| {}),
+            ProxyCounters::new(),
         )
     }
 
@@ -470,8 +557,14 @@ mod tests {
 
         // inflight: slot KEPT for FIFO alignment, caller failed as sent
         assert_eq!(c.inflight.len(), 2);
-        assert!(c.inflight[0].reply_tx.is_none(), "expired slot must become a tombstone");
-        assert!(c.inflight[1].reply_tx.is_some(), "unexpired slot must stay live");
+        assert!(
+            c.inflight[0].reply_tx.is_none(),
+            "expired slot must become a tombstone"
+        );
+        assert!(
+            c.inflight[1].reply_tx.is_some(),
+            "unexpired slot must stay live"
+        );
         assert!(matches!(
             rx_inflight.try_recv().unwrap(),
             Err(SendError::Request(RequestError::Timeout { sent: true }))
@@ -482,6 +575,9 @@ mod tests {
         c.pending.push_front(cmd_no_deadline);
         c.expire_deadlines();
         assert_eq!(c.pending.len(), 2);
-        assert!(rx_nd.try_recv().is_err(), "no-deadline command must not be failed");
+        assert!(
+            rx_nd.try_recv().is_err(),
+            "no-deadline command must not be failed"
+        );
     }
 }
