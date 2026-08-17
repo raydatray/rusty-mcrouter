@@ -171,7 +171,10 @@ mod tests {
     fn config_kinds_map_one_to_one() {
         let table = [
             (FailoverErrorKind::Timeout, ResultCode::Timeout),
-            (FailoverErrorKind::ConnectTimeout, ResultCode::ConnectTimeout),
+            (
+                FailoverErrorKind::ConnectTimeout,
+                ResultCode::ConnectTimeout,
+            ),
             (FailoverErrorKind::ConnectError, ResultCode::ConnectError),
             (FailoverErrorKind::RemoteError, ResultCode::RemoteError),
             (

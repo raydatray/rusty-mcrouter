@@ -54,8 +54,7 @@ mod tests {
 
     #[tokio::test]
     async fn propagates_backend_protocol_error() {
-        let backend =
-            MockBackend::failing(SendError::Protocol(ProtocolError::Desync("bad reply")));
+        let backend = MockBackend::failing(SendError::Protocol(ProtocolError::Desync("bad reply")));
         let route = DestinationRoute::<MockBackend>::new(backend);
 
         let result = route.route(get(b"foo")).await;

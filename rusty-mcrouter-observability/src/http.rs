@@ -131,7 +131,10 @@ mod tests {
         // no head terminator: the request times out server-side; the
         // NEXT scrape must still work
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(b"garbage without terminator").await.unwrap();
+        stream
+            .write_all(b"garbage without terminator")
+            .await
+            .unwrap();
         drop(stream);
 
         let response = request(addr, "GET /metrics HTTP/1.1\r\n\r\n").await;

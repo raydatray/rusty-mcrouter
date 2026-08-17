@@ -2,6 +2,7 @@ mod config;
 mod connection;
 mod handle;
 mod message;
+#[allow(clippy::module_inception)]
 mod proxy;
 mod proxy_set;
 mod thread;

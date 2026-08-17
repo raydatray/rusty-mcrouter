@@ -299,6 +299,30 @@ impl Slot {
     }
 }
 
+struct RouteTarget {
+    handle: ProxyHandle,
+    same_thread: bool,
+    route: Rc<dyn DynRoute>,
+}
+
+async fn route_one(target: RouteTarget, req: Request) -> Reply {
+    let RouteTarget {
+        handle,
+        same_thread,
+        route,
+    } = target;
+
+    if same_thread {
+        route.route_dyn(req).await.unwrap_or_else(|_| {
+            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
+                b"backend unavailable",
+            ))))
+        })
+    } else {
+        handle.send_request(req).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering;
@@ -346,11 +370,7 @@ mod tests {
         loop {
             let text = String::from_utf8_lossy(&buf);
             if text.matches("\r\n").count() >= n {
-                return text
-                    .split("\r\n")
-                    .take(n)
-                    .map(str::to_owned)
-                    .collect();
+                return text.split("\r\n").take(n).map(str::to_owned).collect();
             }
             let mut chunk = [0u8; 1024];
             let read = client.read(&mut chunk).await.unwrap();
@@ -400,29 +420,5 @@ mod tests {
             assert_eq!(counters.processing.load(Ordering::Relaxed), 0);
         })
         .await;
-    }
-}
-
-struct RouteTarget {
-    handle: ProxyHandle,
-    same_thread: bool,
-    route: Rc<dyn DynRoute>,
-}
-
-async fn route_one(target: RouteTarget, req: Request) -> Reply {
-    let RouteTarget {
-        handle,
-        same_thread,
-        route,
-    } = target;
-
-    if same_thread {
-        route.route_dyn(req).await.unwrap_or_else(|_| {
-            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
-                b"backend unavailable",
-            ))))
-        })
-    } else {
-        handle.send_request(req).await
     }
 }

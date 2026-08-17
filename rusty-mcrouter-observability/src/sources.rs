@@ -123,7 +123,11 @@ impl MetricsSource for TkoSource {
                 pool,
                 gate.num_destinations_tko() as i64,
             );
-            out.counter("mcrouter_fail_open_entered_total", pool, gate.entered_total());
+            out.counter(
+                "mcrouter_fail_open_entered_total",
+                pool,
+                gate.entered_total(),
+            );
             out.counter("mcrouter_fail_open_exited_total", pool, gate.exited_total());
         }
     }
@@ -234,9 +238,9 @@ mod tests {
         let text = render(BackendRequestsSource {
             shards: vec![Arc::clone(&s1), Arc::clone(&s2)],
         });
-        assert!(text.contains(
-            "mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 2\n"
-        ));
+        assert!(
+            text.contains("mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 2\n")
+        );
         assert!(text.contains("mcrouter_backend_requests_total{command=\"ms\",result=\"tko\"} 1\n"));
 
         let text = render(BackendScalarsSource {
