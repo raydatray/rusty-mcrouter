@@ -351,8 +351,6 @@ pub struct BackendCounters {
     pub connect_success_after_retry: AtomicU64,
     pub write_batches: AtomicU64,
     pub batched_requests: AtomicU64,     // batch size avg = promql quotient
-    pub socket_writes: AtomicU64,
-    pub socket_partial_writes: AtomicU64,
     pub queue_full: AtomicU64,           // try_send shedding at the actor channel
     pub bytes_read: AtomicU64,
     pub bytes_written: AtomicU64,
@@ -423,7 +421,6 @@ families; names follow prometheus conventions, with the upstream
 | `mcrouter_backend_connections_opened_total` / `_closed_total` | counter | — |
 | `mcrouter_backend_connect_retries_total` / `_retry_successes_total` | counter | — |
 | `mcrouter_backend_write_batches_total` / `_batched_requests_total` | counter | — (avg batch = promql) |
-| `mcrouter_backend_socket_writes_total` / `_partial_writes_total` | counter | — |
 | `mcrouter_backend_queue_full_total` | counter | — actor channel shedding |
 | `mcrouter_backend_bytes_{read,written}_total` | counter | — |
 | `mcrouter_backend_pending_reqs` / `_inflight_reqs` | gauge | — summed over shards |
@@ -492,6 +489,11 @@ boundaries that keep this list honest:
   source.
 - process metrics (`process_*`) come from a stock collector, not
   hand-rolled.
+- **a counter field may only exist if its emit site can be named in
+  one sentence.** this rule already killed `socket_writes` /
+  `socket_partial_writes` (upstream observes raw nonblocking write
+  syscalls; our `write_all`-over-one-buffer path makes writes ≈
+  batches and partials unobservable — see catalog).
 
 the full upstream inventory (232 stats + 76 per-command names) with a
 port/fold/defer/n-a decision for every entry lives in the companion

@@ -120,7 +120,7 @@ ascii commands.
 | destination_max_{pending,inflight}_reqs | promql | max_over_time |
 | destination_inflight_shadow_reqs (+max) | defer | shadow routes |
 | destination_reqs_dirty_buffer_*, destination_reqs_total_sum | n/a | write-buffer reuse accounting internal to upstream's client implementation; our write path (encode into one buf, single write_all) has no analogous state |
-| num_socket_writes, num_socket_partial_writes | port | counters in the connection actor write path |
+| num_socket_writes, num_socket_partial_writes | n/a | upstream observes raw nonblocking write syscalls and their short-write partials; our write path is `write_all` over one batch buffer, so writes ≈ `write_batches` (already ported) and partials are not observable |
 | replies_compressed, replies_not_compressed, reply_traffic_{before,after}_compression | n/a | no compression |
 
 ## outstanding-request queues
