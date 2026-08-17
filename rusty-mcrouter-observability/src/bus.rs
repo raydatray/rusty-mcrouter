@@ -9,7 +9,7 @@ use std::{
 use rusty_mcrouter_net::tko::TkoEventSink;
 use tokio::time::Instant;
 
-use crate::events::Event;
+use crate::{events::Event, logging};
 
 pub struct EventSender {
     tx: tokio::sync::mpsc::Sender<Event>,
@@ -78,8 +78,8 @@ impl EventConsumer {
         let mut last_seen = 0u64;
         let mut last_warned = Instant::now() - DROP_WARN_INTERVAL;
 
-        while let Some(_event) = self.rx.recv().await {
-            // write out the log event
+        while let Some(event) = self.rx.recv().await {
+            logging::write(&event);
             self.warn_if_shedding_events(&mut last_seen, &mut last_warned);
         }
     }
