@@ -91,6 +91,22 @@ impl TkoTrackerMap {
             .collect()
     }
 
+    pub fn pool_snapshot(&self) -> Vec<Arc<PoolTkoTracker>> {
+        let mut pools = self.pool_trackers.lock().unwrap();
+
+        let mut live = Vec::with_capacity(pools.len());
+
+        pools.retain(|_, weak| match weak.upgrade() {
+            Some(gate) => {
+                live.push(gate);
+                true
+            }
+            None => false,
+        });
+
+        live
+    }
+
     pub(crate) fn emit(&self, record: TkoEventRecord) {
         (self.sink)(record)
     }
@@ -148,6 +164,27 @@ mod tests {
         assert!(Arc::ptr_eq(&a, &b), "same pool must share one gate");
         let c = map.pool_tracker_for("other", FailOpenThresholds { enter: 3, exit: 1 });
         assert!(!Arc::ptr_eq(&a, &c));
+    }
+
+    /// pool_snapshot returns live gates and prunes dead entries in the same
+    /// pass - a dropped pool leaves the scrape output AND the map.
+    #[test]
+    fn pool_snapshot_returns_live_and_prunes_dead() {
+        let map = TkoTrackerMap::with_sink(null_sink());
+        let a = map.pool_tracker_for("pool_a", FailOpenThresholds { enter: 3, exit: 1 });
+        let _b = map.pool_tracker_for("pool_b", FailOpenThresholds { enter: 3, exit: 1 });
+
+        let snap = map.pool_snapshot();
+        assert_eq!(snap.len(), 2);
+
+        drop(snap); // snapshot Arcs must not keep pool_a alive
+        drop(a);
+        let snap = map.pool_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(&**snap[0].name(), "pool_b");
+
+        // and the entry is actually gone, not just skipped
+        assert_eq!(map.pool_trackers.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -301,6 +338,10 @@ mod tests {
             vec![TkoEvent::EnterFailOpen],
             "enter must fire exactly once"
         );
+        // the scrape accessors inherit the same exactly-once choreography
+        assert!(gate.fail_open());
+        assert_eq!(gate.entered_total(), 1);
+        assert_eq!(gate.exited_total(), 0);
 
         // recover marked boxes; the drain to exit=1 flips the gate back
         for (t, tok) in boxes.iter().take(3) {
@@ -311,6 +352,9 @@ mod tests {
             vec![TkoEvent::EnterFailOpen, TkoEvent::ExitFailOpen],
             "exit must fire exactly once"
         );
+        assert!(!gate.fail_open());
+        assert_eq!(gate.entered_total(), 1);
+        assert_eq!(gate.exited_total(), 1);
 
         // gate admits marks again
         assert!(boxes[3]
