@@ -13,3 +13,5 @@ testing = []
 
 [dependencies]
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
+tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "macros", "time"] }
+tracing = "0.1.44"
