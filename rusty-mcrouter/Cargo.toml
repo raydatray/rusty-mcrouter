@@ -18,6 +18,7 @@ rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
 rusty-mcrouter-observability = { path = "../rusty-mcrouter-observability" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
 tokio = { workspace = true, features = ["macros", "net", "rt", "time", "sync"] }
+tracing = "0.1.44"
 
 [dev-dependencies]
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net", features = ["testing"] }

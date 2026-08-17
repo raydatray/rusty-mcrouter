@@ -10,11 +10,16 @@ use tokio::process::{Child, Command};
 
 struct Stack {
     router_addr: SocketAddr,
+    metrics_addr: SocketAddr,
     _router: Child,
     _config_path: PathBuf,
 }
 
 async fn start_router(config_body: &str, tag: u16) -> Stack {
+    start_router_with_args(config_body, tag, &[]).await
+}
+
+async fn start_router_with_args(config_body: &str, tag: u16, extra_args: &[&str]) -> Stack {
     let config_path = std::env::temp_dir().join(format!("rusty-mcrouter-mock-e2e-{tag}.json"));
     std::fs::write(&config_path, config_body).unwrap();
 
@@ -23,6 +28,9 @@ async fn start_router(config_body: &str, tag: u16) -> Stack {
         .arg(&config_path)
         .arg("--num-proxies")
         .arg("1")
+        .arg("--metrics-addr")
+        .arg("127.0.0.1:0")
+        .args(extra_args)
         .env("RUSTY_MCROUTER_LISTEN", "127.0.0.1:0")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -42,12 +50,36 @@ async fn start_router(config_body: &str, tag: u16) -> Stack {
         .expect("expected READY prefix on stdout")
         .parse()
         .unwrap();
+    let metrics = lines
+        .next_line()
+        .await
+        .unwrap()
+        .expect("eof before METRICS line");
+    let metrics_addr: SocketAddr = metrics
+        .strip_prefix("METRICS ")
+        .expect("expected METRICS prefix on stdout")
+        .parse()
+        .unwrap();
 
     Stack {
         router_addr,
+        metrics_addr,
         _router: router,
         _config_path: config_path,
     }
+}
+
+/// one GET /metrics scrape, returning the response body.
+async fn scrape(addr: SocketAddr) -> String {
+    let mut conn = TcpStream::connect(addr).await.unwrap();
+    conn.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    conn.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    response.split_once("\r\n\r\n").unwrap().1.to_string()
 }
 
 async fn start_stack() -> Stack {
@@ -163,6 +195,76 @@ async fn opaque_and_key_echo_survive_the_hop() {
         b"HD c2 s2 kme2e_echo Otag\r\n",
     )
     .await;
+}
+
+/// the observability finale: traffic shows up on /metrics with the
+/// right families, labels and values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_endpoint_reports_traffic() {
+    let fx = start_stack().await;
+    exchange(fx.router_addr, b"mg seeded_foo v\r\n", b"VA 3\r\nbar\r\n").await;
+    exchange(fx.router_addr, b"mg mock_e2e_missing v\r\n", b"EN\r\n").await;
+
+    let body = scrape(fx.metrics_addr).await;
+    assert!(
+        body.contains("mcrouter_requests_total{command=\"mg\"} 2\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 2\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("mcrouter_destination_up{destination=\"") && body.contains("\"} 1\n"),
+        "{body}"
+    );
+    assert!(body.contains("mcrouter_proxies 1\n"), "{body}");
+    assert!(body.contains("mcrouter_build_info{version="), "{body}");
+    // gauges settled after the exchanges closed their connections
+    assert!(body.contains("mcrouter_backend_pending_reqs 0\n"), "{body}");
+}
+
+/// a dead backend marks hard on first contact (connect refused) and the
+/// scrape shows it: tko gauge up, destination down, tko-result counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_endpoint_reports_tko() {
+    // bind-then-drop: the port is (almost certainly) unbound
+    let dead_addr = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let config_body = format!(
+        r#"{{ "pools": {{ "memcached": {{ "servers": ["{dead_addr}"] }} }}, "route": "PoolRoute|memcached" }}"#
+    );
+    let fx = start_router_with_args(&config_body, dead_addr.port(), &[]).await;
+
+    // first send fails and marks hard; retry until the mark lands
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut conn = TcpStream::connect(fx.router_addr).await.unwrap();
+        conn.write_all(b"mg tko_probe v\r\n").await.unwrap();
+        // the reply is an error line; the router keeps the connection
+        // open, so read one bounded chunk instead of to-close
+        let mut chunk = [0u8; 1024];
+        let _ = tokio::time::timeout(Duration::from_secs(2), conn.read(&mut chunk)).await;
+        drop(conn);
+
+        let body = scrape(fx.metrics_addr).await;
+        if body.contains("mcrouter_tko{kind=\"hard\"} 1\n") {
+            assert!(
+                body.contains(&format!(
+                    "mcrouter_destination_up{{destination=\"{dead_addr}\"}} 0\n"
+                )),
+                "{body}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "hard tko never appeared on /metrics: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

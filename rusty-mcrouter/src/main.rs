@@ -1,8 +1,17 @@
 use clap::Parser;
 use rusty_mcrouter_config::parse_file;
 use rusty_mcrouter_net::{
+    counters::ProxyCounters,
     destination::{self, DestinationCountersRegistry},
     tko::TkoTrackerMap,
+};
+use rusty_mcrouter_observability::{
+    frontend::FrontendCounters,
+    sources::{
+        BackendRequestsSource, BackendScalarsSource, DestinationSource, FrontendRequestsSource,
+        FrontendScalarsSource, SelfSource, TkoSource,
+    },
+    Observability,
 };
 use tokio::sync::mpsc;
 
@@ -11,7 +20,7 @@ use std::{
     net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 mod proxy;
 
@@ -57,6 +66,14 @@ struct Args {
     )]
     num_listening_sockets: Option<usize>,
 
+    #[arg(
+        long,
+        value_name = "ADDR",
+        env = "RUSTY_MCROUTER_METRICS_ADDR",
+        help = "address for the prometheus /metrics endpoint; unset disables it"
+    )]
+    metrics_addr: Option<String>,
+
     #[command(flatten)]
     options: RouterOptions,
 }
@@ -87,7 +104,11 @@ struct RouterOptions {
     )]
     failures_until_tko: u64,
 
-    #[arg(long, default_value_t = 10_000, help = "first probe delay after a TKO mark, ms")]
+    #[arg(
+        long,
+        default_value_t = 10_000,
+        help = "first probe delay after a TKO mark, ms"
+    )]
     probe_delay_initial_ms: u64,
 
     #[arg(long, default_value_t = 60_000, help = "probe backoff ceiling, ms")]
@@ -145,12 +166,25 @@ fn main() -> anyhow::Result<()> {
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| anyhow::anyhow!("could not resolve listen address: {}", args.listen))?;
+    let metrics_addr = args
+        .metrics_addr
+        .as_deref()
+        .map(|addr| {
+            addr.to_socket_addrs()?
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("could not resolve metrics address: {addr}"))
+        })
+        .transpose()?;
+
+    // first: installs the tracing subscriber (logs -> stderr; stdout is
+    // the READY/METRICS control channel)
+    let mut observability = Observability::new(1024);
 
     let config = Arc::new(parse_file(&args.config)?);
 
     // the cross-thread objects: per-server health and per-server counters,
     // shared by every proxy thread's destinations, atomics only
-    let tko_map = TkoTrackerMap::new();
+    let tko_map = TkoTrackerMap::with_sink(observability.events().tko_sink());
     let counters_registry = DestinationCountersRegistry::new();
     let defaults = destination_defaults(&args.options);
     let sweep_interval = Duration::from_millis(args.options.reset_inactive_connection_interval_ms);
@@ -175,6 +209,10 @@ fn main() -> anyhow::Result<()> {
     let mut bound_addr: Option<SocketAddr> = None;
     let mut work_rxs_iter = work_rxs.into_iter();
     let mut proxy_rxs_iter = proxy_rxs.into_iter();
+    // per-thread counter shards, created here so the scrape sources hold
+    // the same Arcs the threads write
+    let mut proxy_shards = Vec::with_capacity(args.num_proxies);
+    let mut frontend_shards = Vec::with_capacity(args.num_proxies);
 
     for proxy_id in 0..args.num_proxies {
         let has_listener = proxy_id < num_listening_sockets;
@@ -192,6 +230,11 @@ fn main() -> anyhow::Result<()> {
             None
         };
 
+        let proxy_counters = ProxyCounters::new();
+        let frontend_counters = FrontendCounters::new();
+        proxy_shards.push(Arc::clone(&proxy_counters));
+        frontend_shards.push(Arc::clone(&frontend_counters));
+
         let cfg = ProxyThreadConfig {
             proxy_id,
             config: Arc::clone(&config),
@@ -202,6 +245,9 @@ fn main() -> anyhow::Result<()> {
             listener_config,
             tko_map: Arc::clone(&tko_map),
             counters_registry: Arc::clone(&counters_registry),
+            proxy_counters,
+            frontend_counters,
+            events: observability.events().clone(),
             defaults: defaults.clone(),
             sweep_interval,
         };
@@ -238,9 +284,40 @@ fn main() -> anyhow::Result<()> {
     drop(proxy_txs);
     drop(proxies);
 
+    observability.register(Box::new(BackendScalarsSource {
+        shards: proxy_shards.clone(),
+    }));
+    observability.register(Box::new(BackendRequestsSource {
+        shards: proxy_shards,
+    }));
+    observability.register(Box::new(FrontendScalarsSource {
+        shards: frontend_shards.clone(),
+    }));
+    observability.register(Box::new(FrontendRequestsSource {
+        shards: frontend_shards,
+    }));
+    observability.register(Box::new(TkoSource {
+        map: Arc::clone(&tko_map),
+    }));
+    observability.register(Box::new(DestinationSource {
+        registry: Arc::clone(&counters_registry),
+    }));
+    observability.register(Box::new(SelfSource {
+        dropped: observability.events().dropped_counter(),
+        num_proxies: args.num_proxies,
+        start_unix_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    }));
+    let metrics_bound = observability.spawn(metrics_addr)?;
+
     let addr =
         bound_addr.ok_or_else(|| anyhow::anyhow!("no proxy thread reported a bound address"))?;
     println!("READY {addr}");
+    if let Some(metrics) = metrics_bound {
+        println!("METRICS {metrics}");
+    }
     std::io::stdout().flush().ok();
     eprintln!(
         "rusty-mcrouter listening on {} with {} proxy threads ({} listening sockets) -> {}",

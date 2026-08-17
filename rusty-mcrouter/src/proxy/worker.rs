@@ -46,8 +46,7 @@ impl ConnectionWorker {
             let tokio_stream = match tokio::net::TcpStream::from_std(std_stream) {
                 Ok(s) => s,
                 Err(e) => {
-                    // todo - logger
-                    eprintln!("could not reregister accepted stream on worker runtime: {e}");
+                    tracing::warn!(worker = self.current_id, error = %e, "could not reregister accepted stream on worker runtime");
                     continue;
                 }
             };
@@ -66,8 +65,7 @@ impl ConnectionWorker {
 
             tokio::task::spawn_local(async move {
                 if let Err(e) = connection.run().await {
-                    // todo - logger
-                    eprintln!("connection error: {e}");
+                    tracing::warn!(error = %e, "connection error");
                 }
                 counters.client_connections.fetch_sub(1, Ordering::Relaxed);
             });
