@@ -95,7 +95,7 @@ impl PoolTkoTracker {
         }
     }
 
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &Arc<str> {
         &self.name
     }
 }
@@ -119,7 +119,10 @@ mod tests {
         let g = gate(2, 1);
         assert_eq!(g.inc_num_destinations_tko(), GateDecision::Admitted);
         assert_eq!(g.inc_num_destinations_tko(), GateDecision::Admitted);
-        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Refused { just_entered: true }); // crossing call
+        assert_eq!(
+            g.inc_num_destinations_tko(),
+            GateDecision::Refused { just_entered: true }
+        ); // crossing call
         assert_eq!(count(&g), 2, "counter must never exceed enter");
         assert!(g.fail_open.load(Ordering::SeqCst));
     }
@@ -130,8 +133,16 @@ mod tests {
     fn inc_while_fail_open_returns_without_incrementing() {
         let g = gate(1, 1);
         assert_eq!(g.inc_num_destinations_tko(), GateDecision::Admitted);
-        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Refused { just_entered: true });
-        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Refused { just_entered: false });
+        assert_eq!(
+            g.inc_num_destinations_tko(),
+            GateDecision::Refused { just_entered: true }
+        );
+        assert_eq!(
+            g.inc_num_destinations_tko(),
+            GateDecision::Refused {
+                just_entered: false
+            }
+        );
         assert_eq!(count(&g), 1);
     }
 
@@ -157,7 +168,10 @@ mod tests {
         let g = gate(2, 1);
         g.inc_num_destinations_tko();
         g.inc_num_destinations_tko();
-        assert_eq!(g.inc_num_destinations_tko(), GateDecision::Refused { just_entered: true }); // refused, now open
+        assert_eq!(
+            g.inc_num_destinations_tko(),
+            GateDecision::Refused { just_entered: true }
+        ); // refused, now open
         g.dec_num_destinations_tko(); // 2 -> 1
         assert!(g.dec_num_destinations_tko()); // exit flip
         assert_eq!(g.inc_num_destinations_tko(), GateDecision::Admitted); // admitted again

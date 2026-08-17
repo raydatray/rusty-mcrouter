@@ -91,7 +91,7 @@ impl TkoTrackerMap {
             .collect()
     }
 
-    pub(crate) fn emit(&self, record: &TkoEventRecord<'_>) {
+    pub(crate) fn emit(&self, record: TkoEventRecord) {
         (self.sink)(record)
     }
 
@@ -179,7 +179,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = {
             let events = Arc::clone(&events);
-            Box::new(move |rec: &TkoEventRecord<'_>| {
+            Box::new(move |rec: TkoEventRecord| {
                 events.lock().unwrap().push(rec.event);
             }) as TkoEventSink
         };
@@ -289,9 +289,13 @@ mod tests {
             assert!(t.record_hard_failure(*tok, ResultCode::ConnectError));
         }
         // 4th and 5th: refused, unmarked; only the crossing call emits
-        assert!(!boxes[3].0.record_hard_failure(boxes[3].1, ResultCode::ConnectError));
+        assert!(!boxes[3]
+            .0
+            .record_hard_failure(boxes[3].1, ResultCode::ConnectError));
         assert!(!boxes[3].0.is_tko());
-        assert!(!boxes[4].0.record_hard_failure(boxes[4].1, ResultCode::ConnectError));
+        assert!(!boxes[4]
+            .0
+            .record_hard_failure(boxes[4].1, ResultCode::ConnectError));
         assert_eq!(
             *events.lock().unwrap(),
             vec![TkoEvent::EnterFailOpen],
@@ -309,7 +313,9 @@ mod tests {
         );
 
         // gate admits marks again
-        assert!(boxes[3].0.record_hard_failure(boxes[3].1, ResultCode::ConnectError));
+        assert!(boxes[3]
+            .0
+            .record_hard_failure(boxes[3].1, ResultCode::ConnectError));
         assert!(boxes[3].0.is_hard_tko());
     }
 
