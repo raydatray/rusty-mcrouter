@@ -256,10 +256,10 @@ impl TkoTracker {
             return;
         };
 
-        map.emit(&TkoEventRecord {
+        map.emit(TkoEventRecord {
             event,
-            server: &self.key,
-            pool: pool.map(|p| p.name()),
+            server: Arc::clone(&self.key),
+            pool: pool.map(|p| Arc::clone(p.name())),
             reason,
             consecutive_failures: self.consecutive_failures(),
             global_soft_tkos: self.global.soft_tkos.load(Ordering::Relaxed),
@@ -417,7 +417,10 @@ mod tests {
         assert_eq!(a.reason(), ResultCode::Timeout);
 
         assert!(b.record_hard_failure(tok_b, ResultCode::ConnectError));
-        assert!(b.is_hard_tko(), "conversion must not have consumed a pool slot");
+        assert!(
+            b.is_hard_tko(),
+            "conversion must not have consumed a pool slot"
+        );
     }
 
     #[test]
@@ -465,6 +468,10 @@ mod tests {
         assert!(!b.is_tko());
         assert!(!b.record_hard_failure(tok_b, ResultCode::ConnectError)); // also refused
         assert!(!b.is_tko());
-        assert_eq!(map.global_tkos().total(), 1, "only the admitted mark counts");
+        assert_eq!(
+            map.global_tkos().total(),
+            1,
+            "only the admitted mark counts"
+        );
     }
 }

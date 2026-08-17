@@ -125,8 +125,7 @@ impl Destination {
             if code.is_hard_tko_error() && self.tracker.record_hard_failure(self.token, code) {
                 self.tracker.emit(TkoEvent::MarkHardTko, code, None);
                 self.start_probing();
-            } else if code.is_soft_tko_error()
-                && self.tracker.record_soft_failure(self.token, code)
+            } else if code.is_soft_tko_error() && self.tracker.record_soft_failure(self.token, code)
             {
                 self.tracker.emit(TkoEvent::MarkSoftTko, code, None);
                 self.start_probing();
@@ -210,7 +209,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = {
             let events = Arc::clone(&events);
-            Box::new(move |rec: &crate::tko::TkoEventRecord<'_>| {
+            Box::new(move |rec: crate::tko::TkoEventRecord| {
                 events.lock().unwrap().push(rec.event);
             }) as TkoEventSink
         };
@@ -334,7 +333,9 @@ mod tests {
             let r = dest.send(get(b"a")).await;
             assert!(matches!(
                 r,
-                Err(SendError::Request(crate::error::RequestError::Timeout { sent: true }))
+                Err(SendError::Request(crate::error::RequestError::Timeout {
+                    sent: true
+                }))
             ));
             assert!(!tracker.is_tko(), "one timeout of two must not mark");
 
