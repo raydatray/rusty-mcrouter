@@ -1,6 +1,10 @@
-use std::rc::Rc;
+use std::{
+    rc::Rc,
+    sync::{atomic::Ordering, Arc},
+};
 
 use rusty_mcrouter_core::DynRoute;
+use rusty_mcrouter_observability::frontend::FrontendCounters;
 use tokio::sync::mpsc;
 
 use crate::proxy::{config::ThreadMode, connection::Connection, proxy_set::ProxySet};
@@ -14,6 +18,7 @@ pub struct ConnectionWorker {
     local_route: Rc<dyn DynRoute>,
     proxies: ProxySet,
     mode: ThreadMode,
+    counters: Arc<FrontendCounters>,
     work_rx: mpsc::Receiver<std::net::TcpStream>,
 }
 
@@ -23,6 +28,7 @@ impl ConnectionWorker {
         local_route: Rc<dyn DynRoute>,
         proxies: ProxySet,
         mode: ThreadMode,
+        counters: Arc<FrontendCounters>,
         work_rx: mpsc::Receiver<std::net::TcpStream>,
     ) -> Self {
         Self {
@@ -30,6 +36,7 @@ impl ConnectionWorker {
             local_route,
             proxies,
             mode,
+            counters,
             work_rx,
         }
     }
@@ -51,13 +58,18 @@ impl ConnectionWorker {
                 Rc::clone(&self.local_route),
                 self.proxies.clone(),
                 self.mode,
+                Arc::clone(&self.counters),
             );
+
+            let counters = Arc::clone(&self.counters);
+            counters.client_connections.fetch_add(1, Ordering::Relaxed);
 
             tokio::task::spawn_local(async move {
                 if let Err(e) = connection.run().await {
                     // todo - logger
                     eprintln!("connection error: {e}");
                 }
+                counters.client_connections.fetch_sub(1, Ordering::Relaxed);
             });
         }
     }
