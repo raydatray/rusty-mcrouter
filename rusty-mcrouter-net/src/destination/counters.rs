@@ -17,6 +17,9 @@ pub struct DestinationCounters {
     pub addr: Arc<str>,
     pub tracker: Arc<TkoTracker>,
     pub requests: [AtomicU64; RESULT_CODE_COUNT],
+    pub probes_sent: AtomicU64,
+    pub connects: AtomicU64,
+    pub idle_closes: AtomicU64,
     pub latency_us_sum: AtomicU64,
     pub inflight_reqs: AtomicI64,
 }
@@ -27,6 +30,9 @@ impl DestinationCounters {
             addr,
             tracker,
             requests: [ZERO_U64; RESULT_CODE_COUNT],
+            probes_sent: AtomicU64::new(0),
+            connects: AtomicU64::new(0),
+            idle_closes: AtomicU64::new(0),
             latency_us_sum: AtomicU64::new(0),
             inflight_reqs: AtomicI64::new(0),
         })
@@ -39,6 +45,10 @@ impl DestinationCounters {
 
     pub fn record_result(&self, code: ResultCode) {
         self.requests[code as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn result_count(&self, code: ResultCode) -> u64 {
+        self.requests[code as usize].load(Ordering::Relaxed)
     }
 }
 

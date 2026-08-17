@@ -9,19 +9,30 @@ use std::{
 use tokio::time::Instant;
 
 use crate::{
-    destination::{config::Config, destination::Destination, key::Key},
+    counters::ProxyCounters,
+    destination::{
+        config::Config, destination::Destination, key::Key, DestinationCountersRegistry,
+    },
     tko::{PoolTkoTracker, TkoTrackerMap},
 };
 
 pub struct Map {
     tko_map: Arc<TkoTrackerMap>,
+    counters_registry: Arc<DestinationCountersRegistry>,
+    shard_counters: Arc<ProxyCounters>,
     destinations: RefCell<HashMap<Key, Weak<Destination>>>,
 }
 
 impl Map {
-    pub fn new(tko_map: Arc<TkoTrackerMap>) -> Rc<Self> {
+    pub fn new(
+        tko_map: Arc<TkoTrackerMap>,
+        shard_counters: Arc<ProxyCounters>,
+        counters_registry: Arc<DestinationCountersRegistry>,
+    ) -> Rc<Self> {
         Rc::new(Self {
             tko_map,
+            shard_counters,
+            counters_registry,
             destinations: RefCell::new(HashMap::new()),
         })
     }
@@ -51,7 +62,14 @@ impl Map {
             tracker.set_pool_tracker(gate);
         }
 
-        let dest = Destination::new(key.clone(), cfg.clone(), tracker);
+        let counters = self.counters_registry.counters_for(&key.addr, &tracker);
+        let dest = Destination::new(
+            key.clone(),
+            cfg.clone(),
+            tracker,
+            counters,
+            Arc::clone(&self.shard_counters),
+        );
 
         self.destinations
             .borrow_mut()
@@ -98,6 +116,8 @@ impl Map {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use rusty_mcrouter_protocol::test_support::get;
 
     use super::*;
@@ -108,6 +128,14 @@ mod tests {
 
     fn tko_map() -> Arc<TkoTrackerMap> {
         TkoTrackerMap::with_sink(Box::new(|_| {}))
+    }
+
+    fn test_map() -> Rc<Map> {
+        Map::new(
+            tko_map(),
+            ProxyCounters::new(),
+            DestinationCountersRegistry::new(),
+        )
     }
 
     fn test_cfg() -> Config {
@@ -135,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn destination_dedups_to_same_rc_without_gate() {
         run_local(async {
-            let map = Map::new(tko_map());
+            let map = test_map();
             let a = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             let b = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             assert!(Rc::ptr_eq(&a, &b), "same key must share one destination");
@@ -146,12 +174,30 @@ mod tests {
     #[tokio::test]
     async fn different_reply_timeout_gets_distinct_destination() {
         run_local(async {
-            let map = Map::new(tko_map());
+            let map = test_map();
             let a = map.destination(key_for("127.0.0.1:9", 100), &test_cfg(), None);
             let b = map.destination(key_for("127.0.0.1:9", 200), &test_cfg(), None);
             assert!(
                 !Rc::ptr_eq(&a, &b),
                 "different latency contracts must not share a FIFO"
+            );
+        })
+        .await;
+    }
+
+    /// two timeout-variants of one server are distinct destinations (own
+    /// FIFOs) but ONE counter block: the `destination` label means "server",
+    /// not "server x timeout".
+    #[tokio::test]
+    async fn timeout_variants_share_one_counter_block() {
+        run_local(async {
+            let map = test_map();
+            let a = map.destination(key_for("127.0.0.1:9", 100), &test_cfg(), None);
+            let b = map.destination(key_for("127.0.0.1:9", 200), &test_cfg(), None);
+            assert!(!Rc::ptr_eq(&a, &b));
+            assert!(
+                Arc::ptr_eq(a.counters(), b.counters()),
+                "same server must share one counter block"
             );
         })
         .await;
@@ -165,7 +211,11 @@ mod tests {
     async fn dedup_attaches_gate_to_existing_destination() {
         run_local(async {
             let tko = tko_map();
-            let map = Map::new(Arc::clone(&tko));
+            let map = Map::new(
+                Arc::clone(&tko),
+                ProxyCounters::new(),
+                DestinationCountersRegistry::new(),
+            );
             let gate = tko.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
 
             let a1 = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
@@ -207,12 +257,8 @@ mod tests {
                 vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
             ])
             .await;
-            let map = Map::new(tko_map());
-            let dest = map.destination(
-                key_for(&server.addr.to_string(), 1000),
-                &test_cfg(),
-                None,
-            );
+            let map = test_map();
+            let dest = map.destination(key_for(&server.addr.to_string(), 1000), &test_cfg(), None);
 
             dest.send(get(b"a")).await.unwrap();
             tokio::time::sleep(Duration::from_millis(60)).await;
@@ -220,12 +266,12 @@ mod tests {
 
             // CloseIdle is processed by the actor asynchronously
             for _ in 0..2000 {
-                if dest.stats().idle_closes == 1 {
+                if dest.counters().idle_closes.load(Ordering::Relaxed) == 1 {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            assert_eq!(dest.stats().idle_closes, 1);
+            assert_eq!(dest.counters().idle_closes.load(Ordering::Relaxed), 1);
             assert!(!dest.is_tko(), "an idle close is never health evidence");
 
             dest.send(get(b"b")).await.unwrap();
@@ -248,7 +294,7 @@ mod tests {
             cfg.probe_delay_initial = Duration::from_millis(5);
             cfg.probe_delay_max = Duration::from_millis(100);
 
-            let map = Map::new(tko_map());
+            let map = test_map();
             let dest = map.destination(key_for(&server.addr.to_string(), 20), &cfg, None);
             let tracker = Arc::clone(dest.tracker());
 
@@ -261,7 +307,7 @@ mod tests {
 
             let interval = Duration::from_millis(35);
             let deadline = Instant::now() + Duration::from_secs(2);
-            while dest.stats().idle_closes == 0 {
+            while dest.counters().idle_closes.load(Ordering::Relaxed) == 0 {
                 assert!(
                     Instant::now() < deadline,
                     "tombstone-only connection was never reaped"
@@ -295,18 +341,14 @@ mod tests {
                 Step::ReadRequests(2), // parks
             ]])
             .await;
-            let map = Map::new(tko_map());
-            let dest = map.destination(
-                key_for(&server.addr.to_string(), 1000),
-                &test_cfg(),
-                None,
-            );
+            let map = test_map();
+            let dest = map.destination(key_for(&server.addr.to_string(), 1000), &test_cfg(), None);
 
             dest.send(get(b"a")).await.unwrap(); // last_active = now
             map.sweep_idle(Duration::from_millis(50)); // idle ~0ms < 50ms
 
             tokio::time::sleep(Duration::from_millis(20)).await;
-            assert_eq!(dest.stats().idle_closes, 0);
+            assert_eq!(dest.counters().idle_closes.load(Ordering::Relaxed), 0);
             assert_eq!(server.accept_count(), 1);
         })
         .await;
@@ -315,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_prunes_dead_entries() {
         run_local(async {
-            let map = Map::new(tko_map());
+            let map = test_map();
             let dest = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             assert_eq!(map.destinations.borrow().len(), 1);
 
@@ -329,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_task_exits_when_map_drops() {
         run_local(async {
-            let map = Map::new(tko_map());
+            let map = test_map();
             let handle = map.spawn_idle_sweep(Duration::from_millis(10)).unwrap();
             assert!(map.spawn_idle_sweep(Duration::ZERO).is_none());
 

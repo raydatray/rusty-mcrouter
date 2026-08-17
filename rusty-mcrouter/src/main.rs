@@ -1,6 +1,9 @@
 use clap::Parser;
 use rusty_mcrouter_config::parse_file;
-use rusty_mcrouter_net::{destination, tko::TkoTrackerMap};
+use rusty_mcrouter_net::{
+    destination::{self, DestinationCountersRegistry},
+    tko::TkoTrackerMap,
+};
 use tokio::sync::mpsc;
 
 use std::{
@@ -145,9 +148,10 @@ fn main() -> anyhow::Result<()> {
 
     let config = Arc::new(parse_file(&args.config)?);
 
-    // the ONE cross-thread object: per-server health shared by every proxy
-    // thread's destinations, atomics only
+    // the cross-thread objects: per-server health and per-server counters,
+    // shared by every proxy thread's destinations, atomics only
     let tko_map = TkoTrackerMap::new();
+    let counters_registry = DestinationCountersRegistry::new();
     let defaults = destination_defaults(&args.options);
     let sweep_interval = Duration::from_millis(args.options.reset_inactive_connection_interval_ms);
 
@@ -197,6 +201,7 @@ fn main() -> anyhow::Result<()> {
             thread_mode: ThreadMode::SameThread,
             listener_config,
             tko_map: Arc::clone(&tko_map),
+            counters_registry: Arc::clone(&counters_registry),
             defaults: defaults.clone(),
             sweep_interval,
         };

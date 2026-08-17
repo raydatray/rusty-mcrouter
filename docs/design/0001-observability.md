@@ -341,10 +341,16 @@ binary:          creates shards, hands them to both sides
 ```
 
 ```rust
-// rusty-mcrouter-net — one per proxy thread (shard)
-pub struct BackendCounters {
+// rusty-mcrouter-net — one per proxy thread (the shard). named
+// ProxyCounters, not BackendCounters: in net's type namespace a
+// "Backend" is one server (trait Backend = Rc<Destination>), and this
+// struct is emphatically not per-server. the exported families keep
+// the mcrouter_backend_* prefix, where backend-vs-frontend is the
+// right operator-facing contrast.
+pub struct ProxyCounters {
     // monotonic counters
-    pub requests: [[AtomicU64; RESULT_CODE_COUNT]; LEG_COUNT], // leg: normal | failover
+    pub requests: [[AtomicU64; RESULT_CODE_COUNT]; COMMAND_KIND_COUNT],
+    pub latency_us_sum: AtomicU64,
     pub connections_opened: AtomicU64,
     pub connections_closed: AtomicU64,   // incl. idle closes
     pub connect_retries: AtomicU64,
@@ -360,14 +366,22 @@ pub struct BackendCounters {
 }
 ```
 
-(frontend counters in the bin and per-pool counters in core follow the
+(the `leg` label from the metric table has no dimension here yet — it
+needs a failover flag through `Backend::send` and is decided in the
+routing-counters slice.)
+
+frontend counters in the bin and per-pool counters in core follow the
 same shard shape; gauges derived from existing state — tko counts,
 server states, fail-open — aren't shards at all, they're read straight
 from the live structures at scrape time. per-destination counters are
-a third shape: a small block of atomics on `Destination` itself —
-`requests: [AtomicU64; RESULT_CODE_COUNT]`, `latency_us_sum`,
-`inflight` — shareable via its `Arc`-side and walked at scrape time.
-the `RefCell`-based `DestinationStats` is *not* a scrape source.)
+a third shape: `DestinationCounters`, an `Arc` block in a weak-dedup
+registry keyed by server address (`Destination` itself is `Rc` —
+thread-local, unreachable from the scrape thread). per-destination
+counters have exactly one home: the shared `DestinationCounters` block
+is both the destination's own bookkeeping and the scrape source. there
+is no separate thread-local stats struct on `Destination` (there used
+to be — it duplicated every write), and one should not be
+reintroduced.
 
 divergence from upstream, deliberate: upstream uses non-atomic
 relaxed load+store (single-writer arrays). we use `AtomicU64` with
@@ -381,10 +395,11 @@ scrape-time aggregation (mirrors upstream's read-time `prepare_stats`
 allocate):
 
 ```rust
-// observability — scrape side
-struct BackendMetricsSource { shards: Vec<Arc<BackendCounters>> }
+// observability — scrape side. ProxyCounters shards → the
+// mcrouter_backend_* families
+struct BackendSource { shards: Vec<Arc<ProxyCounters>> }
 
-impl BackendMetricsSource {
+impl BackendSource {
     fn encode(&self, out: &mut String) {
         let mut requests = [0u64; RESULT_CODE_COUNT];
         for shard in &self.shards {
@@ -413,7 +428,7 @@ families; names follow prometheus conventions, with the upstream
 | `mcrouter_requests_processing` / `_waiting` | gauge | `proxy` — slot map depth |
 | `mcrouter_dev_null_requests_total` | counter | — |
 
-**backend (net, `BackendCounters` shards)**
+**backend (net, `ProxyCounters` shards)**
 
 | metric | type | labels |
 |--------|------|--------|
@@ -484,9 +499,10 @@ boundaries that keep this list honest:
   `pool`/`proxy`/`destination` = config-bounded. no label sourced from
   keys.
 - latency is exported as monotonic µs sums, never pre-digested
-  averages (see "why no bins"). the thread-local `DestinationStats`
-  EWMA survives as an internal diagnostic, but it is not a scrape
-  source.
+  averages (see "why no bins"). the per-destination latency EWMA that
+  used to live in a thread-local `DestinationStats` is gone entirely —
+  sum+count superseded it, and the struct itself was folded into
+  `DestinationCounters`.
 - process metrics (`process_*`) come from a stock collector, not
   hand-rolled.
 - **a counter field may only exist if its emit site can be named in
@@ -535,9 +551,10 @@ control thread's runtime — no framework dependency for one endpoint.
 2. **observability crate skeleton** — `OperationalEvent`, `EventSender`
    + bounded bus + dropped counter, consumer task, log formatting.
    unit tests: load-shedding, drop counting.
-3. **counter shards** — `BackendCounters` in net (wire into
-   `Destination`/connection actor), frontend counters in bin,
-   `MetricsRegistry` + prometheus text encoding in observability.
+3. **counter shards** — `ProxyCounters` + `DestinationCounters` in net
+   (fold the old destination stats in, wire into `Destination` and the
+   connection actor), frontend counters in bin, `MetricsRegistry` +
+   prometheus text encoding in observability.
 4. **/metrics endpoint + binary wiring** — http responder, CLI
    options (`--metrics-port`), end-to-end test: run proxy + mock,
    scrape, assert counters move.

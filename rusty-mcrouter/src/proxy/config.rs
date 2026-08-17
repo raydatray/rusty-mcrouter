@@ -14,9 +14,12 @@ pub struct ProxyThreadConfig {
     pub proxies: ProxySet,
     pub thread_mode: ThreadMode,
     pub listener_config: Option<ListenerConfig>,
-    /// The ONE cross-thread object: same-server destinations on different
-    /// threads share health verdicts through it (atomics only).
+    /// Cross-thread health: same-server destinations on different threads
+    /// share health verdicts through it (atomics only).
     pub tko_map: Arc<TkoTrackerMap>,
+    /// Cross-thread counters: same-server destinations on different threads
+    /// share one scrapeable counter block through it (atomics only).
+    pub counters_registry: Arc<destination::DestinationCountersRegistry>,
     /// Router-level destination defaults (derived from RouterOptions once in
     /// main); pools override via server_timeout/connect_timeout.
     pub defaults: destination::Config,
