@@ -417,7 +417,7 @@ allocate):
 
 ```rust
 // observability — scrape side. BackendMetricsShard values → the
-// mcrouter_backend_* families
+// rusty_mcrouter_backend_* families
 struct BackendSource { shards: Vec<Arc<BackendMetricsShard>> }
 
 impl BackendSource {
@@ -428,8 +428,8 @@ impl BackendSource {
                 *acc += c.load();
             }
         }
-        // # TYPE mcrouter_backend_requests_total counter
-        // mcrouter_backend_requests_total{result="timeout"} 1234
+        // # TYPE rusty_mcrouter_backend_requests_total counter
+        // rusty_mcrouter_backend_requests_total{result="timeout"} 1234
         ...
     }
 }
@@ -443,68 +443,68 @@ families; names follow prometheus conventions, with the upstream
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_requests_total` | counter | `proxy`, `command` |
-| `mcrouter_requests_failed_total` | counter | `pool` — client-visible errors (upstream `final_result_error`) |
-| `mcrouter_client_connections` | gauge | — |
-| `mcrouter_requests_processing` / `_waiting` | gauge | `proxy` — slot map depth |
-| `mcrouter_dev_null_requests_total` | counter | — |
+| `rusty_mcrouter_requests_total` | counter | `proxy`, `command` |
+| `rusty_mcrouter_requests_failed_total` | counter | `pool` — client-visible errors (upstream `final_result_error`) |
+| `rusty_mcrouter_client_connections` | gauge | — |
+| `rusty_mcrouter_requests_processing` / `_waiting` | gauge | `proxy` — slot map depth |
+| `rusty_mcrouter_dev_null_requests_total` | counter | — |
 
 **backend (`rusty-mcrouter-backend`, `BackendMetricsShard` shards)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_backend_requests_total` | counter | `result`, `leg` (normal/failover), `command` |
-| `mcrouter_backend_connections_opened_total` / `_closed_total` | counter | — |
-| `mcrouter_backend_connect_retries_total` / `_retry_successes_total` | counter | — |
-| `mcrouter_backend_write_batches_total` / `_batched_requests_total` | counter | — (avg batch = promql) |
-| `mcrouter_backend_queue_full_total` | counter | — actor channel shedding |
-| `mcrouter_backend_bytes_{read,written}_total` | counter | — |
-| `mcrouter_backend_pending_reqs` / `_inflight_reqs` | gauge | — summed over shards |
+| `rusty_mcrouter_backend_requests_total` | counter | `result`, `leg` (normal/failover), `command` |
+| `rusty_mcrouter_backend_connections_opened_total` / `_closed_total` | counter | — |
+| `rusty_mcrouter_backend_connect_retries_total` / `_retry_successes_total` | counter | — |
+| `rusty_mcrouter_backend_write_batches_total` / `_batched_requests_total` | counter | — (avg batch = promql) |
+| `rusty_mcrouter_backend_queue_full_total` | counter | — actor channel shedding |
+| `rusty_mcrouter_backend_bytes_{read,written}_total` | counter | — |
+| `rusty_mcrouter_backend_pending_reqs` / `_inflight_reqs` | gauge | — summed over shards |
 
 **tko / health (read from live structures at scrape)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_tko` | gauge | `kind` (soft/hard) — GlobalTkoMetrics |
-| `mcrouter_suspect_servers` | gauge | — sus_servers scan |
-| `mcrouter_servers` | gauge | `state` (up/down/closed/new) |
-| `mcrouter_pool_fail_open` | gauge | `pool` |
-| `mcrouter_fail_open_entered_total` / `_exited_total` | counter | `pool` |
+| `rusty_mcrouter_tko` | gauge | `kind` (soft/hard) — GlobalTkoMetrics |
+| `rusty_mcrouter_suspect_servers` | gauge | — sus_servers scan |
+| `rusty_mcrouter_servers` | gauge | `state` (up/down/closed/new) |
+| `rusty_mcrouter_pool_fail_open` | gauge | `pool` |
+| `rusty_mcrouter_fail_open_entered_total` / `_exited_total` | counter | `pool` |
 
 **routing (core)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_failover_total` | counter | `policy` (inorder/least_failures) |
-| `mcrouter_failover_exhausted_total` | counter | `policy` |
-| `mcrouter_failover_policy_errors_total` | counter | `class` (result/tko) |
+| `rusty_mcrouter_failover_total` | counter | `policy` (inorder/least_failures) |
+| `rusty_mcrouter_failover_exhausted_total` | counter | `policy` |
+| `rusty_mcrouter_failover_policy_errors_total` | counter | `class` (result/tko) |
 
 **pool (core, config-bounded label cardinality)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_pool_requests_total` | counter | `pool` |
-| `mcrouter_pool_connections` | gauge | `pool` |
-| `mcrouter_pool_duration_us_sum_total` | counter | `pool` — mean via promql |
+| `rusty_mcrouter_pool_requests_total` | counter | `pool` |
+| `rusty_mcrouter_pool_connections` | gauge | `pool` |
+| `rusty_mcrouter_pool_duration_us_sum_total` | counter | `pool` — mean via promql |
 
 **per-destination (default on — non-multiplied except `result`)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_destination_up` | gauge | `destination` (0 = tko'd) |
-| `mcrouter_destination_requests_total` | counter | `destination`, `result` |
-| `mcrouter_destination_latency_us_sum_total` | counter | `destination` — mean via promql |
-| `mcrouter_destination_inflight_reqs` | gauge | `destination` |
+| `rusty_mcrouter_destination_up` | gauge | `destination` (0 = tko'd) |
+| `rusty_mcrouter_destination_requests_total` | counter | `destination`, `result` |
+| `rusty_mcrouter_destination_latency_us_sum_total` | counter | `destination` — mean via promql |
+| `rusty_mcrouter_destination_inflight_reqs` | gauge | `destination` |
 
 **latency / meta / self**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_duration_us_sum_total` | counter | `op` (get/update) — mean = `rate(sum)/rate(requests)` |
-| `mcrouter_build_info` | info gauge | `version` |
-| `mcrouter_start_time_seconds` | gauge | — |
-| `mcrouter_proxies` | gauge | — |
-| `mcrouter_events_dropped_total` | counter | — the bus watching itself |
+| `rusty_mcrouter_duration_us_sum_total` | counter | `op` (get/update) — mean = `rate(sum)/rate(requests)` |
+| `rusty_mcrouter_build_info` | info gauge | `version` |
+| `rusty_mcrouter_start_time_seconds` | gauge | — |
+| `rusty_mcrouter_proxies` | gauge | — |
+| `rusty_mcrouter_events_dropped_total` | counter | — the bus watching itself |
 
 boundaries that keep this list honest:
 

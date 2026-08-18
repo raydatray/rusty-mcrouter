@@ -15,21 +15,21 @@ use crate::metrics::{MetricsSource, MetricsText};
 use crate::shard_source;
 
 shard_source! {
-    /// Backend metric shards -> the mcrouter_backend_* scalar families.
+    /// Backend metric shards -> the rusty_mcrouter_backend_* scalar families.
     /// the {command, result} matrix is BackendRequestsSource.
     pub struct BackendScalarsSource(BackendMetricsShard) {
-        counter latency_us_sum              => "mcrouter_backend_latency_us_sum_total";
-        counter connections_opened          => "mcrouter_backend_connections_opened_total";
-        counter connections_closed          => "mcrouter_backend_connections_closed_total";
-        counter connect_retries             => "mcrouter_backend_connect_retries_total";
-        counter connect_success_after_retry => "mcrouter_backend_connect_retry_successes_total";
-        counter write_batches               => "mcrouter_backend_write_batches_total";
-        counter batched_requests            => "mcrouter_backend_batched_requests_total";
-        counter queue_full                  => "mcrouter_backend_queue_full_total";
-        counter bytes_read                  => "mcrouter_backend_bytes_read_total";
-        counter bytes_written               => "mcrouter_backend_bytes_written_total";
-        gauge   pending_reqs                => "mcrouter_backend_pending_reqs";
-        gauge   inflight_reqs               => "mcrouter_backend_inflight_reqs";
+        counter latency_us_sum              => "rusty_mcrouter_backend_latency_us_sum_total";
+        counter connections_opened          => "rusty_mcrouter_backend_connections_opened_total";
+        counter connections_closed          => "rusty_mcrouter_backend_connections_closed_total";
+        counter connect_retries             => "rusty_mcrouter_backend_connect_retries_total";
+        counter connect_success_after_retry => "rusty_mcrouter_backend_connect_retry_successes_total";
+        counter write_batches               => "rusty_mcrouter_backend_write_batches_total";
+        counter batched_requests            => "rusty_mcrouter_backend_batched_requests_total";
+        counter queue_full                  => "rusty_mcrouter_backend_queue_full_total";
+        counter bytes_read                  => "rusty_mcrouter_backend_bytes_read_total";
+        counter bytes_written               => "rusty_mcrouter_backend_bytes_written_total";
+        gauge   pending_reqs                => "rusty_mcrouter_backend_pending_reqs";
+        gauge   inflight_reqs               => "rusty_mcrouter_backend_inflight_reqs";
     }
 }
 
@@ -37,11 +37,11 @@ shard_source! {
     /// Frontend metric shards -> the client-facing families. the
     /// per-command matrix is FrontendRequestsSource.
     pub struct FrontendScalarsSource(FrontendMetricsShard) {
-        counter noops              => "mcrouter_noops_total";
-        counter parse_errors       => "mcrouter_parse_errors_total";
-        counter failed             => "mcrouter_requests_failed_total";
-        gauge   client_connections => "mcrouter_client_connections";
-        gauge   processing         => "mcrouter_requests_processing";
+        counter noops              => "rusty_mcrouter_noops_total";
+        counter parse_errors       => "rusty_mcrouter_parse_errors_total";
+        counter failed             => "rusty_mcrouter_requests_failed_total";
+        gauge   client_connections => "rusty_mcrouter_client_connections";
+        gauge   processing         => "rusty_mcrouter_requests_processing";
     }
 }
 
@@ -59,7 +59,7 @@ impl MetricsSource for BackendRequestsSource {
                     .map(|s| s.requests[cmd as usize][code as usize].load())
                     .sum();
                 out.counter(
-                    "mcrouter_backend_requests_total",
+                    "rusty_mcrouter_backend_requests_total",
                     &[
                         ("command", cmd.prometheus_label()),
                         ("result", code.prometheus_label()),
@@ -84,7 +84,7 @@ impl MetricsSource for FrontendRequestsSource {
                 .map(|s| s.requests[cmd as usize].load())
                 .sum();
             out.counter(
-                "mcrouter_requests_total",
+                "rusty_mcrouter_requests_total",
                 &[("command", cmd.prometheus_label())],
                 total,
             );
@@ -99,29 +99,41 @@ pub struct TkoSource {
 impl MetricsSource for TkoSource {
     fn encode(&self, out: &mut MetricsText) {
         let global = self.map.global_metrics();
-        out.gauge("mcrouter_tko", &[("kind", "soft")], global.soft_tkos.load());
-        out.gauge("mcrouter_tko", &[("kind", "hard")], global.hard_tkos.load());
         out.gauge(
-            "mcrouter_suspect_servers",
+            "rusty_mcrouter_tko",
+            &[("kind", "soft")],
+            global.soft_tkos.load(),
+        );
+        out.gauge(
+            "rusty_mcrouter_tko",
+            &[("kind", "hard")],
+            global.hard_tkos.load(),
+        );
+        out.gauge(
+            "rusty_mcrouter_suspect_servers",
             &[],
             self.map.sus_servers().len() as i64,
         );
 
         for gate in self.map.pool_snapshot() {
             let pool = &[("pool", &**gate.name())];
-            out.gauge("mcrouter_pool_fail_open", pool, gate.fail_open() as i64);
             out.gauge(
-                "mcrouter_pool_destinations_tko",
+                "rusty_mcrouter_pool_fail_open",
+                pool,
+                gate.fail_open() as i64,
+            );
+            out.gauge(
+                "rusty_mcrouter_pool_destinations_tko",
                 pool,
                 gate.num_destinations_tko() as i64,
             );
             out.counter(
-                "mcrouter_fail_open_entered_total",
+                "rusty_mcrouter_fail_open_entered_total",
                 pool,
                 gate.fail_open_entered_total(),
             );
             out.counter(
-                "mcrouter_fail_open_exited_total",
+                "rusty_mcrouter_fail_open_exited_total",
                 pool,
                 gate.fail_open_exited_total(),
             );
@@ -139,13 +151,13 @@ impl MetricsSource for DestinationSource {
             let destination = block.destination();
             let dest = &[("destination", destination)];
             out.gauge(
-                "mcrouter_destination_up",
+                "rusty_mcrouter_destination_up",
                 dest,
                 !block.tracker.is_tko() as i64,
             );
             for code in ResultCode::ALL {
                 out.counter(
-                    "mcrouter_destination_requests_total",
+                    "rusty_mcrouter_destination_requests_total",
                     &[
                         ("destination", destination),
                         ("result", code.prometheus_label()),
@@ -154,28 +166,28 @@ impl MetricsSource for DestinationSource {
                 );
             }
             out.counter(
-                "mcrouter_destination_latency_us_sum_total",
+                "rusty_mcrouter_destination_latency_us_sum_total",
                 dest,
                 block.latency_us_sum.load(),
             );
             out.counter(
-                "mcrouter_destination_connects_total",
+                "rusty_mcrouter_destination_connects_total",
                 dest,
                 block.connects.load(),
             );
             out.counter(
-                "mcrouter_destination_idle_closes_total",
+                "rusty_mcrouter_destination_idle_closes_total",
                 dest,
                 block.idle_closes.load(),
             );
             // per tko episode, reset on unmark - a gauge
             out.gauge(
-                "mcrouter_destination_probes_sent",
+                "rusty_mcrouter_destination_probes_sent",
                 dest,
                 block.probes_sent.load(),
             );
             out.gauge(
-                "mcrouter_destination_inflight_reqs",
+                "rusty_mcrouter_destination_inflight_reqs",
                 dest,
                 block.inflight_reqs.load(),
             );
@@ -192,15 +204,19 @@ pub struct SelfSource {
 
 impl MetricsSource for SelfSource {
     fn encode(&self, out: &mut MetricsText) {
-        out.counter("mcrouter_events_dropped_total", &[], self.dropped.load());
-        out.gauge("mcrouter_proxies", &[], self.num_proxies as i64);
+        out.counter(
+            "rusty_mcrouter_events_dropped_total",
+            &[],
+            self.dropped.load(),
+        );
+        out.gauge("rusty_mcrouter_proxies", &[], self.num_proxies as i64);
         out.gauge(
-            "mcrouter_start_time_seconds",
+            "rusty_mcrouter_start_time_seconds",
             &[],
             self.start_unix_secs as i64,
         );
         out.counter(
-            "mcrouter_build_info",
+            "rusty_mcrouter_build_info",
             &[("version", env!("CARGO_PKG_VERSION"))],
             1,
         );
@@ -231,15 +247,16 @@ mod tests {
         let text = render(BackendRequestsSource {
             shards: vec![Arc::clone(&s1), Arc::clone(&s2)],
         });
-        assert!(
-            text.contains("mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 2\n")
-        );
-        assert!(text.contains("mcrouter_backend_requests_total{command=\"ms\",result=\"tko\"} 1\n"));
+        assert!(text.contains(
+            "rusty_mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 2\n"
+        ));
+        assert!(text
+            .contains("rusty_mcrouter_backend_requests_total{command=\"ms\",result=\"tko\"} 1\n"));
 
         let text = render(BackendScalarsSource {
             shards: vec![s1, s2],
         });
-        assert!(text.contains("mcrouter_backend_latency_us_sum_total 350\n"));
+        assert!(text.contains("rusty_mcrouter_backend_latency_us_sum_total 350\n"));
     }
 
     #[test]
@@ -251,12 +268,12 @@ mod tests {
         let text = render(FrontendRequestsSource {
             shards: vec![Arc::clone(&shard)],
         });
-        assert!(text.contains("mcrouter_requests_total{command=\"mg\"} 3\n"));
+        assert!(text.contains("rusty_mcrouter_requests_total{command=\"mg\"} 3\n"));
 
         let text = render(FrontendScalarsSource {
             shards: vec![shard],
         });
-        assert!(text.contains("mcrouter_requests_failed_total 1\n"));
+        assert!(text.contains("rusty_mcrouter_requests_failed_total 1\n"));
     }
 
     #[test]
@@ -278,10 +295,10 @@ mod tests {
         let text = render(TkoSource {
             map: Arc::clone(&map),
         });
-        assert!(text.contains("mcrouter_tko{kind=\"hard\"} 1\n"));
-        assert!(text.contains("mcrouter_tko{kind=\"soft\"} 1\n"));
-        assert!(text.contains("mcrouter_pool_fail_open{pool=\"pool_a\"} 1\n"));
-        assert!(text.contains("mcrouter_fail_open_entered_total{pool=\"pool_a\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_tko{kind=\"hard\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_tko{kind=\"soft\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_pool_fail_open{pool=\"pool_a\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_fail_open_entered_total{pool=\"pool_a\"} 1\n"));
     }
 
     #[test]
@@ -296,12 +313,12 @@ mod tests {
         let text = render(DestinationSource {
             registry: Arc::clone(&registry),
         });
-        assert!(text.contains("mcrouter_destination_up{destination=\"10.0.0.1:11211\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_destination_up{destination=\"10.0.0.1:11211\"} 1\n"));
         assert!(text.contains(
-            "mcrouter_destination_requests_total{destination=\"10.0.0.1:11211\",result=\"success\"} 1\n"
+            "rusty_mcrouter_destination_requests_total{destination=\"10.0.0.1:11211\",result=\"success\"} 1\n"
         ));
         assert!(text.contains(
-            "mcrouter_destination_latency_us_sum_total{destination=\"10.0.0.1:11211\"} 500\n"
+            "rusty_mcrouter_destination_latency_us_sum_total{destination=\"10.0.0.1:11211\"} 500\n"
         ));
 
         drop(block);
@@ -326,10 +343,10 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "mcrouter_events_dropped_total 2\n\
-                 mcrouter_proxies 4\n\
-                 mcrouter_start_time_seconds 1700000000\n\
-                 mcrouter_build_info{{version=\"{}\"}} 1\n",
+                "rusty_mcrouter_events_dropped_total 2\n\
+                 rusty_mcrouter_proxies 4\n\
+                 rusty_mcrouter_start_time_seconds 1700000000\n\
+                 rusty_mcrouter_build_info{{version=\"{}\"}} 1\n",
                 env!("CARGO_PKG_VERSION")
             )
         );
