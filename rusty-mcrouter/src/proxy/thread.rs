@@ -2,7 +2,7 @@ use std::{net::SocketAddr, rc::Rc, sync::mpsc::SyncSender};
 
 use rusty_mcrouter_core::build_route;
 use rusty_mcrouter_net::{destination, DestinationFactory, Server};
-use rusty_mcrouter_observability::events::{Event, WorkerEvent, WorkerEventRecord};
+use rusty_mcrouter_proxy::{WorkerEvent, WorkerEventRecord};
 use tokio::{runtime::Builder, task::LocalSet};
 
 use crate::proxy::{ConnectionWorker, ListenerConfig, Proxy, ProxyThreadConfig};
@@ -90,10 +90,10 @@ pub fn proxy_thread_main(
 
         let _ = ready_tx.send(Ok(bound_addr));
         drop(ready_tx);
-        events.emit(Event::Worker(WorkerEventRecord {
+        events(WorkerEventRecord {
             proxy_id,
             event: WorkerEvent::Started,
-        }));
+        });
 
         // proxy actor:
         // -  drains this thread's message queue (requests routed here by
@@ -132,10 +132,10 @@ pub fn proxy_thread_main(
             }
         };
 
-        events.emit(Event::Worker(WorkerEventRecord {
+        events(WorkerEventRecord {
             proxy_id,
             event: WorkerEvent::Stopped,
-        }));
+        });
         result
     })
 }

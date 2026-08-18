@@ -4,7 +4,7 @@ use std::{
 };
 
 use rusty_mcrouter_core::DynRoute;
-use rusty_mcrouter_observability::frontend::FrontendCounters;
+use rusty_mcrouter_proxy::FrontendCounters;
 use tokio::sync::mpsc;
 
 use crate::proxy::{config::ThreadMode, connection::Connection, proxy_set::ProxySet};

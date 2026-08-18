@@ -7,3 +7,6 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
