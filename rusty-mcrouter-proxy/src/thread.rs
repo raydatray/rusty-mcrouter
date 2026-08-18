@@ -38,7 +38,7 @@ pub fn proxy_thread_main(
             tko_map,
             counters_registry,
             backend_metrics,
-            frontend_counters,
+            frontend_metrics,
             events,
             defaults,
             sweep_interval,
@@ -118,7 +118,7 @@ pub fn proxy_thread_main(
             route,
             proxies,
             thread_mode,
-            frontend_counters,
+            frontend_metrics,
             work_rx,
         );
 

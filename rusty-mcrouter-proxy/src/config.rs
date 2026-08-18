@@ -4,7 +4,7 @@ use rusty_mcrouter_backend::{destination, metrics::BackendMetricsShard, tko::Tko
 use rusty_mcrouter_config::ConfigDocument;
 use tokio::sync::mpsc;
 
-use crate::{message::ProxyMessage, proxy_set::ProxySet, FrontendCounterShard, WorkerEventSink};
+use crate::{message::ProxyMessage, proxy_set::ProxySet, FrontendMetricsShard, WorkerEventSink};
 
 pub struct ProxyThreadConfig {
     pub proxy_id: usize,
@@ -23,7 +23,7 @@ pub struct ProxyThreadConfig {
     /// This thread's counter shards. Created in main so the scrape
     /// sources hold the same Arcs; this thread is the only writer.
     pub backend_metrics: Arc<BackendMetricsShard>,
-    pub frontend_counters: Arc<FrontendCounterShard>,
+    pub frontend_metrics: Arc<FrontendMetricsShard>,
     /// Worker lifecycle events are emitted through a leaf-owned sink.
     pub events: WorkerEventSink,
     /// Router-level destination defaults (derived from RouterOptions once in

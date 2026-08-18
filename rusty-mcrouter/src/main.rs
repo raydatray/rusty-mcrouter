@@ -13,7 +13,7 @@ use rusty_mcrouter_observability::{
     Observability,
 };
 use rusty_mcrouter_proxy::{
-    proxy_thread_main, FrontendCounterShard, ListenerConfig, ProxyHandle, ProxyMessage, ProxySet,
+    proxy_thread_main, FrontendMetricsShard, ListenerConfig, ProxyHandle, ProxyMessage, ProxySet,
     ProxyThreadConfig, ThreadMode,
 };
 use tokio::sync::mpsc;
@@ -209,7 +209,7 @@ fn main() -> anyhow::Result<()> {
     // per-thread counter shards, created here so the scrape sources hold
     // the same Arcs the threads write
     let mut backend_metric_shards = Vec::with_capacity(args.num_proxies);
-    let mut frontend_shards = Vec::with_capacity(args.num_proxies);
+    let mut frontend_metric_shards = Vec::with_capacity(args.num_proxies);
 
     for proxy_id in 0..args.num_proxies {
         let has_listener = proxy_id < num_listening_sockets;
@@ -228,9 +228,9 @@ fn main() -> anyhow::Result<()> {
         };
 
         let backend_metrics = BackendMetricsShard::new();
-        let frontend_counters = FrontendCounterShard::new();
+        let frontend_metrics = FrontendMetricsShard::new();
         backend_metric_shards.push(Arc::clone(&backend_metrics));
-        frontend_shards.push(Arc::clone(&frontend_counters));
+        frontend_metric_shards.push(Arc::clone(&frontend_metrics));
 
         let cfg = ProxyThreadConfig {
             proxy_id,
@@ -243,7 +243,7 @@ fn main() -> anyhow::Result<()> {
             tko_map: Arc::clone(&tko_map),
             counters_registry: Arc::clone(&counters_registry),
             backend_metrics,
-            frontend_counters,
+            frontend_metrics,
             events: observability.events().sink(),
             defaults: defaults.clone(),
             sweep_interval,
@@ -288,10 +288,10 @@ fn main() -> anyhow::Result<()> {
         shards: backend_metric_shards,
     }));
     observability.register(Box::new(FrontendScalarsSource {
-        shards: frontend_shards.clone(),
+        shards: frontend_metric_shards.clone(),
     }));
     observability.register(Box::new(FrontendRequestsSource {
-        shards: frontend_shards,
+        shards: frontend_metric_shards,
     }));
     observability.register(Box::new(TkoSource {
         map: Arc::clone(&tko_map),

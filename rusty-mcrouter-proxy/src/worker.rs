@@ -1,13 +1,10 @@
-use std::{
-    rc::Rc,
-    sync::{atomic::Ordering, Arc},
-};
+use std::{rc::Rc, sync::Arc};
 
 use rusty_mcrouter_core::DynRoute;
 use tokio::sync::mpsc;
 
 use crate::{
-    config::ThreadMode, connection::Connection, proxy_set::ProxySet, FrontendCounterShard,
+    config::ThreadMode, connection::Connection, proxy_set::ProxySet, FrontendMetricsShard,
 };
 
 /// a proxy thread's socket-handoff loop:
@@ -19,7 +16,7 @@ pub struct ConnectionWorker {
     local_route: Rc<dyn DynRoute>,
     proxies: ProxySet,
     mode: ThreadMode,
-    counters: Arc<FrontendCounterShard>,
+    metrics: Arc<FrontendMetricsShard>,
     work_rx: mpsc::Receiver<std::net::TcpStream>,
 }
 
@@ -29,7 +26,7 @@ impl ConnectionWorker {
         local_route: Rc<dyn DynRoute>,
         proxies: ProxySet,
         mode: ThreadMode,
-        counters: Arc<FrontendCounterShard>,
+        metrics: Arc<FrontendMetricsShard>,
         work_rx: mpsc::Receiver<std::net::TcpStream>,
     ) -> Self {
         Self {
@@ -37,7 +34,7 @@ impl ConnectionWorker {
             local_route,
             proxies,
             mode,
-            counters,
+            metrics,
             work_rx,
         }
     }
@@ -58,17 +55,17 @@ impl ConnectionWorker {
                 Rc::clone(&self.local_route),
                 self.proxies.clone(),
                 self.mode,
-                Arc::clone(&self.counters),
+                Arc::clone(&self.metrics),
             );
 
-            let counters = Arc::clone(&self.counters);
-            counters.client_connections.fetch_add(1, Ordering::Relaxed);
+            let metrics = Arc::clone(&self.metrics);
+            metrics.client_connections.inc();
 
             tokio::task::spawn_local(async move {
                 if let Err(e) = connection.run().await {
                     tracing::warn!(error = %e, "connection error");
                 }
-                counters.client_connections.fetch_sub(1, Ordering::Relaxed);
+                metrics.client_connections.dec();
             });
         }
     }
