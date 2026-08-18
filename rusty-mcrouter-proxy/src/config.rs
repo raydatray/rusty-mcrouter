@@ -1,10 +1,10 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use rusty_mcrouter_backend::{counters::ProxyCounters, destination, tko::TkoTrackerMap};
+use rusty_mcrouter_backend::{counters::BackendCounterShard, destination, tko::TkoTrackerMap};
 use rusty_mcrouter_config::ConfigDocument;
 use tokio::sync::mpsc;
 
-use crate::{message::ProxyMessage, proxy_set::ProxySet, FrontendCounters, WorkerEventSink};
+use crate::{message::ProxyMessage, proxy_set::ProxySet, FrontendCounterShard, WorkerEventSink};
 
 pub struct ProxyThreadConfig {
     pub proxy_id: usize,
@@ -22,8 +22,8 @@ pub struct ProxyThreadConfig {
     pub counters_registry: Arc<destination::DestinationCountersRegistry>,
     /// This thread's counter shards. Created in main so the scrape
     /// sources hold the same Arcs; this thread is the only writer.
-    pub proxy_counters: Arc<ProxyCounters>,
-    pub frontend_counters: Arc<FrontendCounters>,
+    pub backend_counters: Arc<BackendCounterShard>,
+    pub frontend_counters: Arc<FrontendCounterShard>,
     /// Worker lifecycle events are emitted through a leaf-owned sink.
     pub events: WorkerEventSink,
     /// Router-level destination defaults (derived from RouterOptions once in

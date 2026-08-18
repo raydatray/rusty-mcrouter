@@ -56,7 +56,7 @@ impl CommandKind {
 #[repr(align(64))]
 // this is one shard. we must align this to a cache line so that no two
 // thread's shards share one cache line
-pub struct ProxyCounters {
+pub struct BackendCounterShard {
     // monotonic counters
     pub requests: [[AtomicU64; RESULT_CODE_COUNT]; COMMAND_KIND_COUNT],
     pub latency_us_sum: AtomicU64,
@@ -75,7 +75,7 @@ pub struct ProxyCounters {
     pub inflight_reqs: AtomicI64,
 }
 
-impl ProxyCounters {
+impl BackendCounterShard {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -107,7 +107,7 @@ mod tests {
     /// no two records land in the same slot.
     #[test]
     fn every_command_result_cell_is_distinct() {
-        let counters = ProxyCounters::new();
+        let counters = BackendCounterShard::new();
         for cmd in 0..COMMAND_KIND_COUNT {
             for code in 0..RESULT_CODE_COUNT {
                 let cell = &counters.requests[cmd][code];
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn record_send_accumulates_latency() {
-        let counters = ProxyCounters::new();
+        let counters = BackendCounterShard::new();
         counters.record_send(CommandKind::Get, ResultCode::Success, 150);
         counters.record_send(CommandKind::Get, ResultCode::Success, 250);
         counters.record_send(CommandKind::Get, ResultCode::Timeout, 1000);
@@ -141,7 +141,7 @@ mod tests {
     /// gauges go both ways and settle back to zero after a drain.
     #[test]
     fn gauges_return_to_zero() {
-        let counters = ProxyCounters::new();
+        let counters = BackendCounterShard::new();
         counters.pending_reqs.fetch_add(3, Ordering::Relaxed);
         counters.pending_reqs.fetch_sub(3, Ordering::Relaxed);
         counters.inflight_reqs.fetch_add(2, Ordering::Relaxed);
@@ -153,6 +153,6 @@ mod tests {
     /// shards must not share cache lines across threads.
     #[test]
     fn shard_is_cache_line_aligned() {
-        assert!(std::mem::align_of::<ProxyCounters>() >= 64);
+        assert!(std::mem::align_of::<BackendCounterShard>() >= 64);
     }
 }

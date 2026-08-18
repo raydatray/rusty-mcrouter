@@ -9,7 +9,7 @@ use std::{
 use tokio::time::Instant;
 
 use crate::{
-    counters::ProxyCounters,
+    counters::BackendCounterShard,
     destination::{
         config::Config, destination::Destination, key::Key, DestinationCountersRegistry,
     },
@@ -19,14 +19,14 @@ use crate::{
 pub struct Map {
     tko_map: Arc<TkoTrackerMap>,
     counters_registry: Arc<DestinationCountersRegistry>,
-    shard_counters: Arc<ProxyCounters>,
+    shard_counters: Arc<BackendCounterShard>,
     destinations: RefCell<HashMap<Key, Weak<Destination>>>,
 }
 
 impl Map {
     pub fn new(
         tko_map: Arc<TkoTrackerMap>,
-        shard_counters: Arc<ProxyCounters>,
+        shard_counters: Arc<BackendCounterShard>,
         counters_registry: Arc<DestinationCountersRegistry>,
     ) -> Rc<Self> {
         Rc::new(Self {
@@ -133,7 +133,7 @@ mod tests {
     fn test_map() -> Rc<Map> {
         Map::new(
             tko_map(),
-            ProxyCounters::new(),
+            BackendCounterShard::new(),
             DestinationCountersRegistry::new(),
         )
     }
@@ -213,7 +213,7 @@ mod tests {
             let tko = tko_map();
             let map = Map::new(
                 Arc::clone(&tko),
-                ProxyCounters::new(),
+                BackendCounterShard::new(),
                 DestinationCountersRegistry::new(),
             );
             let gate = tko.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
