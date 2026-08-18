@@ -7,7 +7,7 @@ use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::Reply;
 use tokio::sync::mpsc;
 
-use crate::proxy::message::{ProxyMessage, ProxyRequest};
+use crate::message::{ProxyMessage, ProxyRequest};
 
 pub struct Proxy {
     // todo - stats/logging will read this; kept for the thread-mode work

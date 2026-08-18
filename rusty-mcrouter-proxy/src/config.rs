@@ -2,10 +2,9 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_net::{counters::ProxyCounters, destination, tko::TkoTrackerMap};
-use rusty_mcrouter_proxy::{FrontendCounters, WorkerEventSink};
 use tokio::sync::mpsc;
 
-use crate::proxy::{message::ProxyMessage, proxy_set::ProxySet};
+use crate::{message::ProxyMessage, proxy_set::ProxySet, FrontendCounters, WorkerEventSink};
 
 pub struct ProxyThreadConfig {
     pub proxy_id: usize,

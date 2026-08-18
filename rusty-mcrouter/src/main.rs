@@ -13,6 +13,10 @@ use rusty_mcrouter_observability::{
     Observability,
 };
 use rusty_mcrouter_proxy::FrontendCounters;
+use rusty_mcrouter_proxy::{
+    proxy_thread_main, ListenerConfig, ProxyHandle, ProxyMessage, ProxySet, ProxyThreadConfig,
+    ThreadMode,
+};
 use tokio::sync::mpsc;
 
 use std::{
@@ -22,12 +26,6 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-mod proxy;
-
-use crate::proxy::{
-    ListenerConfig, ProxyHandle, ProxyMessage, ProxySet, ProxyThreadConfig, ThreadMode,
-};
-
 const WORK_CHANNEL_CAPACITY: usize = 1024;
 const PROXY_CHANNEL_CAPACITY: usize = 1024;
 
@@ -258,7 +256,7 @@ fn main() -> anyhow::Result<()> {
         let handle = std::thread::Builder::new()
             .name(format!("proxy-{proxy_id}"))
             .spawn(move || {
-                if let Err(e) = proxy::proxy_thread_main(cfg, ready_tx) {
+                if let Err(e) = proxy_thread_main(cfg, ready_tx) {
                     eprintln!("proxy-{proxy_id} terminated: {e}");
                     std::process::exit(1);
                 }
