@@ -9,29 +9,29 @@ use std::{
 use tokio::time::Instant;
 
 use crate::{
-    counters::BackendCounterShard,
     destination::{
         config::Config, destination::Destination, key::Key, DestinationCountersRegistry,
     },
+    metrics::BackendMetricsShard,
     tko::{PoolTkoTracker, TkoTrackerMap},
 };
 
 pub struct Map {
     tko_map: Arc<TkoTrackerMap>,
     counters_registry: Arc<DestinationCountersRegistry>,
-    shard_counters: Arc<BackendCounterShard>,
+    shard_metrics: Arc<BackendMetricsShard>,
     destinations: RefCell<HashMap<Key, Weak<Destination>>>,
 }
 
 impl Map {
     pub fn new(
         tko_map: Arc<TkoTrackerMap>,
-        shard_counters: Arc<BackendCounterShard>,
+        shard_metrics: Arc<BackendMetricsShard>,
         counters_registry: Arc<DestinationCountersRegistry>,
     ) -> Rc<Self> {
         Rc::new(Self {
             tko_map,
-            shard_counters,
+            shard_metrics,
             counters_registry,
             destinations: RefCell::new(HashMap::new()),
         })
@@ -68,7 +68,7 @@ impl Map {
             cfg.clone(),
             tracker,
             counters,
-            Arc::clone(&self.shard_counters),
+            Arc::clone(&self.shard_metrics),
         );
 
         self.destinations
@@ -133,7 +133,7 @@ mod tests {
     fn test_map() -> Rc<Map> {
         Map::new(
             tko_map(),
-            BackendCounterShard::new(),
+            BackendMetricsShard::new(),
             DestinationCountersRegistry::new(),
         )
     }
@@ -213,7 +213,7 @@ mod tests {
             let tko = tko_map();
             let map = Map::new(
                 Arc::clone(&tko),
-                BackendCounterShard::new(),
+                BackendMetricsShard::new(),
                 DestinationCountersRegistry::new(),
             );
             let gate = tko.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });

@@ -1,7 +1,7 @@
 use clap::Parser;
 use rusty_mcrouter_backend::{
-    counters::BackendCounterShard,
     destination::{self, DestinationCountersRegistry},
+    metrics::BackendMetricsShard,
     tko::TkoTrackerMap,
 };
 use rusty_mcrouter_config::parse_file;
@@ -208,7 +208,7 @@ fn main() -> anyhow::Result<()> {
     let mut proxy_rxs_iter = proxy_rxs.into_iter();
     // per-thread counter shards, created here so the scrape sources hold
     // the same Arcs the threads write
-    let mut backend_shards = Vec::with_capacity(args.num_proxies);
+    let mut backend_metric_shards = Vec::with_capacity(args.num_proxies);
     let mut frontend_shards = Vec::with_capacity(args.num_proxies);
 
     for proxy_id in 0..args.num_proxies {
@@ -227,9 +227,9 @@ fn main() -> anyhow::Result<()> {
             None
         };
 
-        let backend_counters = BackendCounterShard::new();
+        let backend_metrics = BackendMetricsShard::new();
         let frontend_counters = FrontendCounterShard::new();
-        backend_shards.push(Arc::clone(&backend_counters));
+        backend_metric_shards.push(Arc::clone(&backend_metrics));
         frontend_shards.push(Arc::clone(&frontend_counters));
 
         let cfg = ProxyThreadConfig {
@@ -242,7 +242,7 @@ fn main() -> anyhow::Result<()> {
             listener_config,
             tko_map: Arc::clone(&tko_map),
             counters_registry: Arc::clone(&counters_registry),
-            backend_counters,
+            backend_metrics,
             frontend_counters,
             events: observability.events().sink(),
             defaults: defaults.clone(),
@@ -282,10 +282,10 @@ fn main() -> anyhow::Result<()> {
     drop(proxies);
 
     observability.register(Box::new(BackendScalarsSource {
-        shards: backend_shards.clone(),
+        shards: backend_metric_shards.clone(),
     }));
     observability.register(Box::new(BackendRequestsSource {
-        shards: backend_shards,
+        shards: backend_metric_shards,
     }));
     observability.register(Box::new(FrontendScalarsSource {
         shards: frontend_shards.clone(),

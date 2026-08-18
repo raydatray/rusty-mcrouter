@@ -119,8 +119,8 @@ mod tests {
 
     use super::*;
     use crate::classify::ResultCode;
-    use crate::counters::BackendCounterShard;
     use crate::destination::DestinationCountersRegistry;
+    use crate::metrics::BackendMetricsShard;
     use crate::test_support::{run_local, scripted_backend_serial, Step};
     use crate::tko::{DestToken, TkoTrackerMap};
 
@@ -128,7 +128,7 @@ mod tests {
         let tko = TkoTrackerMap::with_sink(crate::tko::TkoEventSink::new(|_| {}));
         let factory = DestinationFactory::new(Map::new(
             Arc::clone(&tko),
-            BackendCounterShard::new(),
+            BackendMetricsShard::new(),
             DestinationCountersRegistry::new(),
         ));
         (tko, factory)
