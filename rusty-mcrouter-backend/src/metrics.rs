@@ -1,8 +1,6 @@
-use std::sync::{
-    atomic::{AtomicI64, AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
+use rusty_mcrouter_observability_primitives::{Counter, Gauge};
 use rusty_mcrouter_protocol::Request;
 
 use crate::classify::{ResultCode, RESULT_CODE_COUNT};
@@ -56,37 +54,37 @@ impl CommandKind {
 #[repr(align(64))]
 // this is one shard. we must align this to a cache line so that no two
 // thread's shards share one cache line
-pub struct BackendCounterShard {
+pub struct BackendMetricsShard {
     // monotonic counters
-    pub requests: [[AtomicU64; RESULT_CODE_COUNT]; COMMAND_KIND_COUNT],
-    pub latency_us_sum: AtomicU64,
-    pub connections_opened: AtomicU64,
-    pub connections_closed: AtomicU64,
-    pub connect_retries: AtomicU64,
-    pub connect_success_after_retry: AtomicU64,
-    pub write_batches: AtomicU64,
-    pub batched_requests: AtomicU64,
-    pub queue_full: AtomicU64,
-    pub bytes_read: AtomicU64,
-    pub bytes_written: AtomicU64,
+    pub requests: [[Counter; RESULT_CODE_COUNT]; COMMAND_KIND_COUNT],
+    pub latency_us_sum: Counter,
+    pub connections_opened: Counter,
+    pub connections_closed: Counter,
+    pub connect_retries: Counter,
+    pub connect_success_after_retry: Counter,
+    pub write_batches: Counter,
+    pub batched_requests: Counter,
+    pub queue_full: Counter,
+    pub bytes_read: Counter,
+    pub bytes_written: Counter,
 
     // gauges
-    pub pending_reqs: AtomicI64,
-    pub inflight_reqs: AtomicI64,
+    pub pending_reqs: Gauge,
+    pub inflight_reqs: Gauge,
 }
 
-impl BackendCounterShard {
+impl BackendMetricsShard {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
     pub fn record_send(&self, cmd: CommandKind, code: ResultCode, latency_us: u64) {
-        self.requests[cmd as usize][code as usize].fetch_add(1, Ordering::Relaxed);
-        self.latency_us_sum.fetch_add(latency_us, Ordering::Relaxed);
+        self.requests[cmd as usize][code as usize].inc();
+        self.latency_us_sum.add(latency_us);
     }
 
     pub fn record_result(&self, cmd: CommandKind, code: ResultCode) {
-        self.requests[cmd as usize][code as usize].fetch_add(1, Ordering::Relaxed);
+        self.requests[cmd as usize][code as usize].inc();
     }
 }
 
@@ -107,33 +105,27 @@ mod tests {
     /// no two records land in the same slot.
     #[test]
     fn every_command_result_cell_is_distinct() {
-        let counters = BackendCounterShard::new();
+        let metrics = BackendMetricsShard::new();
         for cmd in 0..COMMAND_KIND_COUNT {
             for code in 0..RESULT_CODE_COUNT {
-                let cell = &counters.requests[cmd][code];
-                assert_eq!(cell.load(Ordering::Relaxed), 0);
-                cell.fetch_add(1, Ordering::Relaxed);
+                let cell = &metrics.requests[cmd][code];
+                assert_eq!(cell.load(), 0);
+                cell.inc();
             }
         }
-        let total: u64 = counters
-            .requests
-            .iter()
-            .flatten()
-            .map(|c| c.load(Ordering::Relaxed))
-            .sum();
+        let total: u64 = metrics.requests.iter().flatten().map(Counter::load).sum();
         assert_eq!(total, (COMMAND_KIND_COUNT * RESULT_CODE_COUNT) as u64);
     }
 
     #[test]
     fn record_send_accumulates_latency() {
-        let counters = BackendCounterShard::new();
-        counters.record_send(CommandKind::Get, ResultCode::Success, 150);
-        counters.record_send(CommandKind::Get, ResultCode::Success, 250);
-        counters.record_send(CommandKind::Get, ResultCode::Timeout, 1000);
-        assert_eq!(counters.latency_us_sum.load(Ordering::Relaxed), 1400);
+        let metrics = BackendMetricsShard::new();
+        metrics.record_send(CommandKind::Get, ResultCode::Success, 150);
+        metrics.record_send(CommandKind::Get, ResultCode::Success, 250);
+        metrics.record_send(CommandKind::Get, ResultCode::Timeout, 1000);
+        assert_eq!(metrics.latency_us_sum.load(), 1400);
         assert_eq!(
-            counters.requests[CommandKind::Get as usize][ResultCode::Success as usize]
-                .load(Ordering::Relaxed),
+            metrics.requests[CommandKind::Get as usize][ResultCode::Success as usize].load(),
             2
         );
     }
@@ -141,18 +133,18 @@ mod tests {
     /// gauges go both ways and settle back to zero after a drain.
     #[test]
     fn gauges_return_to_zero() {
-        let counters = BackendCounterShard::new();
-        counters.pending_reqs.fetch_add(3, Ordering::Relaxed);
-        counters.pending_reqs.fetch_sub(3, Ordering::Relaxed);
-        counters.inflight_reqs.fetch_add(2, Ordering::Relaxed);
-        counters.inflight_reqs.fetch_sub(2, Ordering::Relaxed);
-        assert_eq!(counters.pending_reqs.load(Ordering::Relaxed), 0);
-        assert_eq!(counters.inflight_reqs.load(Ordering::Relaxed), 0);
+        let metrics = BackendMetricsShard::new();
+        metrics.pending_reqs.add(3);
+        metrics.pending_reqs.sub(3);
+        metrics.inflight_reqs.add(2);
+        metrics.inflight_reqs.sub(2);
+        assert_eq!(metrics.pending_reqs.load(), 0);
+        assert_eq!(metrics.inflight_reqs.load(), 0);
     }
 
     /// shards must not share cache lines across threads.
     #[test]
     fn shard_is_cache_line_aligned() {
-        assert!(std::mem::align_of::<BackendCounterShard>() >= 64);
+        assert!(std::mem::align_of::<BackendMetricsShard>() >= 64);
     }
 }

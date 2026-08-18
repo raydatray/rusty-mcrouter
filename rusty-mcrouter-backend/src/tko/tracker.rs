@@ -3,12 +3,14 @@ use std::sync::{
     Arc, Mutex, Weak,
 };
 
+use rusty_mcrouter_observability_primitives::Gauge;
+
 use crate::{
     classify::ResultCode,
     tko::{
-        counters::TkoCounters,
         events::{TkoEvent, TkoEventRecord},
         map::TkoTrackerMap,
+        metrics::GlobalTkoMetrics,
         pool::{GateDecision, PoolTkoTracker},
     },
 };
@@ -36,7 +38,7 @@ pub struct TkoTracker {
     threshold: u64,
     tko_reason: AtomicU8,
     consecutive_failures: AtomicU64,
-    global: Arc<TkoCounters>,
+    global_metrics: Arc<GlobalTkoMetrics>,
     pool: Mutex<Option<Arc<PoolTkoTracker>>>,
     key: Arc<str>,
     map: Weak<TkoTrackerMap>,
@@ -45,7 +47,7 @@ pub struct TkoTracker {
 impl TkoTracker {
     pub(crate) fn new(
         threshold: u64,
-        global: Arc<TkoCounters>,
+        global_metrics: Arc<GlobalTkoMetrics>,
         key: Arc<str>,
         map: Weak<TkoTrackerMap>,
     ) -> Self {
@@ -56,7 +58,7 @@ impl TkoTracker {
             threshold,
             tko_reason: AtomicU8::new(ResultCode::Success as u8),
             consecutive_failures: AtomicU64::new(0),
-            global,
+            global_metrics,
             pool: Mutex::new(None),
             key,
             map,
@@ -65,6 +67,10 @@ impl TkoTracker {
 
     pub(crate) fn set_pool_tracker(&self, pool: Arc<PoolTkoTracker>) {
         *self.pool.lock().unwrap() = Some(pool)
+    }
+
+    pub(crate) fn key(&self) -> &Arc<str> {
+        &self.key
     }
 
     #[inline]
@@ -98,12 +104,12 @@ impl TkoTracker {
             }
         }
 
-        self.counter(kind).fetch_add(1, Ordering::Relaxed);
+        self.metric(kind).inc();
         true
     }
 
     fn decrement_tko_count(&self, kind: TkoKind) {
-        let old = self.counter(kind).fetch_sub(1, Ordering::Relaxed);
+        let old = self.metric(kind).dec();
 
         debug_assert!(old != 0, "{kind:?} underflow: unmark without matching mark");
         if let Some(pool) = self.pool() {
@@ -167,8 +173,8 @@ impl TkoTracker {
         if self.is_responsible(dest) {
             // we already own this tko - so just convert in place
             self.sum_failures.fetch_or(1, Ordering::AcqRel);
-            self.global.hard_tkos.fetch_add(1, Ordering::Relaxed);
-            self.global.soft_tkos.fetch_sub(1, Ordering::Relaxed);
+            self.global_metrics.hard_tkos.inc();
+            self.global_metrics.soft_tkos.dec();
 
             // we were already responsible, probes are already running
             return false;
@@ -262,8 +268,8 @@ impl TkoTracker {
             pool: pool.map(|p| Arc::clone(p.name())),
             reason,
             consecutive_failures: self.consecutive_failures(),
-            global_soft_tkos: self.global.soft_tkos.load(Ordering::Relaxed),
-            global_hard_tkos: self.global.hard_tkos.load(Ordering::Relaxed),
+            global_soft_tkos: self.global_metrics.soft_tkos.load(),
+            global_hard_tkos: self.global_metrics.hard_tkos.load(),
         });
     }
 
@@ -287,10 +293,10 @@ impl TkoTracker {
         self.pool.lock().unwrap().clone()
     }
 
-    fn counter(&self, kind: TkoKind) -> &AtomicU64 {
+    fn metric(&self, kind: TkoKind) -> &Gauge {
         match kind {
-            TkoKind::Soft => &self.global.soft_tkos,
-            TkoKind::Hard => &self.global.hard_tkos,
+            TkoKind::Soft => &self.global_metrics.soft_tkos,
+            TkoKind::Hard => &self.global_metrics.hard_tkos,
         }
     }
 }
@@ -311,7 +317,7 @@ mod tests {
     use crate::tko::pool::FailOpenThresholds;
 
     fn null_sink() -> TkoEventSink {
-        Box::new(|_| {})
+        TkoEventSink::new(|_| {})
     }
 
     /// Tracker via the map (the only production construction path); the map
@@ -372,7 +378,7 @@ mod tests {
         assert!(t.record_success(owner));
         assert!(!t.is_tko());
         assert_eq!(t.reason(), ResultCode::Success);
-        assert_eq!(map.global_tkos().total(), 0);
+        assert_eq!(map.global_metrics().total(), 0);
     }
 
     #[test]
@@ -383,13 +389,13 @@ mod tests {
         assert!(t.record_hard_failure(dest, ResultCode::ConnectError));
         assert!(t.is_hard_tko());
         assert_eq!(t.reason(), ResultCode::ConnectError);
-        assert_eq!(map.global_tkos().hard_tkos.load(Ordering::Relaxed), 1);
+        assert_eq!(map.global_metrics().hard_tkos.load(), 1);
 
         assert!(!t.record_hard_failure(dest, ResultCode::ConnectError));
-        assert_eq!(map.global_tkos().hard_tkos.load(Ordering::Relaxed), 1);
+        assert_eq!(map.global_metrics().hard_tkos.load(), 1);
 
         assert!(t.record_success(dest));
-        assert_eq!(map.global_tkos().total(), 0);
+        assert_eq!(map.global_metrics().total(), 0);
     }
 
     /// The owner's soft->hard conversion moves the GLOBAL gauges but leaves
@@ -411,8 +417,8 @@ mod tests {
         assert!(a.record_soft_failure(tok_a, ResultCode::Timeout)); // pool slot 1
         assert!(!a.record_hard_failure(tok_a, ResultCode::ConnectError)); // convert
         assert!(a.is_hard_tko());
-        assert_eq!(map.global_tkos().soft_tkos.load(Ordering::Relaxed), 0);
-        assert_eq!(map.global_tkos().hard_tkos.load(Ordering::Relaxed), 1);
+        assert_eq!(map.global_metrics().soft_tkos.load(), 0);
+        assert_eq!(map.global_metrics().hard_tkos.load(), 1);
         // faithful to upstream: conversion does not rewrite the reason
         assert_eq!(a.reason(), ResultCode::Timeout);
 
@@ -448,7 +454,7 @@ mod tests {
         assert!(t.is_tko());
         assert!(t.remove_destination(owner));
         assert!(!t.is_tko());
-        assert_eq!(map.global_tkos().total(), 0);
+        assert_eq!(map.global_metrics().total(), 0);
     }
 
     /// The pool gate refusing a mark leaves the word untouched: the box
@@ -469,7 +475,7 @@ mod tests {
         assert!(!b.record_hard_failure(tok_b, ResultCode::ConnectError)); // also refused
         assert!(!b.is_tko());
         assert_eq!(
-            map.global_tkos().total(),
+            map.global_metrics().total(),
             1,
             "only the admitted mark counts"
         );

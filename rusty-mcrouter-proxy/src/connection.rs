@@ -1,9 +1,8 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::{collections::BTreeMap, rc::Rc};
 
 use bytes::{Bytes, BytesMut};
-use rusty_mcrouter_backend::counters::CommandKind;
+use rusty_mcrouter_backend::metrics::CommandKind;
 use rusty_mcrouter_core::DynRoute;
 use rusty_mcrouter_protocol::meta::{
     DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
@@ -17,7 +16,7 @@ use tokio::{
 };
 
 use crate::{
-    config::ThreadMode, proxy_set::ProxySet, FrontendCounterShard, FrontendError, ProxyHandle,
+    config::ThreadMode, proxy_set::ProxySet, FrontendError, FrontendMetricsShard, ProxyHandle,
 };
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
@@ -45,7 +44,7 @@ pub struct Connection {
     /// hop-local `MetaReplyPlan` (never routed, never crosses threads) and
     /// flips to `Ready` when its outcome exists.
     slots: BTreeMap<usize, Slot>,
-    counters: Arc<FrontendCounterShard>,
+    metrics: Arc<FrontendMetricsShard>,
     next_seq: usize,
     next_write: usize,
     in_flight: usize,
@@ -77,7 +76,7 @@ impl Connection {
         local_route: Rc<dyn DynRoute>,
         proxies: ProxySet,
         mode: ThreadMode,
-        counters: Arc<FrontendCounterShard>,
+        metrics: Arc<FrontendMetricsShard>,
     ) -> Self {
         let (reader, writer) = stream.into_split();
         let (completed_tx, completed_rx) = mpsc::channel(COMPLETED_CHANNEL_CAPACITY);
@@ -94,7 +93,7 @@ impl Connection {
             decoder: MetaRequestDecoder::new(),
             encoder: MetaReplyEncoder::new(),
             slots: BTreeMap::new(),
-            counters,
+            metrics,
             next_seq: 0,
             next_write: 0,
             in_flight: 0,
@@ -152,9 +151,8 @@ impl Connection {
                     request,
                     reply_plan,
                 })) => {
-                    self.counters.request[CommandKind::of(&request) as usize]
-                        .fetch_add(1, Ordering::Relaxed);
-                    self.counters.processing.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.requests[CommandKind::of(&request) as usize].inc();
+                    self.metrics.processing.inc();
                     let seq = self.take_seq();
                     self.slots.insert(
                         seq,
@@ -167,7 +165,7 @@ impl Connection {
                     self.submit_single(seq, request);
                 }
                 Ok(Some(DecodedMetaCommand::NoOp)) => {
-                    self.counters.noops.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.noops.inc();
                     let seq = self.take_seq();
                     self.slots.insert(seq, Slot::ready(SlotOutcome::NoOp));
                 }
@@ -175,7 +173,7 @@ impl Connection {
                 // one malformed command was consumed; its error joins the
                 // pipeline in order and decoding continues.
                 Err(MetaRequestDecodeError::Recoverable(error)) => {
-                    self.counters.parse_errors.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.parse_errors.inc();
                     let seq = self.take_seq();
                     self.slots
                         .insert(seq, Slot::ready(SlotOutcome::Reply(Reply::Error(error))));
@@ -198,7 +196,7 @@ impl Connection {
 
     fn complete(&mut self, seq: usize, reply: Reply) {
         self.in_flight = self.in_flight.saturating_sub(1);
-        self.counters.processing.fetch_sub(1, Ordering::Relaxed);
+        self.metrics.processing.dec();
         if let Some(slot) = self.slots.get_mut(&seq) {
             slot.state = SlotState::Ready(SlotOutcome::Reply(reply));
         }
@@ -249,7 +247,7 @@ impl Connection {
                 SlotOutcome::NoOp => self.encoder.encode_noop(&mut self.write_buf),
                 SlotOutcome::Reply(reply) => {
                     if matches!(reply, Reply::Error(_)) {
-                        self.counters.failed.fetch_add(1, Ordering::Relaxed);
+                        self.metrics.failed.inc();
                     }
                     if self
                         .encoder
@@ -257,7 +255,7 @@ impl Connection {
                         .is_err()
                     {
                         if !matches!(reply, Reply::Error(_)) {
-                            self.counters.failed.fetch_add(1, Ordering::Relaxed);
+                            self.metrics.failed.inc();
                         }
                         // the reply cannot satisfy this slot's plan (for
                         // example a backend omitted a projected field):
@@ -284,9 +282,7 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        self.counters
-            .processing
-            .fetch_sub(self.in_flight as i64, Ordering::Relaxed);
+        self.metrics.processing.sub(self.in_flight as i64);
     }
 }
 
@@ -325,10 +321,9 @@ async fn route_one(target: RouteTarget, req: Request) -> Reply {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
-    use rusty_mcrouter_backend::counters::CommandKind;
+    use rusty_mcrouter_backend::metrics::CommandKind;
     use rusty_mcrouter_backend::test_support::{run_local, MockBackend};
     use rusty_mcrouter_core::{DestinationRoute, Route};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -340,7 +335,7 @@ mod tests {
     /// route into a mock backend. the proxy handle channel is never used
     /// (SameThread routes inline) but ProxySet demands one.
     async fn session(
-        counters: Arc<FrontendCounterShard>,
+        metrics: Arc<FrontendMetricsShard>,
     ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -357,7 +352,7 @@ mod tests {
             route,
             proxies,
             ThreadMode::SameThread,
-            counters,
+            metrics,
         );
         let task = tokio::task::spawn_local(async move {
             let _ = conn.run().await;
@@ -379,14 +374,14 @@ mod tests {
         }
     }
 
-    /// THE frontend counters test: a pipelined session of mg + mn + garbage
+    /// THE frontend metrics test: a pipelined session of mg + mn + garbage
     /// counts one of each fact, failed counts the CLIENT_ERROR, replies come
     /// back in pipeline order, and the gauges settle to zero.
     #[tokio::test]
-    async fn frontend_counters_account_a_pipelined_session() {
+    async fn frontend_metrics_account_a_pipelined_session() {
         run_local(async {
-            let counters = FrontendCounterShard::new();
-            let (mut client, task) = session(Arc::clone(&counters)).await;
+            let metrics = FrontendMetricsShard::new();
+            let (mut client, task) = session(Arc::clone(&metrics)).await;
 
             client
                 .write_all(b"mg foo v\r\nmn\r\nnot_a_command\r\n")
@@ -401,23 +396,20 @@ mod tests {
             // error and a client-visible error reply
             assert_eq!(lines[2], "ERROR", "garbage must answer in pipeline order");
 
+            assert_eq!(metrics.requests[CommandKind::Get as usize].load(), 1);
+            assert_eq!(metrics.noops.load(), 1);
+            assert_eq!(metrics.parse_errors.load(), 1);
             assert_eq!(
-                counters.request[CommandKind::Get as usize].load(Ordering::Relaxed),
-                1
-            );
-            assert_eq!(counters.noops.load(Ordering::Relaxed), 1);
-            assert_eq!(counters.parse_errors.load(Ordering::Relaxed), 1);
-            assert_eq!(
-                counters.failed.load(Ordering::Relaxed),
+                metrics.failed.load(),
                 1,
                 "the CLIENT_ERROR is a client-visible error reply"
             );
-            assert_eq!(counters.processing.load(Ordering::Relaxed), 0);
+            assert_eq!(metrics.processing.load(), 0);
 
             // client disconnect ends the session; the gauge must not leak
             drop(client);
             task.await.unwrap();
-            assert_eq!(counters.processing.load(Ordering::Relaxed), 0);
+            assert_eq!(metrics.processing.load(), 0);
         })
         .await;
     }

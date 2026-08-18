@@ -100,7 +100,6 @@ macro_rules! shard_source {
 
         impl $crate::metrics::MetricsSource for $source {
             fn encode(&self, out: &mut $crate::metrics::MetricsText) {
-                use std::sync::atomic::Ordering;
                 $( $crate::shard_source!(@emit $kind, self, out, $field, $name); )*
             }
         }
@@ -110,7 +109,7 @@ macro_rules! shard_source {
         $out.counter(
             $name,
             &[],
-            $self.shards.iter().map(|s| s.$field.load(Ordering::Relaxed)).sum::<u64>(),
+            $self.shards.iter().map(|s| s.$field.load()).sum::<u64>(),
         );
     };
 
@@ -118,15 +117,16 @@ macro_rules! shard_source {
         $out.gauge(
             $name,
             &[],
-            $self.shards.iter().map(|s| s.$field.load(Ordering::Relaxed)).sum::<i64>(),
+            $self.shards.iter().map(|s| s.$field.load()).sum::<i64>(),
         );
     };
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicI64, AtomicU64};
     use std::sync::Arc;
+
+    use rusty_mcrouter_observability_primitives::{Counter, Gauge};
 
     use super::*;
 
@@ -195,8 +195,8 @@ mod tests {
     fn shard_source_macro_sums_across_shards() {
         #[derive(Default)]
         struct FakeShard {
-            hits: AtomicU64,
-            depth: AtomicI64,
+            hits: Counter,
+            depth: Gauge,
         }
 
         shard_source! {
@@ -208,10 +208,10 @@ mod tests {
 
         let s1 = Arc::new(FakeShard::default());
         let s2 = Arc::new(FakeShard::default());
-        s1.hits.store(3, std::sync::atomic::Ordering::Relaxed);
-        s2.hits.store(4, std::sync::atomic::Ordering::Relaxed);
-        s1.depth.store(5, std::sync::atomic::Ordering::Relaxed);
-        s2.depth.store(-2, std::sync::atomic::Ordering::Relaxed);
+        s1.hits.add(3);
+        s2.hits.add(4);
+        s1.depth.add(5);
+        s2.depth.add(-2);
 
         let mut registry = MetricsRegistry::new();
         registry.register(Box::new(FakeSource {

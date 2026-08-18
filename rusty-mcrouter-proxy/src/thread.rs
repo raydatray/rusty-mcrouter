@@ -36,9 +36,9 @@ pub fn proxy_thread_main(
             thread_mode,
             listener_config,
             tko_map,
-            counters_registry,
-            backend_counters,
-            frontend_counters,
+            metrics_registry,
+            backend_metrics,
+            frontend_metrics,
             events,
             defaults,
             sweep_interval,
@@ -82,7 +82,7 @@ pub fn proxy_thread_main(
         // thread-local and never shared across threads. Backends are lazy:
         // building over dead servers succeeds, they just start life failing
         // (and TKO via the shared tracker map).
-        let dest_map = destination::Map::new(tko_map, backend_counters, counters_registry);
+        let dest_map = destination::Map::new(tko_map, backend_metrics, metrics_registry);
         let _sweep = dest_map.spawn_idle_sweep(sweep_interval);
         let factory = DestinationFactory::new(Rc::clone(&dest_map));
         let route = match build_route(&config, &factory, &defaults) {
@@ -95,7 +95,7 @@ pub fn proxy_thread_main(
 
         let _ = ready_tx.send(Ok(bound_addr));
         drop(ready_tx);
-        events(WorkerEventRecord {
+        events.emit(WorkerEventRecord {
             proxy_id,
             event: WorkerEvent::Started,
         });
@@ -118,7 +118,7 @@ pub fn proxy_thread_main(
             route,
             proxies,
             thread_mode,
-            frontend_counters,
+            frontend_metrics,
             work_rx,
         );
 
@@ -137,7 +137,7 @@ pub fn proxy_thread_main(
             }
         };
 
-        events(WorkerEventRecord {
+        events.emit(WorkerEventRecord {
             proxy_id,
             event: WorkerEvent::Stopped,
         });

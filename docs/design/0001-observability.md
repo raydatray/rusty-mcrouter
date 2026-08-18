@@ -48,7 +48,7 @@ flowchart LR
         EM["transition emitters<br/>tko trackers (backend)<br/>failover routes (core)<br/>backend connections (backend)<br/>frontend + workers (proxy)"]
     end
     W[workers / control plane] -- events --> BUS
-    RQ -- "relaxed increment,<br/>no lock, no alloc" --> SH[counter shards<br/>one per proxy thread]
+    RQ -- "relaxed increment,<br/>no lock, no alloc" --> SH[metric shards<br/>one per proxy thread]
     EM -- "try_send, sheds on full" --> BUS[bounded event bus]
     subgraph control thread
         BUS --> CONS[consumer:<br/>match, tracing::info/warn/error]
@@ -131,15 +131,19 @@ a new integration crate, `rusty-mcrouter-observability`:
 flowchart TB
     P[rusty-mcrouter-protocol]
     K[rusty-mcrouter-config]
-    N["rusty-mcrouter-backend<br/>TkoEventRecord, BackendCounterShard,<br/>DestinationCounters + sinks"]
+    Q["rusty-mcrouter-observability-primitives<br/>Counter, Gauge, EventSink"]
+    N["rusty-mcrouter-backend<br/>TkoEventRecord, BackendMetricsShard,<br/>DestinationMetrics + sinks"]
     C["rusty-mcrouter-core<br/>RoutingEventRecord + counters/sink"]
-    X["rusty-mcrouter-proxy<br/>WorkerEventRecord, FrontendCounterShard,<br/>frontend server + orchestration"]
+    X["rusty-mcrouter-proxy<br/>WorkerEventRecord, FrontendMetricsShard,<br/>frontend server + orchestration"]
     O["rusty-mcrouter-observability<br/>event envelope + bus,<br/>log formatting, aggregation, /metrics"]
     B["rusty-mcrouter (bin)<br/>constructs and wires everything"]
     P --> N --> C --> X --> O --> B
     K --> C
     K --> X
     N --> O
+    Q --> N
+    Q --> X
+    Q --> O
 ```
 
 **the dependency rule: leaf crates never import observability.**
@@ -158,8 +162,12 @@ each leaf crate keeps its own record + sink types (the existing
 
 ```rust
 // leaf crate — knows nothing about the bus
-pub type TkoEventSink = Box<dyn Fn(TkoEventRecord) + Send + Sync>;
+pub type TkoEventSink = EventSink<TkoEventRecord>;
 ```
+
+`EventSink<T>`, `Counter` and `Gauge` live in the std-only
+`rusty-mcrouter-observability-primitives` crate. domain records remain
+in their fact-owning crates.
 
 records must be **owned and `'static`** — they cross a thread
 boundary. no borrowed `&'a str`; identities are the `Arc<str>`s the
@@ -191,15 +199,30 @@ pub enum OperationalEvent {
     Worker(WorkerEventRecord),
 }
 
+impl From<TkoEventRecord> for OperationalEvent {
+    fn from(record: TkoEventRecord) -> Self {
+        Self::Tko(record)
+    }
+}
+
 impl EventSender {
     pub fn emit(&self, event: OperationalEvent) {
         if self.tx.try_send(event).is_err() {
-            self.dropped.fetch_add(1, Ordering::Relaxed); // never block a proxy thread
+            self.dropped.inc(); // never block a proxy thread
         }
     }
-    pub fn tko_sink(&self) -> TkoEventSink { /* clone sender, wrap */ }
+
+    pub fn sink<T>(&self) -> EventSink<T>
+    where
+        T: Send + 'static,
+        OperationalEvent: From<T>,
+    { /* clone sender, wrap record.into() */ }
 }
 ```
+
+`From<Record> for OperationalEvent` is the compile-time link between
+domain-owned records and the presentation envelope. adding an event source
+does not require another source-specific adapter method.
 
 `try_send` + a dropped-events counter is the load-shedding contract:
 observability must never apply backpressure to request processing.
@@ -336,7 +359,7 @@ faithful to upstream's shape (reference doc §hot-path): fixed arrays,
 single writer, aggregation deferred to scrape time.
 
 ```text
-leaf crate:      owns + updates fixed counters (one shard per proxy thread)
+leaf crate:      owns + updates fixed metrics (one shard per proxy thread)
 observability:   reads shards, aggregates, encodes prometheus text
 binary:          creates shards, hands them to both sides
 ```
@@ -344,22 +367,22 @@ binary:          creates shards, hands them to both sides
 ```rust
 // rusty-mcrouter-backend - one per proxy thread. the name states both
 // the measured leg and the storage shape; this is not per-destination.
-pub struct BackendCounterShard {
+pub struct BackendMetricsShard {
     // monotonic counters
-    pub requests: [[AtomicU64; RESULT_CODE_COUNT]; COMMAND_KIND_COUNT],
-    pub latency_us_sum: AtomicU64,
-    pub connections_opened: AtomicU64,
-    pub connections_closed: AtomicU64,   // incl. idle closes
-    pub connect_retries: AtomicU64,
-    pub connect_success_after_retry: AtomicU64,
-    pub write_batches: AtomicU64,
-    pub batched_requests: AtomicU64,     // batch size avg = promql quotient
-    pub queue_full: AtomicU64,           // try_send shedding at the actor channel
-    pub bytes_read: AtomicU64,
-    pub bytes_written: AtomicU64,
+    pub requests: [[Counter; RESULT_CODE_COUNT]; COMMAND_KIND_COUNT],
+    pub latency_us_sum: Counter,
+    pub connections_opened: Counter,
+    pub connections_closed: Counter,   // incl. idle closes
+    pub connect_retries: Counter,
+    pub connect_success_after_retry: Counter,
+    pub write_batches: Counter,
+    pub batched_requests: Counter,     // batch size avg = promql quotient
+    pub queue_full: Counter,           // try_send shedding at the actor channel
+    pub bytes_read: Counter,
+    pub bytes_written: Counter,
     // gauges (single-writer add/sub, summed across shards at scrape)
-    pub pending_reqs: AtomicI64,
-    pub inflight_reqs: AtomicI64,
+    pub pending_reqs: Gauge,
+    pub inflight_reqs: Gauge,
 }
 ```
 
@@ -367,23 +390,23 @@ pub struct BackendCounterShard {
 needs a failover flag through `Backend::send` and is decided in the
 routing-counters slice.)
 
-frontend counters in proxy (`FrontendCounterShard`) and per-pool
+frontend metrics in proxy (`FrontendMetricsShard`) and per-pool
 counters in core follow the same shard shape; gauges derived from
 existing state — tko counts, server states, fail-open — aren't shards
 at all, they're read straight from the live structures at scrape time.
-per-destination counters are a third shape: `DestinationCounters`, an
-`Arc` block in a weak-dedup
-registry keyed by server address (`Destination` itself is `Rc` —
-thread-local, unreachable from the scrape thread). per-destination
-counters have exactly one home: the shared `DestinationCounters` block
-is both the destination's own bookkeeping and the scrape source. there
+per-destination metrics are a third shape: `DestinationMetrics`, an
+`Arc` block in a weak-dedup registry keyed by the canonical address in
+`TkoTracker` (`Destination` itself is `Rc` — thread-local, unreachable
+from the scrape thread). per-destination metrics have exactly one home:
+the shared `DestinationMetrics` block is both the destination's own
+bookkeeping and the scrape source. there
 is no separate thread-local stats struct on `Destination` (there used
 to be — it duplicated every write), and one should not be
 reintroduced.
 
 divergence from upstream, deliberate: upstream uses non-atomic
-relaxed load+store (single-writer arrays). we use `AtomicU64` with
-`Relaxed` ordering — same cost on x86/arm for uncontended
+relaxed load+store (single-writer arrays). our `Counter` and `Gauge`
+primitives wrap atomics with `Relaxed` ordering — same cost on x86/arm for uncontended
 single-writer increments, and the scrape-side reads are sound without
 `unsafe`. shards mean no cache-line contention between proxy threads;
 pad/align per shard.
@@ -393,20 +416,20 @@ scrape-time aggregation (mirrors upstream's read-time `prepare_stats`
 allocate):
 
 ```rust
-// observability — scrape side. BackendCounterShard values → the
-// mcrouter_backend_* families
-struct BackendSource { shards: Vec<Arc<BackendCounterShard>> }
+// observability — scrape side. BackendMetricsShard values → the
+// rusty_mcrouter_backend_* families
+struct BackendSource { shards: Vec<Arc<BackendMetricsShard>> }
 
 impl BackendSource {
     fn encode(&self, out: &mut String) {
         let mut requests = [0u64; RESULT_CODE_COUNT];
         for shard in &self.shards {
             for (acc, c) in requests.iter_mut().zip(&shard.requests) {
-                *acc += c.load(Ordering::Relaxed);
+                *acc += c.load();
             }
         }
-        // # TYPE mcrouter_backend_requests_total counter
-        // mcrouter_backend_requests_total{result="timeout"} 1234
+        // # TYPE rusty_mcrouter_backend_requests_total counter
+        // rusty_mcrouter_backend_requests_total{result="timeout"} 1234
         ...
     }
 }
@@ -416,72 +439,72 @@ metric inventory — the full "port now" set from the catalog (~20
 families; names follow prometheus conventions, with the upstream
 `stat_list.h` name in metric HELP text for cross-reference):
 
-**frontend (proxy, `FrontendCounterShard` shards)**
+**frontend (proxy, `FrontendMetricsShard` shards)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_requests_total` | counter | `proxy`, `command` |
-| `mcrouter_requests_failed_total` | counter | `pool` — client-visible errors (upstream `final_result_error`) |
-| `mcrouter_client_connections` | gauge | — |
-| `mcrouter_requests_processing` / `_waiting` | gauge | `proxy` — slot map depth |
-| `mcrouter_dev_null_requests_total` | counter | — |
+| `rusty_mcrouter_requests_total` | counter | `proxy`, `command` |
+| `rusty_mcrouter_requests_failed_total` | counter | `pool` — client-visible errors (upstream `final_result_error`) |
+| `rusty_mcrouter_client_connections` | gauge | — |
+| `rusty_mcrouter_requests_processing` / `_waiting` | gauge | `proxy` — slot map depth |
+| `rusty_mcrouter_dev_null_requests_total` | counter | — |
 
-**backend (`rusty-mcrouter-backend`, `BackendCounterShard` shards)**
+**backend (`rusty-mcrouter-backend`, `BackendMetricsShard` shards)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_backend_requests_total` | counter | `result`, `leg` (normal/failover), `command` |
-| `mcrouter_backend_connections_opened_total` / `_closed_total` | counter | — |
-| `mcrouter_backend_connect_retries_total` / `_retry_successes_total` | counter | — |
-| `mcrouter_backend_write_batches_total` / `_batched_requests_total` | counter | — (avg batch = promql) |
-| `mcrouter_backend_queue_full_total` | counter | — actor channel shedding |
-| `mcrouter_backend_bytes_{read,written}_total` | counter | — |
-| `mcrouter_backend_pending_reqs` / `_inflight_reqs` | gauge | — summed over shards |
+| `rusty_mcrouter_backend_requests_total` | counter | `result`, `leg` (normal/failover), `command` |
+| `rusty_mcrouter_backend_connections_opened_total` / `_closed_total` | counter | — |
+| `rusty_mcrouter_backend_connect_retries_total` / `_retry_successes_total` | counter | — |
+| `rusty_mcrouter_backend_write_batches_total` / `_batched_requests_total` | counter | — (avg batch = promql) |
+| `rusty_mcrouter_backend_queue_full_total` | counter | — actor channel shedding |
+| `rusty_mcrouter_backend_bytes_{read,written}_total` | counter | — |
+| `rusty_mcrouter_backend_pending_reqs` / `_inflight_reqs` | gauge | — summed over shards |
 
 **tko / health (read from live structures at scrape)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_tko` | gauge | `kind` (soft/hard) — TkoCounters |
-| `mcrouter_suspect_servers` | gauge | — sus_servers scan |
-| `mcrouter_servers` | gauge | `state` (up/down/closed/new) |
-| `mcrouter_pool_fail_open` | gauge | `pool` |
-| `mcrouter_fail_open_entered_total` / `_exited_total` | counter | `pool` |
+| `rusty_mcrouter_tko` | gauge | `kind` (soft/hard) — GlobalTkoMetrics |
+| `rusty_mcrouter_suspect_servers` | gauge | — sus_servers scan |
+| `rusty_mcrouter_servers` | gauge | `state` (up/down/closed/new) |
+| `rusty_mcrouter_pool_fail_open` | gauge | `pool` |
+| `rusty_mcrouter_fail_open_entered_total` / `_exited_total` | counter | `pool` |
 
 **routing (core)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_failover_total` | counter | `policy` (inorder/least_failures) |
-| `mcrouter_failover_exhausted_total` | counter | `policy` |
-| `mcrouter_failover_policy_errors_total` | counter | `class` (result/tko) |
+| `rusty_mcrouter_failover_total` | counter | `policy` (inorder/least_failures) |
+| `rusty_mcrouter_failover_exhausted_total` | counter | `policy` |
+| `rusty_mcrouter_failover_policy_errors_total` | counter | `class` (result/tko) |
 
 **pool (core, config-bounded label cardinality)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_pool_requests_total` | counter | `pool` |
-| `mcrouter_pool_connections` | gauge | `pool` |
-| `mcrouter_pool_duration_us_sum_total` | counter | `pool` — mean via promql |
+| `rusty_mcrouter_pool_requests_total` | counter | `pool` |
+| `rusty_mcrouter_pool_connections` | gauge | `pool` |
+| `rusty_mcrouter_pool_duration_us_sum_total` | counter | `pool` — mean via promql |
 
 **per-destination (default on — non-multiplied except `result`)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_destination_up` | gauge | `destination` (0 = tko'd) |
-| `mcrouter_destination_requests_total` | counter | `destination`, `result` |
-| `mcrouter_destination_latency_us_sum_total` | counter | `destination` — mean via promql |
-| `mcrouter_destination_inflight_reqs` | gauge | `destination` |
+| `rusty_mcrouter_destination_up` | gauge | `destination` (0 = tko'd) |
+| `rusty_mcrouter_destination_requests_total` | counter | `destination`, `result` |
+| `rusty_mcrouter_destination_latency_us_sum_total` | counter | `destination` — mean via promql |
+| `rusty_mcrouter_destination_inflight_reqs` | gauge | `destination` |
 
 **latency / meta / self**
 
 | metric | type | labels |
 |--------|------|--------|
-| `mcrouter_duration_us_sum_total` | counter | `op` (get/update) — mean = `rate(sum)/rate(requests)` |
-| `mcrouter_build_info` | info gauge | `version` |
-| `mcrouter_start_time_seconds` | gauge | — |
-| `mcrouter_proxies` | gauge | — |
-| `mcrouter_events_dropped_total` | counter | — the bus watching itself |
+| `rusty_mcrouter_duration_us_sum_total` | counter | `op` (get/update) — mean = `rate(sum)/rate(requests)` |
+| `rusty_mcrouter_build_info` | info gauge | `version` |
+| `rusty_mcrouter_start_time_seconds` | gauge | — |
+| `rusty_mcrouter_proxies` | gauge | — |
+| `rusty_mcrouter_events_dropped_total` | counter | — the bus watching itself |
 
 boundaries that keep this list honest:
 
@@ -500,7 +523,7 @@ boundaries that keep this list honest:
   averages (see "why no bins"). the per-destination latency EWMA that
   used to live in a thread-local `DestinationStats` is gone entirely —
   sum+count superseded it, and the struct itself was folded into
-  `DestinationCounters`.
+  `DestinationMetrics`.
 - process metrics (`process_*`) come from a stock collector, not
   hand-rolled.
 - **a counter field may only exist if its emit site can be named in
@@ -532,8 +555,8 @@ binary wiring:
 
 ```rust
 let obs = Observability::new(opts);
-let tko_map = TkoTrackerMap::with_sink(obs.events().tko_sink());
-let route = build_route(&config, &factory, &defaults, obs.events().routing_sink())?;
+let tko_map = TkoTrackerMap::with_sink(obs.events().sink());
+let route = build_route(&config, &factory, &defaults, obs.events().sink())?;
 // control thread: spawn consume_events and serve_prometheus as separate
 // tasks (not one select! — neither should silently die with the other)
 ```
@@ -549,10 +572,10 @@ control thread's runtime — no framework dependency for one endpoint.
 2. **observability crate skeleton** — `OperationalEvent`, `EventSender`
    + bounded bus + dropped counter, consumer task, log formatting.
    unit tests: load-shedding, drop counting.
-3. **counter shards** — `BackendCounterShard` + `DestinationCounters`
+3. **metric shards** — `BackendMetricsShard` + `DestinationMetrics`
    in backend
    (fold the old destination stats in, wire into `Destination` and the
-   connection actor), `FrontendCounterShard` in proxy,
+   connection actor), `FrontendMetricsShard` in proxy,
    `MetricsRegistry` + prometheus text encoding in observability.
 4. **/metrics endpoint + binary wiring** — http responder, CLI
    options (`--metrics-port`), end-to-end test: run proxy + mock,

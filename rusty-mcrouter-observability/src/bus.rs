@@ -1,57 +1,48 @@
-use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
-use rusty_mcrouter_backend::tko::TkoEventSink;
-use rusty_mcrouter_proxy::WorkerEventSink;
+use rusty_mcrouter_observability_primitives::{Counter, EventSink};
 use tokio::time::Instant;
 
 use crate::{events::Event, logging};
 
 pub struct EventSender {
     tx: tokio::sync::mpsc::Sender<Event>,
-    dropped_counter: Arc<AtomicU64>,
+    dropped: Arc<Counter>,
 }
 
 impl Clone for EventSender {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
-            dropped_counter: Arc::clone(&self.dropped_counter),
+            dropped: Arc::clone(&self.dropped),
         }
     }
 }
 
 impl EventSender {
-    pub fn tko_sink(&self) -> TkoEventSink {
+    pub fn sink<T>(&self) -> EventSink<T>
+    where
+        T: Send + 'static,
+        Event: From<T>,
+    {
         let sender = self.clone();
 
-        Box::new(move |event| sender.emit(Event::Tko(event)))
-    }
-
-    pub fn worker_sink(&self) -> WorkerEventSink {
-        let sender = self.clone();
-
-        Box::new(move |event| sender.emit(Event::Worker(event)))
+        EventSink::new(move |event: T| sender.emit(event.into()))
     }
 
     pub fn emit(&self, event: Event) {
         if self.tx.try_send(event).is_err() {
             // either full or closed, either way we cannot block so move on
-            self.dropped_counter.fetch_add(1, Ordering::Relaxed);
+            self.dropped.inc();
         }
     }
 
     pub fn dropped_total(&self) -> u64 {
-        self.dropped_counter.load(Ordering::Relaxed)
+        self.dropped.load()
     }
 
-    pub fn dropped_counter(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.dropped_counter)
+    pub fn dropped_counter(&self) -> Arc<Counter> {
+        Arc::clone(&self.dropped)
     }
 }
 
@@ -59,24 +50,21 @@ const DROP_WARN_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct EventConsumer {
     rx: tokio::sync::mpsc::Receiver<Event>,
-    dropped_counter: Arc<AtomicU64>,
+    dropped: Arc<Counter>,
 }
 
 pub fn channel(capacity: usize) -> (EventSender, EventConsumer) {
     assert!(capacity > 0, "a zero-capacity event bus drops everything");
 
     let (tx, rx) = tokio::sync::mpsc::channel(capacity);
-    let dropped_counter = Arc::new(AtomicU64::new(0));
+    let dropped = Arc::new(Counter::default());
 
     (
         EventSender {
             tx,
-            dropped_counter: Arc::clone(&dropped_counter),
+            dropped: Arc::clone(&dropped),
         },
-        EventConsumer {
-            rx,
-            dropped_counter,
-        },
+        EventConsumer { rx, dropped },
     )
 }
 
@@ -92,7 +80,7 @@ impl EventConsumer {
     }
 
     fn warn_if_shedding_events(&self, last_seen: &mut u64, last_warned: &mut Instant) {
-        let dropped = self.dropped_counter.load(Ordering::Relaxed);
+        let dropped = self.dropped.load();
         if dropped > *last_seen && last_warned.elapsed() >= DROP_WARN_INTERVAL {
             tracing::warn!(
                 target: "rusty-mcrouter-observability::bus",
@@ -128,9 +116,9 @@ mod tests {
     #[test]
     fn full_queue_sheds_and_counts() {
         let (tx, _consumer) = channel(2);
-        let sink = tx.worker_sink();
+        let sink = tx.sink::<WorkerEventRecord>();
         for i in 0..5 {
-            sink(worker_record(i));
+            sink.emit(worker_record(i));
         }
         assert_eq!(tx.dropped_total(), 3);
     }

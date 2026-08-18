@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::tko::{
-    counters::TkoCounters,
     events::{default_sink, TkoEventRecord, TkoEventSink},
+    metrics::GlobalTkoMetrics,
     pool::{FailOpenThresholds, PoolTkoTracker},
     tracker::TkoTracker,
 };
@@ -13,7 +13,7 @@ use crate::tko::{
 pub struct TkoTrackerMap {
     trackers: Mutex<HashMap<Arc<str>, Weak<TkoTracker>>>,
     pool_trackers: Mutex<HashMap<Arc<str>, Weak<PoolTkoTracker>>>,
-    global: Arc<TkoCounters>,
+    metrics: Arc<GlobalTkoMetrics>,
     sink: TkoEventSink,
 }
 
@@ -27,13 +27,13 @@ impl TkoTrackerMap {
         Arc::new(TkoTrackerMap {
             trackers: Mutex::new(HashMap::new()),
             pool_trackers: Mutex::new(HashMap::new()),
-            global: Arc::new(TkoCounters::default()),
+            metrics: Arc::new(GlobalTkoMetrics::default()),
             sink,
         })
     }
 
-    pub fn global_tkos(&self) -> &Arc<TkoCounters> {
-        &self.global
+    pub fn global_metrics(&self) -> &Arc<GlobalTkoMetrics> {
+        &self.metrics
     }
 
     pub fn tracker_for(self: &Arc<Self>, host_port: &str, threshold: u64) -> Arc<TkoTracker> {
@@ -45,7 +45,7 @@ impl TkoTrackerMap {
         let key: Arc<str> = Arc::from(host_port);
         let tracker = Arc::new(TkoTracker::new(
             threshold,
-            Arc::clone(&self.global),
+            Arc::clone(&self.metrics),
             Arc::clone(&key),
             Arc::downgrade(self),
         ));
@@ -108,7 +108,7 @@ impl TkoTrackerMap {
     }
 
     pub(crate) fn emit(&self, record: TkoEventRecord) {
-        (self.sink)(record)
+        self.sink.emit(record)
     }
 
     pub(crate) fn remove_dead(&self, key: &str) {
@@ -129,7 +129,7 @@ mod tests {
     use crate::tko::tracker::DestToken;
 
     fn null_sink() -> TkoEventSink {
-        Box::new(|_| {})
+        TkoEventSink::new(|_| {})
     }
 
     #[test]
@@ -216,9 +216,9 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = {
             let events = Arc::clone(&events);
-            Box::new(move |rec: TkoEventRecord| {
+            TkoEventSink::new(move |rec: TkoEventRecord| {
                 events.lock().unwrap().push(rec.event);
-            }) as TkoEventSink
+            })
         };
         (sink, events)
     }
@@ -254,7 +254,7 @@ mod tests {
         });
 
         assert!(!tracker.is_tko());
-        assert_eq!(map.global_tkos().total(), 0, "gauge must drain to zero");
+        assert_eq!(map.global_metrics().total(), 0, "gauge must drain to zero");
     }
 
     /// Reservation/undo balance: a lost CAS must return its pool
@@ -340,8 +340,8 @@ mod tests {
         );
         // the scrape accessors inherit the same exactly-once choreography
         assert!(gate.fail_open());
-        assert_eq!(gate.entered_total(), 1);
-        assert_eq!(gate.exited_total(), 0);
+        assert_eq!(gate.fail_open_entered_total(), 1);
+        assert_eq!(gate.fail_open_exited_total(), 0);
 
         // recover marked boxes; the drain to exit=1 flips the gate back
         for (t, tok) in boxes.iter().take(3) {
@@ -353,8 +353,8 @@ mod tests {
             "exit must fire exactly once"
         );
         assert!(!gate.fail_open());
-        assert_eq!(gate.entered_total(), 1);
-        assert_eq!(gate.exited_total(), 1);
+        assert_eq!(gate.fail_open_entered_total(), 1);
+        assert_eq!(gate.fail_open_exited_total(), 1);
 
         // gate admits marks again
         assert!(boxes[3]
@@ -389,10 +389,10 @@ mod tests {
         });
 
         assert_eq!(wins.load(Ordering::SeqCst), 1, "exactly one winner");
-        assert_eq!(map.global_tkos().hard_tkos.load(Ordering::Relaxed), 1);
+        assert_eq!(map.global_metrics().hard_tkos.load(), 1);
         assert!(tracker.is_hard_tko());
         assert!(tracker.record_success(tokens[winner_idx.load(Ordering::SeqCst)]));
-        assert_eq!(map.global_tkos().total(), 0);
+        assert_eq!(map.global_metrics().total(), 0);
     }
 
     #[test]

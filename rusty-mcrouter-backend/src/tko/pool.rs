@@ -3,6 +3,8 @@ use std::sync::{
     Arc,
 };
 
+use rusty_mcrouter_observability_primitives::Counter;
+
 /// Fail-open hysteresis thresholds: the gate opens when `enter` destinations
 /// are TKO'd (refusing further marks) and closes again once recoveries drain
 /// the count to `exit`. Named fields because two bare u64s in a tuple invite
@@ -33,8 +35,8 @@ pub struct PoolTkoTracker {
     thresholds: FailOpenThresholds,
     fail_open: AtomicBool,
     num_destinations_tko: AtomicU64,
-    entered_total: AtomicU64,
-    exited_total: AtomicU64,
+    fail_open_entered_total: Counter,
+    fail_open_exited_total: Counter,
 }
 
 impl PoolTkoTracker {
@@ -48,8 +50,8 @@ impl PoolTkoTracker {
             thresholds,
             fail_open: AtomicBool::new(false),
             num_destinations_tko: AtomicU64::new(0),
-            entered_total: AtomicU64::new(0),
-            exited_total: AtomicU64::new(0),
+            fail_open_entered_total: Counter::default(),
+            fail_open_exited_total: Counter::default(),
         }
     }
 
@@ -65,7 +67,7 @@ impl PoolTkoTracker {
         loop {
             if cur == self.thresholds.enter {
                 self.fail_open.store(true, Ordering::Release);
-                self.entered_total.fetch_add(1, Ordering::Relaxed);
+                self.fail_open_entered_total.inc();
                 return GateDecision::Refused { just_entered: true };
             }
             match self.num_destinations_tko.compare_exchange_weak(
@@ -86,7 +88,7 @@ impl PoolTkoTracker {
         loop {
             if self.fail_open.load(Ordering::Acquire) && cur == self.thresholds.exit {
                 self.fail_open.store(false, Ordering::Release);
-                self.exited_total.fetch_add(1, Ordering::Relaxed);
+                self.fail_open_exited_total.inc();
                 return true;
             }
             match self.num_destinations_tko.compare_exchange_weak(
@@ -113,12 +115,12 @@ impl PoolTkoTracker {
         self.num_destinations_tko.load(Ordering::Relaxed)
     }
 
-    pub fn entered_total(&self) -> u64 {
-        self.entered_total.load(Ordering::Relaxed)
+    pub fn fail_open_entered_total(&self) -> u64 {
+        self.fail_open_entered_total.load()
     }
 
-    pub fn exited_total(&self) -> u64 {
-        self.exited_total.load(Ordering::Relaxed)
+    pub fn fail_open_exited_total(&self) -> u64 {
+        self.fail_open_exited_total.load()
     }
 }
 

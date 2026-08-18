@@ -207,21 +207,29 @@ async fn metrics_endpoint_reports_traffic() {
 
     let body = scrape(fx.metrics_addr).await;
     assert!(
-        body.contains("mcrouter_requests_total{command=\"mg\"} 2\n"),
+        body.contains("rusty_mcrouter_requests_total{command=\"mg\"} 2\n"),
         "{body}"
     );
     assert!(
-        body.contains("mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 2\n"),
+        body.contains(
+            "rusty_mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 2\n"
+        ),
         "{body}"
     );
     assert!(
-        body.contains("mcrouter_destination_up{destination=\"") && body.contains("\"} 1\n"),
+        body.contains("rusty_mcrouter_destination_up{destination=\"") && body.contains("\"} 1\n"),
         "{body}"
     );
-    assert!(body.contains("mcrouter_proxies 1\n"), "{body}");
-    assert!(body.contains("mcrouter_build_info{version="), "{body}");
+    assert!(body.contains("rusty_mcrouter_proxies 1\n"), "{body}");
+    assert!(
+        body.contains("rusty_mcrouter_build_info{version="),
+        "{body}"
+    );
     // gauges settled after the exchanges closed their connections
-    assert!(body.contains("mcrouter_backend_pending_reqs 0\n"), "{body}");
+    assert!(
+        body.contains("rusty_mcrouter_backend_pending_reqs 0\n"),
+        "{body}"
+    );
 }
 
 /// a dead backend marks hard on first contact (connect refused) and the
@@ -250,10 +258,10 @@ async fn metrics_endpoint_reports_tko() {
         drop(conn);
 
         let body = scrape(fx.metrics_addr).await;
-        if body.contains("mcrouter_tko{kind=\"hard\"} 1\n") {
+        if body.contains("rusty_mcrouter_tko{kind=\"hard\"} 1\n") {
             assert!(
                 body.contains(&format!(
-                    "mcrouter_destination_up{{destination=\"{dead_addr}\"}} 0\n"
+                    "rusty_mcrouter_destination_up{{destination=\"{dead_addr}\"}} 0\n"
                 )),
                 "{body}"
             );

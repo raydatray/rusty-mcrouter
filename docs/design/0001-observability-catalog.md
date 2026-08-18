@@ -37,7 +37,7 @@ blanket rules applied throughout:
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| version, commandargs, pid, parent_pid, time, uptime | port | `mcrouter_build_info` info-gauge + `mcrouter_start_time_seconds`; uptime is promql |
+| version, commandargs, pid, parent_pid, time, uptime | port | `rusty_mcrouter_build_info` info-gauge + `rusty_mcrouter_start_time_seconds`; uptime is promql |
 | ps_rss, ps_vsize, ps_num_{minor,major}_faults, ps_{user,system}_time_sec, rusage_system, rusage_user | process | stock `process_*` collector |
 | fibers_allocated, fibers_pool_size, fibers_stack_high_watermark | n/a | no fibers; tokio task metrics are a different question (tokio-metrics, someday) |
 
@@ -45,8 +45,8 @@ blanket rules applied throughout:
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| num_client_connections | port | gauge `mcrouter_client_connections` |
-| num_servers{,_new,_up,_down,_closed} | port | gauge `mcrouter_servers{state=}` |
+| num_client_connections | port | gauge `rusty_mcrouter_client_connections` |
+| num_servers{,_new,_up,_down,_closed} | port | gauge `rusty_mcrouter_servers{state=}` |
 | num_suspect_servers | port | gauge, straight from `sus_servers` scan |
 | num_connections_opened / _closed | port | counters; we already count connects + idle_closes per destination |
 | num_connect_retries, num_connect_success_after_retrying | port | counters; connect-retry path exists |
@@ -59,9 +59,9 @@ blanket rules applied throughout:
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| num_soft_tko_count, num_hard_tko_count | port | `mcrouter_tko{kind=}` gauges — TkoCounters, already in 0001 |
-| num_fail_open_state_{entered,exited} | port | counters from EnterFailOpen/ExitFailOpen events; plus `mcrouter_pool_fail_open{pool=}` gauge (0001) |
-| max_num_tko | promql | `max_over_time(mcrouter_tko[...])` |
+| num_soft_tko_count, num_hard_tko_count | port | `rusty_mcrouter_tko{kind=}` gauges — GlobalTkoMetrics, already in 0001 |
+| num_fail_open_state_{entered,exited} | port | counters from EnterFailOpen/ExitFailOpen events; plus `rusty_mcrouter_pool_fail_open{pool=}` gauge (0001) |
+| max_num_tko | promql | `max_over_time(rusty_mcrouter_tko[...])` |
 
 ## request results (backend leg)
 
@@ -72,15 +72,15 @@ names, plus final_result_error.
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| result_* (all 40) | fold | `mcrouter_backend_requests_total{result=, leg=}` — our ResultCode enum is the label; rates are promql |
-| final_result_error | port | counter `mcrouter_requests_failed_total` — the *client-visible* error, distinct from per-attempt results |
+| result_* (all 40) | fold | `rusty_mcrouter_backend_requests_total{result=, leg=}` — our ResultCode enum is the label; rates are promql |
+| final_result_error | port | counter `rusty_mcrouter_requests_failed_total` — the *client-visible* error, distinct from per-attempt results |
 | result_busy, result_deadline_exceeded_* | defer | no busy/deadline semantics yet; label values appear when the result codes do |
 
 ## request flow (frontend)
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| request_{sent,error,success,replied} + _count variants | fold | `mcrouter_requests_total{...}` + result labels; rates promql |
+| request_{sent,error,success,replied} + _count variants | fold | `rusty_mcrouter_requests_total{...}` + result labels; rates promql |
 | request_has_crypto_auth_token | n/a | |
 | proxy_reqs_processing, proxy_reqs_waiting, proxy_request_num_outstanding | port | gauges; maps to our slot map depth — good early-warning signals |
 | proxy_queue_full, proxy_queues_all_full | port | counters; maps to connection-actor QueueFull shedding |
@@ -98,14 +98,14 @@ ascii commands.
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| all 76 | fold | `mcrouter_requests_total{command=}` (frontend) + `mcrouter_backend_requests_total{command=, leg=}`. our command set is the meta five (mg/ms/md/ma/me) + mn — 19 ascii commands don't exist here; the *shape* ports, the cardinality shrinks |
+| all 76 | fold | `rusty_mcrouter_requests_total{command=}` (frontend) + `rusty_mcrouter_backend_requests_total{command=, leg=}`. our command set is the meta five (mg/ms/md/ma/me) + mn — 19 ascii commands don't exist here; the *shape* ports, the cardinality shrinks |
 
 ## failover
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| failover_all, failover_all_failed(+_count) | port | `mcrouter_failover_total`, `mcrouter_failover_exhausted_total` |
-| failover_inorder_policy(+_failed), failover_least_failures_policy(+_failed) | fold | `mcrouter_failover_total{policy=}` — both policies exist |
+| failover_all, failover_all_failed(+_count) | port | `rusty_mcrouter_failover_total`, `rusty_mcrouter_failover_exhausted_total` |
+| failover_inorder_policy(+_failed), failover_least_failures_policy(+_failed) | fold | `rusty_mcrouter_failover_total{policy=}` — both policies exist |
 | failover_deterministic_order_*, failover_rendezvous_*, failover_custom_* (17 names), custom_policy_attempts*, failover_conditional* | defer | policies we don't have; label values appear with the policy |
 | failover_num_collisions, failover_num_failed_domain_collisions, failover_same_failure_domain, dest_with_no_failure_domain_count | defer | failure domains not implemented |
 | failover_policy_result_error, failover_policy_tko_error | port | counters; maps to our route_code classification |
@@ -115,7 +115,7 @@ ascii commands.
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| destination_batches_sum, destination_requests_sum, destination_batch_size | port | we batch writes (drain_channel → one write_all); `mcrouter_backend_write_batches_total` + `_requests_total`; avg batch size is promql |
+| destination_batches_sum, destination_requests_sum, destination_batch_size | port | we batch writes (drain_channel → one write_all); `rusty_mcrouter_backend_write_batches_total` + `_requests_total`; avg batch size is promql |
 | destination_pending_reqs, destination_inflight_reqs | port | gauges — pending/inflight VecDeque depths, cheap and valuable |
 | destination_max_{pending,inflight}_reqs | promql | max_over_time |
 | destination_inflight_shadow_reqs (+max) | defer | shadow routes |
@@ -133,7 +133,7 @@ ascii commands.
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| config_age, config_last_attempt, config_last_success, config_failures, configs_from_disk, config_full_attempt | defer | port with hot reload (design 000N); prometheus-shape: `mcrouter_config_last_success_timestamp_seconds` etc |
+| config_age, config_last_attempt, config_last_success, config_failures, configs_from_disk, config_full_attempt | defer | port with hot reload (design 000N); prometheus-shape: `rusty_mcrouter_config_last_success_timestamp_seconds` etc |
 | config_age_sr, config_last_sr_update | n/a | servicerouter |
 
 ## asynclog / distribution / axon / acl / misc
@@ -144,7 +144,7 @@ ascii commands.
 | axon_proxy_* (4), distribution_* (13), srroute_error_on_delete_failure | n/a | meta-internal replication/distribution infra |
 | prefix_acl_* (44 EXTERNAL_STAT) | n/a | meta acl infra |
 | rim_report_failed | n/a | |
-| rate_limited_log_count | port | maps to `mcrouter_events_dropped_total` (0001) — same job, our bus |
+| rate_limited_log_count | port | maps to `rusty_mcrouter_events_dropped_total` (0001) — same job, our bus |
 | load_balancer_load_reset_count | defer | no load-aware selection |
 | before/after/total_latency_injected (5) | defer | fault injection; revisit with the DST work |
 | redirected_lease_set_count | n/a | leases are ascii-protocol; no meta equivalent |
@@ -153,7 +153,7 @@ ascii commands.
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| `<pool>.requests.sum` | port | `mcrouter_pool_requests_total{pool=}` |
+| `<pool>.requests.sum` | port | `rusty_mcrouter_pool_requests_total{pool=}` |
 | `<pool>.final_result_error.sum` | port | `{pool=}` label on requests_failed |
 | `<pool>.connections` | port | gauge `{pool=}` |
 | `<pool>.duration_us.avg`, `<pool>.total_duration_us.avg` | port | as monotonic µs sums, mean via promql |
