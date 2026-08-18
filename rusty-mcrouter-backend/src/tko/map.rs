@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::tko::{
-    counters::TkoCounters,
     events::{default_sink, TkoEventRecord, TkoEventSink},
+    metrics::GlobalTkoMetrics,
     pool::{FailOpenThresholds, PoolTkoTracker},
     tracker::TkoTracker,
 };
@@ -13,7 +13,7 @@ use crate::tko::{
 pub struct TkoTrackerMap {
     trackers: Mutex<HashMap<Arc<str>, Weak<TkoTracker>>>,
     pool_trackers: Mutex<HashMap<Arc<str>, Weak<PoolTkoTracker>>>,
-    global: Arc<TkoCounters>,
+    metrics: Arc<GlobalTkoMetrics>,
     sink: TkoEventSink,
 }
 
@@ -27,13 +27,13 @@ impl TkoTrackerMap {
         Arc::new(TkoTrackerMap {
             trackers: Mutex::new(HashMap::new()),
             pool_trackers: Mutex::new(HashMap::new()),
-            global: Arc::new(TkoCounters::default()),
+            metrics: Arc::new(GlobalTkoMetrics::default()),
             sink,
         })
     }
 
-    pub fn global_tkos(&self) -> &Arc<TkoCounters> {
-        &self.global
+    pub fn global_metrics(&self) -> &Arc<GlobalTkoMetrics> {
+        &self.metrics
     }
 
     pub fn tracker_for(self: &Arc<Self>, host_port: &str, threshold: u64) -> Arc<TkoTracker> {
@@ -45,7 +45,7 @@ impl TkoTrackerMap {
         let key: Arc<str> = Arc::from(host_port);
         let tracker = Arc::new(TkoTracker::new(
             threshold,
-            Arc::clone(&self.global),
+            Arc::clone(&self.metrics),
             Arc::clone(&key),
             Arc::downgrade(self),
         ));
@@ -254,7 +254,7 @@ mod tests {
         });
 
         assert!(!tracker.is_tko());
-        assert_eq!(map.global_tkos().total(), 0, "gauge must drain to zero");
+        assert_eq!(map.global_metrics().total(), 0, "gauge must drain to zero");
     }
 
     /// Reservation/undo balance: a lost CAS must return its pool
@@ -389,10 +389,10 @@ mod tests {
         });
 
         assert_eq!(wins.load(Ordering::SeqCst), 1, "exactly one winner");
-        assert_eq!(map.global_tkos().hard_tkos.load(Ordering::Relaxed), 1);
+        assert_eq!(map.global_metrics().hard_tkos.load(), 1);
         assert!(tracker.is_hard_tko());
         assert!(tracker.record_success(tokens[winner_idx.load(Ordering::SeqCst)]));
-        assert_eq!(map.global_tkos().total(), 0);
+        assert_eq!(map.global_metrics().total(), 0);
     }
 
     #[test]

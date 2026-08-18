@@ -22,8 +22,8 @@ pub struct TkoEventRecord {
     pub pool: Option<Arc<str>>,
     pub reason: ResultCode,
     pub consecutive_failures: u64,
-    pub global_soft_tkos: u64,
-    pub global_hard_tkos: u64,
+    pub global_soft_tkos: i64,
+    pub global_hard_tkos: i64,
 }
 
 pub type TkoEventSink = EventSink<TkoEventRecord>;
