@@ -119,7 +119,7 @@ mod tests {
 
     use super::*;
     use crate::classify::ResultCode;
-    use crate::destination::DestinationCountersRegistry;
+    use crate::destination::DestinationMetricsRegistry;
     use crate::metrics::BackendMetricsShard;
     use crate::test_support::{run_local, scripted_backend_serial, Step};
     use crate::tko::{DestToken, TkoTrackerMap};
@@ -129,7 +129,7 @@ mod tests {
         let factory = DestinationFactory::new(Map::new(
             Arc::clone(&tko),
             BackendMetricsShard::new(),
-            DestinationCountersRegistry::new(),
+            DestinationMetricsRegistry::new(),
         ));
         (tko, factory)
     }

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rusty_mcrouter_backend::classify::ResultCode;
-use rusty_mcrouter_backend::destination::DestinationCountersRegistry;
+use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
 use rusty_mcrouter_backend::metrics::{BackendMetricsShard, CommandKind};
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_proxy::FrontendMetricsShard;
@@ -134,13 +134,14 @@ impl MetricsSource for TkoSource {
 }
 
 pub struct DestinationSource {
-    pub registry: Arc<DestinationCountersRegistry>,
+    pub registry: Arc<DestinationMetricsRegistry>,
 }
 
 impl MetricsSource for DestinationSource {
     fn encode(&self, out: &mut MetricsText) {
         for block in self.registry.snapshot() {
-            let dest = &[("destination", &*block.addr)];
+            let destination = block.destination();
+            let dest = &[("destination", destination)];
             out.gauge(
                 "mcrouter_destination_up",
                 dest,
@@ -150,37 +151,37 @@ impl MetricsSource for DestinationSource {
                 out.counter(
                     "mcrouter_destination_requests_total",
                     &[
-                        ("destination", &block.addr),
+                        ("destination", destination),
                         ("result", code.prometheus_label()),
                     ],
-                    block.requests[code as usize].load(Ordering::Relaxed),
+                    block.requests[code as usize].load(),
                 );
             }
             out.counter(
                 "mcrouter_destination_latency_us_sum_total",
                 dest,
-                block.latency_us_sum.load(Ordering::Relaxed),
+                block.latency_us_sum.load(),
             );
             out.counter(
                 "mcrouter_destination_connects_total",
                 dest,
-                block.connects.load(Ordering::Relaxed),
+                block.connects.load(),
             );
             out.counter(
                 "mcrouter_destination_idle_closes_total",
                 dest,
-                block.idle_closes.load(Ordering::Relaxed),
+                block.idle_closes.load(),
             );
             // per tko episode, reset on unmark - a gauge
             out.gauge(
                 "mcrouter_destination_probes_sent",
                 dest,
-                block.probes_sent.load(Ordering::Relaxed) as i64,
+                block.probes_sent.load(),
             );
             out.gauge(
                 "mcrouter_destination_inflight_reqs",
                 dest,
-                block.inflight_reqs.load(Ordering::Relaxed),
+                block.inflight_reqs.load(),
             );
         }
     }
@@ -294,10 +295,10 @@ mod tests {
     #[test]
     fn destination_source_walks_and_labels() {
         let map = TkoTrackerMap::with_sink(TkoEventSink::new(|_| {}));
-        let registry = DestinationCountersRegistry::new();
+        let registry = DestinationMetricsRegistry::new();
         let addr: Arc<str> = Arc::from("10.0.0.1:11211");
         let tracker = map.tracker_for(&addr, 3);
-        let block = registry.counters_for(&addr, &tracker);
+        let block = registry.metrics_for(&tracker);
         block.record_send(ResultCode::Success, 500);
 
         let text = render(DestinationSource {

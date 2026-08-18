@@ -1,6 +1,6 @@
 use clap::Parser;
 use rusty_mcrouter_backend::{
-    destination::{self, DestinationCountersRegistry},
+    destination::{self, DestinationMetricsRegistry},
     metrics::BackendMetricsShard,
     tko::TkoTrackerMap,
 };
@@ -182,7 +182,7 @@ fn main() -> anyhow::Result<()> {
     // the cross-thread objects: per-server health and per-server counters,
     // shared by every proxy thread's destinations, atomics only
     let tko_map = TkoTrackerMap::with_sink(observability.events().sink());
-    let counters_registry = DestinationCountersRegistry::new();
+    let metrics_registry = DestinationMetricsRegistry::new();
     let defaults = destination_defaults(&args.options);
     let sweep_interval = Duration::from_millis(args.options.reset_inactive_connection_interval_ms);
 
@@ -241,7 +241,7 @@ fn main() -> anyhow::Result<()> {
             thread_mode: ThreadMode::SameThread,
             listener_config,
             tko_map: Arc::clone(&tko_map),
-            counters_registry: Arc::clone(&counters_registry),
+            metrics_registry: Arc::clone(&metrics_registry),
             backend_metrics,
             frontend_metrics,
             events: observability.events().sink(),
@@ -297,7 +297,7 @@ fn main() -> anyhow::Result<()> {
         map: Arc::clone(&tko_map),
     }));
     observability.register(Box::new(DestinationSource {
-        registry: Arc::clone(&counters_registry),
+        registry: Arc::clone(&metrics_registry),
     }));
     observability.register(Box::new(SelfSource {
         dropped: observability.events().dropped_counter(),
