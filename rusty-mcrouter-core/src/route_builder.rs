@@ -1,11 +1,13 @@
 use std::{collections::BTreeMap, rc::Rc, time::Duration};
 
+use rusty_mcrouter_backend::tko::FailOpenThresholds;
+use rusty_mcrouter_backend::{
+    destination, Backend, BackendFactory, BackendFactoryError, PoolHealth,
+};
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
     PoolTkoTrackerConfig, RouteEntry, RouteHandleConfig,
 };
-use rusty_mcrouter_net::tko::FailOpenThresholds;
-use rusty_mcrouter_net::{destination, Backend, BackendFactory, BackendFactoryError, PoolHealth};
 use thiserror::Error;
 
 use crate::{
@@ -315,8 +317,8 @@ fn build_failover_policy(cfg: &FailoverPolicyConfig, n: usize) -> (Box<dyn Failo
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use rusty_mcrouter_backend::test_support::MockBackendFactory;
     use rusty_mcrouter_config::parse;
-    use rusty_mcrouter_net::test_support::MockBackendFactory;
     use rusty_mcrouter_protocol::reply::{ErrorReply, GetReply};
     use rusty_mcrouter_protocol::test_support::get;
     use rusty_mcrouter_protocol::Reply;

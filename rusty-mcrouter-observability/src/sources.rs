@@ -5,10 +5,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rusty_mcrouter_net::classify::ResultCode;
-use rusty_mcrouter_net::counters::{CommandKind, ProxyCounters};
-use rusty_mcrouter_net::destination::DestinationCountersRegistry;
-use rusty_mcrouter_net::tko::TkoTrackerMap;
+use rusty_mcrouter_backend::classify::ResultCode;
+use rusty_mcrouter_backend::counters::{CommandKind, ProxyCounters};
+use rusty_mcrouter_backend::destination::DestinationCountersRegistry;
+use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_proxy::FrontendCounters;
 
 use crate::metrics::{MetricsSource, MetricsText};
@@ -216,7 +216,7 @@ impl MetricsSource for SelfSource {
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_net::tko::{DestToken, FailOpenThresholds};
+    use rusty_mcrouter_backend::tko::{DestToken, FailOpenThresholds};
 
     use super::*;
     use crate::metrics::MetricsRegistry;

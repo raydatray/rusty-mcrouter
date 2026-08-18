@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use rusty_mcrouter_net::mock_memcached::{spawn_failing_mock_memcached, spawn_mock_memcached};
+use rusty_mcrouter_backend::mock_memcached::{spawn_failing_mock_memcached, spawn_mock_memcached};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};

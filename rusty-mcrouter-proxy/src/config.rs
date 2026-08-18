@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use rusty_mcrouter_backend::{counters::ProxyCounters, destination, tko::TkoTrackerMap};
 use rusty_mcrouter_config::ConfigDocument;
-use rusty_mcrouter_net::{counters::ProxyCounters, destination, tko::TkoTrackerMap};
 use tokio::sync::mpsc;
 
 use crate::{message::ProxyMessage, proxy_set::ProxySet, FrontendCounters, WorkerEventSink};
