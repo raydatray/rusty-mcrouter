@@ -340,8 +340,8 @@ mod tests {
         );
         // the scrape accessors inherit the same exactly-once choreography
         assert!(gate.fail_open());
-        assert_eq!(gate.entered_total(), 1);
-        assert_eq!(gate.exited_total(), 0);
+        assert_eq!(gate.fail_open_entered_total(), 1);
+        assert_eq!(gate.fail_open_exited_total(), 0);
 
         // recover marked boxes; the drain to exit=1 flips the gate back
         for (t, tok) in boxes.iter().take(3) {
@@ -353,8 +353,8 @@ mod tests {
             "exit must fire exactly once"
         );
         assert!(!gate.fail_open());
-        assert_eq!(gate.entered_total(), 1);
-        assert_eq!(gate.exited_total(), 1);
+        assert_eq!(gate.fail_open_entered_total(), 1);
+        assert_eq!(gate.fail_open_exited_total(), 1);
 
         // gate admits marks again
         assert!(boxes[3]
