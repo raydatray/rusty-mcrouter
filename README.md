@@ -8,7 +8,8 @@ vibecoded [mcrouter](https://github.com/facebook/mcrouter) in rust
 ## what's what:
 - `rusty-mcrouter-protocol/` — the meta protocol codec: semantic request/reply types, frontend encoder/decoder, backend encoder/decoder
 - `rusty-mcrouter-config/` — parses mcrouter-style json/jsonc config (pools + routes).
-- `rusty-mcrouter-backend/` — the backend leg: memcached client, destinations, health tracking, and backend counters.
+- `rusty-mcrouter-observability-primitives/` — std-only `Counter`, `Gauge`, and `EventSink<T>` shared by fact owners.
+- `rusty-mcrouter-backend/` — the backend leg: memcached client, destinations, health tracking, and backend metrics.
 - `rusty-mcrouter-core/` — routing: the route trait + route types (pool, destination, null, error), built from config.
 - `rusty-mcrouter-proxy/` — the frontend leg: client connections, proxy workers, and proxy-thread orchestration.
 - `rusty-mcrouter-observability/` — event logging, metrics aggregation, and the `/metrics` endpoint.

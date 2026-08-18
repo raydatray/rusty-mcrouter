@@ -2,11 +2,12 @@
 rusty-mcrouter is a memcached routing proxy. clients reach it via the **meta protocol**, and rusty-mcrouter routes each request thru a tree of route handles to a destination server, tracking server health and failing over along the way
 
 ## crates
-there are seven crates. dependencies point from fact owners toward
+there are eight crates. dependencies point from lower-level primitives and fact owners toward
 composition and presentation (`A --> B` means B depends on A):
 
 - **`rusty-mcrouter-protocol`** - the meta protocol codec, request and reply types, the encoders and decoders for both requests and replies and key parsing
 - **`rusty-mcrouter-config`** - config file parsing into pools, routes and policies
+- **`rusty-mcrouter-observability-primitives`** - std-only metric cells and event sink mechanics shared by fact-owning crates; no domain records or presentation logic
 - **`rusty-mcrouter-backend`** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
 - **`rusty-mcrouter-core`** - the routing graph, where a config file is transformed into a tree of route handles
 - **`rusty-mcrouter-proxy`** - the client-facing leg and orchestration: accept loops, frontend protocol handling, proxy threads, workers and cross-thread dispatch
@@ -17,6 +18,7 @@ composition and presentation (`A --> B` means B depends on A):
 flowchart LR
     P[rusty-mcrouter-protocol]
     K[rusty-mcrouter-config]
+    Q[rusty-mcrouter-observability-primitives]
     B[rusty-mcrouter-backend]
     C[rusty-mcrouter-core]
     X[rusty-mcrouter-proxy]
@@ -37,6 +39,9 @@ flowchart LR
     B --> R
     X --> R
     O --> R
+    Q --> B
+    Q --> X
+    Q --> O
 ```
 
 ## request lifecycle
