@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_net::{counters::ProxyCounters, destination, tko::TkoTrackerMap};
-use rusty_mcrouter_observability::{bus::EventSender, frontend::FrontendCounters};
+use rusty_mcrouter_proxy::{FrontendCounters, WorkerEventSink};
 use tokio::sync::mpsc;
 
 use crate::proxy::{message::ProxyMessage, proxy_set::ProxySet};
@@ -25,8 +25,8 @@ pub struct ProxyThreadConfig {
     /// sources hold the same Arcs; this thread is the only writer.
     pub proxy_counters: Arc<ProxyCounters>,
     pub frontend_counters: Arc<FrontendCounters>,
-    /// Worker lifecycle events ride the observability bus.
-    pub events: EventSender,
+    /// Worker lifecycle events are emitted through a leaf-owned sink.
+    pub events: WorkerEventSink,
     /// Router-level destination defaults (derived from RouterOptions once in
     /// main); pools override via server_timeout/connect_timeout.
     pub defaults: destination::Config,

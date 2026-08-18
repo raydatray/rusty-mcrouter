@@ -9,8 +9,8 @@ use rusty_mcrouter_net::classify::ResultCode;
 use rusty_mcrouter_net::counters::{CommandKind, ProxyCounters};
 use rusty_mcrouter_net::destination::DestinationCountersRegistry;
 use rusty_mcrouter_net::tko::TkoTrackerMap;
+use rusty_mcrouter_proxy::FrontendCounters;
 
-use crate::frontend::FrontendCounters;
 use crate::metrics::{MetricsSource, MetricsText};
 use crate::shard_source;
 

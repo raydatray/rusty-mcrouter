@@ -6,13 +6,13 @@ use rusty_mcrouter_net::{
     tko::TkoTrackerMap,
 };
 use rusty_mcrouter_observability::{
-    frontend::FrontendCounters,
     sources::{
         BackendRequestsSource, BackendScalarsSource, DestinationSource, FrontendRequestsSource,
         FrontendScalarsSource, SelfSource, TkoSource,
     },
     Observability,
 };
+use rusty_mcrouter_proxy::FrontendCounters;
 use tokio::sync::mpsc;
 
 use std::{
@@ -247,7 +247,7 @@ fn main() -> anyhow::Result<()> {
             counters_registry: Arc::clone(&counters_registry),
             proxy_counters,
             frontend_counters,
-            events: observability.events().clone(),
+            events: observability.events().worker_sink(),
             defaults: defaults.clone(),
             sweep_interval,
         };

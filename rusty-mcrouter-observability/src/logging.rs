@@ -1,6 +1,7 @@
 use rusty_mcrouter_net::tko::{TkoEvent, TkoEventRecord};
+use rusty_mcrouter_proxy::{WorkerEvent, WorkerEventRecord};
 
-use crate::events::{Event, WorkerEvent, WorkerEventRecord};
+use crate::events::Event;
 
 pub fn write(event: &Event) {
     match event {

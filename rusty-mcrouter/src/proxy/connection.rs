@@ -6,12 +6,12 @@ use bytes::{Bytes, BytesMut};
 use rusty_mcrouter_core::DynRoute;
 use rusty_mcrouter_net::counters::CommandKind;
 use rusty_mcrouter_net::NetError;
-use rusty_mcrouter_observability::frontend::FrontendCounters;
 use rusty_mcrouter_protocol::meta::{
     DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
 };
 use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
+use rusty_mcrouter_proxy::FrontendCounters;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
