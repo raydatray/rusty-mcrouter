@@ -9,7 +9,7 @@ use rusty_mcrouter_backend::classify::ResultCode;
 use rusty_mcrouter_backend::destination::DestinationCountersRegistry;
 use rusty_mcrouter_backend::metrics::{BackendMetricsShard, CommandKind};
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
-use rusty_mcrouter_proxy::FrontendCounterShard;
+use rusty_mcrouter_proxy::FrontendMetricsShard;
 
 use crate::metrics::{MetricsSource, MetricsText};
 use crate::shard_source;
@@ -34,9 +34,9 @@ shard_source! {
 }
 
 shard_source! {
-    /// Frontend counter shards -> the client-facing families. the
+    /// Frontend metric shards -> the client-facing families. the
     /// per-command matrix is FrontendRequestsSource.
-    pub struct FrontendScalarsSource(FrontendCounterShard) {
+    pub struct FrontendScalarsSource(FrontendMetricsShard) wrapped {
         counter noops              => "mcrouter_noops_total";
         counter parse_errors       => "mcrouter_parse_errors_total";
         counter failed             => "mcrouter_requests_failed_total";
@@ -72,7 +72,7 @@ impl MetricsSource for BackendRequestsSource {
 }
 
 pub struct FrontendRequestsSource {
-    pub shards: Vec<Arc<FrontendCounterShard>>,
+    pub shards: Vec<Arc<FrontendMetricsShard>>,
 }
 
 impl MetricsSource for FrontendRequestsSource {
@@ -81,7 +81,7 @@ impl MetricsSource for FrontendRequestsSource {
             let total: u64 = self
                 .shards
                 .iter()
-                .map(|s| s.request[cmd as usize].load(Ordering::Relaxed))
+                .map(|s| s.requests[cmd as usize].load())
                 .sum();
             out.counter(
                 "mcrouter_requests_total",
@@ -251,9 +251,9 @@ mod tests {
 
     #[test]
     fn frontend_sources_render() {
-        let shard = FrontendCounterShard::new();
-        shard.request[CommandKind::Get as usize].fetch_add(3, Ordering::Relaxed);
-        shard.failed.fetch_add(1, Ordering::Relaxed);
+        let shard = FrontendMetricsShard::new();
+        shard.requests[CommandKind::Get as usize].add(3);
+        shard.failed.inc();
 
         let text = render(FrontendRequestsSource {
             shards: vec![Arc::clone(&shard)],
