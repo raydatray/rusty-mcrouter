@@ -2,13 +2,13 @@
 // the shard_source! macro; matrices, walks and direct reads are hand
 // written (unique shapes, one instance each).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rusty_mcrouter_backend::classify::ResultCode;
 use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
 use rusty_mcrouter_backend::metrics::{BackendMetricsShard, CommandKind};
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
+use rusty_mcrouter_observability_primitives::Counter;
 use rusty_mcrouter_proxy::FrontendMetricsShard;
 
 use crate::metrics::{MetricsSource, MetricsText};
@@ -17,7 +17,7 @@ use crate::shard_source;
 shard_source! {
     /// Backend metric shards -> the mcrouter_backend_* scalar families.
     /// the {command, result} matrix is BackendRequestsSource.
-    pub struct BackendScalarsSource(BackendMetricsShard) wrapped {
+    pub struct BackendScalarsSource(BackendMetricsShard) {
         counter latency_us_sum              => "mcrouter_backend_latency_us_sum_total";
         counter connections_opened          => "mcrouter_backend_connections_opened_total";
         counter connections_closed          => "mcrouter_backend_connections_closed_total";
@@ -36,7 +36,7 @@ shard_source! {
 shard_source! {
     /// Frontend metric shards -> the client-facing families. the
     /// per-command matrix is FrontendRequestsSource.
-    pub struct FrontendScalarsSource(FrontendMetricsShard) wrapped {
+    pub struct FrontendScalarsSource(FrontendMetricsShard) {
         counter noops              => "mcrouter_noops_total";
         counter parse_errors       => "mcrouter_parse_errors_total";
         counter failed             => "mcrouter_requests_failed_total";
@@ -180,7 +180,7 @@ impl MetricsSource for DestinationSource {
 }
 
 pub struct SelfSource {
-    pub dropped: Arc<AtomicU64>,
+    pub dropped: Arc<Counter>,
     pub num_proxies: usize,
     /// computed once at startup - no clock reads at scrape time
     pub start_unix_secs: u64,
@@ -188,11 +188,7 @@ pub struct SelfSource {
 
 impl MetricsSource for SelfSource {
     fn encode(&self, out: &mut MetricsText) {
-        out.counter(
-            "mcrouter_events_dropped_total",
-            &[],
-            self.dropped.load(Ordering::Relaxed),
-        );
+        out.counter("mcrouter_events_dropped_total", &[], self.dropped.load());
         out.gauge("mcrouter_proxies", &[], self.num_proxies as i64);
         out.gauge(
             "mcrouter_start_time_seconds",
@@ -315,7 +311,11 @@ mod tests {
     #[test]
     fn self_source_golden() {
         let text = render(SelfSource {
-            dropped: Arc::new(AtomicU64::new(2)),
+            dropped: {
+                let dropped = Arc::new(Counter::default());
+                dropped.add(2);
+                dropped
+            },
             num_proxies: 4,
             start_unix_secs: 1_700_000_000,
         });
