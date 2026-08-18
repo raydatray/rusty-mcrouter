@@ -118,9 +118,13 @@ impl MetricsSource for TkoSource {
             out.counter(
                 "mcrouter_fail_open_entered_total",
                 pool,
-                gate.entered_total(),
+                gate.fail_open_entered_total(),
             );
-            out.counter("mcrouter_fail_open_exited_total", pool, gate.exited_total());
+            out.counter(
+                "mcrouter_fail_open_exited_total",
+                pool,
+                gate.fail_open_exited_total(),
+            );
         }
     }
 }
