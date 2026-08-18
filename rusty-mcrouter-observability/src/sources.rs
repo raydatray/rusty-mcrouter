@@ -98,17 +98,9 @@ pub struct TkoSource {
 
 impl MetricsSource for TkoSource {
     fn encode(&self, out: &mut MetricsText) {
-        let global = self.map.global_tkos();
-        out.gauge(
-            "mcrouter_tko",
-            &[("kind", "soft")],
-            global.soft_tkos.load(Ordering::Relaxed) as i64,
-        );
-        out.gauge(
-            "mcrouter_tko",
-            &[("kind", "hard")],
-            global.hard_tkos.load(Ordering::Relaxed) as i64,
-        );
+        let global = self.map.global_metrics();
+        out.gauge("mcrouter_tko", &[("kind", "soft")], global.soft_tkos.load());
+        out.gauge("mcrouter_tko", &[("kind", "hard")], global.hard_tkos.load());
         out.gauge(
             "mcrouter_suspect_servers",
             &[],
