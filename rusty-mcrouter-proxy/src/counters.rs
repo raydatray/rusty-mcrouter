@@ -6,7 +6,7 @@ use std::sync::{
 use rusty_mcrouter_backend::counters::COMMAND_KIND_COUNT;
 
 #[derive(Default)]
-pub struct FrontendCounters {
+pub struct FrontendCounterShard {
     pub request: [AtomicU64; COMMAND_KIND_COUNT],
     pub noops: AtomicU64,
     pub parse_errors: AtomicU64,
@@ -15,7 +15,7 @@ pub struct FrontendCounters {
     pub processing: AtomicI64,
 }
 
-impl FrontendCounters {
+impl FrontendCounterShard {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }

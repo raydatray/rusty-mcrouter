@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use crate::{
     classify::{code_of, ResultCode},
     client::{Config as ClientConfig, ConnectionEvent, ConnectionHandle, DownReason},
-    counters::{CommandKind, ProxyCounters},
+    counters::{BackendCounterShard, CommandKind},
     destination::{config::Config, key::Key, probe, DestinationCounters},
     error::{ConnectError, LocalError, SendError},
     tko::{DestToken, TkoEvent, TkoTracker},
@@ -24,7 +24,7 @@ pub struct Destination {
     cfg: Config,
     probe: RefCell<Option<tokio::task::JoinHandle<()>>>,
     counters: Arc<DestinationCounters>,
-    shard_counters: Arc<ProxyCounters>,
+    shard_counters: Arc<BackendCounterShard>,
     last_active: Cell<Instant>,
 }
 
@@ -34,7 +34,7 @@ impl Destination {
         cfg: Config,
         tracker: Arc<TkoTracker>,
         counters: Arc<DestinationCounters>,
-        shard_counters: Arc<ProxyCounters>,
+        shard_counters: Arc<BackendCounterShard>,
     ) -> Rc<Self> {
         Rc::new_cyclic(|weak: &Weak<Destination>| {
             let events = {
@@ -308,7 +308,7 @@ mod tests {
             cfg,
             Arc::clone(&tracker),
             counters,
-            ProxyCounters::new(),
+            BackendCounterShard::new(),
         );
         (map, tracker, dest, events)
     }
@@ -488,7 +488,7 @@ mod tests {
                 cfg(3, 1000, 10_000),
                 Arc::clone(&tracker),
                 counters_b,
-                ProxyCounters::new(),
+                BackendCounterShard::new(),
             );
 
             let _ = dest_a.send(get(b"a")).await;
@@ -522,7 +522,7 @@ mod tests {
             let addr: Arc<str> = Arc::from(server.addr.to_string());
             let tracker = map.tracker_for(&addr, 3);
             let counters = DestinationCountersRegistry::new().counters_for(&addr, &tracker);
-            let shard = ProxyCounters::new();
+            let shard = BackendCounterShard::new();
             let key = Key {
                 addr,
                 reply_timeout: Some(Duration::from_millis(1000)),

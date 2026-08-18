@@ -6,18 +6,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rusty_mcrouter_backend::classify::ResultCode;
-use rusty_mcrouter_backend::counters::{CommandKind, ProxyCounters};
+use rusty_mcrouter_backend::counters::{BackendCounterShard, CommandKind};
 use rusty_mcrouter_backend::destination::DestinationCountersRegistry;
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
-use rusty_mcrouter_proxy::FrontendCounters;
+use rusty_mcrouter_proxy::FrontendCounterShard;
 
 use crate::metrics::{MetricsSource, MetricsText};
 use crate::shard_source;
 
 shard_source! {
-    /// ProxyCounters shards -> the mcrouter_backend_* scalar families.
+    /// Backend counter shards -> the mcrouter_backend_* scalar families.
     /// the {command, result} matrix is BackendRequestsSource.
-    pub struct BackendScalarsSource(ProxyCounters) {
+    pub struct BackendScalarsSource(BackendCounterShard) {
         counter latency_us_sum              => "mcrouter_backend_latency_us_sum_total";
         counter connections_opened          => "mcrouter_backend_connections_opened_total";
         counter connections_closed          => "mcrouter_backend_connections_closed_total";
@@ -34,9 +34,9 @@ shard_source! {
 }
 
 shard_source! {
-    /// FrontendCounters shards -> the client-facing families. the
+    /// Frontend counter shards -> the client-facing families. the
     /// per-command matrix is FrontendRequestsSource.
-    pub struct FrontendScalarsSource(FrontendCounters) {
+    pub struct FrontendScalarsSource(FrontendCounterShard) {
         counter noops              => "mcrouter_noops_total";
         counter parse_errors       => "mcrouter_parse_errors_total";
         counter failed             => "mcrouter_requests_failed_total";
@@ -46,7 +46,7 @@ shard_source! {
 }
 
 pub struct BackendRequestsSource {
-    pub shards: Vec<Arc<ProxyCounters>>,
+    pub shards: Vec<Arc<BackendCounterShard>>,
 }
 
 impl MetricsSource for BackendRequestsSource {
@@ -72,7 +72,7 @@ impl MetricsSource for BackendRequestsSource {
 }
 
 pub struct FrontendRequestsSource {
-    pub shards: Vec<Arc<FrontendCounters>>,
+    pub shards: Vec<Arc<FrontendCounterShard>>,
 }
 
 impl MetricsSource for FrontendRequestsSource {
@@ -229,8 +229,8 @@ mod tests {
 
     #[test]
     fn backend_sources_sum_real_shards() {
-        let s1 = ProxyCounters::new();
-        let s2 = ProxyCounters::new();
+        let s1 = BackendCounterShard::new();
+        let s2 = BackendCounterShard::new();
         s1.record_send(CommandKind::Get, ResultCode::Success, 100);
         s2.record_send(CommandKind::Get, ResultCode::Success, 250);
         s2.record_result(CommandKind::Store, ResultCode::Tko);
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn frontend_sources_render() {
-        let shard = FrontendCounters::new();
+        let shard = FrontendCounterShard::new();
         shard.request[CommandKind::Get as usize].fetch_add(3, Ordering::Relaxed);
         shard.failed.fetch_add(1, Ordering::Relaxed);
 

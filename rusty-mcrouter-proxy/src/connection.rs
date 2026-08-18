@@ -17,7 +17,7 @@ use tokio::{
 };
 
 use crate::{
-    config::ThreadMode, proxy_set::ProxySet, FrontendCounters, FrontendError, ProxyHandle,
+    config::ThreadMode, proxy_set::ProxySet, FrontendCounterShard, FrontendError, ProxyHandle,
 };
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
@@ -45,7 +45,7 @@ pub struct Connection {
     /// hop-local `MetaReplyPlan` (never routed, never crosses threads) and
     /// flips to `Ready` when its outcome exists.
     slots: BTreeMap<usize, Slot>,
-    counters: Arc<FrontendCounters>, //temp - moved out soon
+    counters: Arc<FrontendCounterShard>,
     next_seq: usize,
     next_write: usize,
     in_flight: usize,
@@ -77,7 +77,7 @@ impl Connection {
         local_route: Rc<dyn DynRoute>,
         proxies: ProxySet,
         mode: ThreadMode,
-        counters: Arc<FrontendCounters>,
+        counters: Arc<FrontendCounterShard>,
     ) -> Self {
         let (reader, writer) = stream.into_split();
         let (completed_tx, completed_rx) = mpsc::channel(COMPLETED_CHANNEL_CAPACITY);
@@ -340,7 +340,7 @@ mod tests {
     /// route into a mock backend. the proxy handle channel is never used
     /// (SameThread routes inline) but ProxySet demands one.
     async fn session(
-        counters: Arc<FrontendCounters>,
+        counters: Arc<FrontendCounterShard>,
     ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -385,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn frontend_counters_account_a_pipelined_session() {
         run_local(async {
-            let counters = FrontendCounters::new();
+            let counters = FrontendCounterShard::new();
             let (mut client, task) = session(Arc::clone(&counters)).await;
 
             client

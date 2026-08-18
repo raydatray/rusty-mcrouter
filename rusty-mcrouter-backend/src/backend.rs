@@ -119,7 +119,7 @@ mod tests {
 
     use super::*;
     use crate::classify::ResultCode;
-    use crate::counters::ProxyCounters;
+    use crate::counters::BackendCounterShard;
     use crate::destination::DestinationCountersRegistry;
     use crate::test_support::{run_local, scripted_backend_serial, Step};
     use crate::tko::{DestToken, TkoTrackerMap};
@@ -128,7 +128,7 @@ mod tests {
         let tko = TkoTrackerMap::with_sink(Box::new(|_| {}));
         let factory = DestinationFactory::new(Map::new(
             Arc::clone(&tko),
-            ProxyCounters::new(),
+            BackendCounterShard::new(),
             DestinationCountersRegistry::new(),
         ));
         (tko, factory)

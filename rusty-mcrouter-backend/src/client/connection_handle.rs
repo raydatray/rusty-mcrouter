@@ -15,7 +15,7 @@ use crate::{
         connection::Connection,
         types::{Command, ConnectionCommand, ConnectionEvent, Payload},
     },
-    counters::ProxyCounters,
+    counters::BackendCounterShard,
     error::SendError,
 };
 
@@ -30,7 +30,7 @@ impl ConnectionHandle {
         addr: Arc<str>,
         cfg: Config,
         events: Box<dyn Fn(ConnectionEvent)>,
-        shard_counters: Arc<ProxyCounters>,
+        shard_counters: Arc<BackendCounterShard>,
     ) -> ConnectionHandle {
         let (tx, rx) = mpsc::channel(cfg.max_pending);
         let reply_timeout = cfg.reply_timeout;
@@ -97,9 +97,13 @@ mod tests {
     fn spawn_to(
         server: &ScriptedServer,
         cfg: Config,
-    ) -> (ConnectionHandle, ConnectionEventLog, Arc<ProxyCounters>) {
+    ) -> (
+        ConnectionHandle,
+        ConnectionEventLog,
+        Arc<BackendCounterShard>,
+    ) {
         let (sink, log) = event_log();
-        let counters = ProxyCounters::new();
+        let counters = BackendCounterShard::new();
         let handle = ConnectionHandle::spawn(
             Arc::from(server.addr.to_string()),
             cfg,
@@ -337,7 +341,7 @@ mod tests {
                 ..Config::default()
             };
             let (sink, log) = event_log();
-            let counters = ProxyCounters::new();
+            let counters = BackendCounterShard::new();
             let handle = ConnectionHandle::spawn(
                 Arc::from(addr.to_string()),
                 cfg,
@@ -381,7 +385,7 @@ mod tests {
                 ..Config::default()
             };
             let (sink, log) = event_log();
-            let counters = ProxyCounters::new();
+            let counters = BackendCounterShard::new();
             let handle = ConnectionHandle::spawn(
                 Arc::from("192.0.2.1:12345"),
                 cfg,

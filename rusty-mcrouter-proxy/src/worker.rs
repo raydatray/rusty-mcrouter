@@ -6,7 +6,9 @@ use std::{
 use rusty_mcrouter_core::DynRoute;
 use tokio::sync::mpsc;
 
-use crate::{config::ThreadMode, connection::Connection, proxy_set::ProxySet, FrontendCounters};
+use crate::{
+    config::ThreadMode, connection::Connection, proxy_set::ProxySet, FrontendCounterShard,
+};
 
 /// a proxy thread's socket-handoff loop:
 /// - drains the per-thread socket queue
@@ -17,7 +19,7 @@ pub struct ConnectionWorker {
     local_route: Rc<dyn DynRoute>,
     proxies: ProxySet,
     mode: ThreadMode,
-    counters: Arc<FrontendCounters>,
+    counters: Arc<FrontendCounterShard>,
     work_rx: mpsc::Receiver<std::net::TcpStream>,
 }
 
@@ -27,7 +29,7 @@ impl ConnectionWorker {
         local_route: Rc<dyn DynRoute>,
         proxies: ProxySet,
         mode: ThreadMode,
-        counters: Arc<FrontendCounters>,
+        counters: Arc<FrontendCounterShard>,
         work_rx: mpsc::Receiver<std::net::TcpStream>,
     ) -> Self {
         Self {

@@ -18,7 +18,7 @@ use crate::{
         config::Config,
         types::{Command, ConnectionCommand, ConnectionEvent, DownReason, Inflight, Payload},
     },
-    counters::ProxyCounters,
+    counters::BackendCounterShard,
     error::{ConnectError, LocalError, ProtocolError, RequestError, SendError},
 };
 
@@ -27,7 +27,7 @@ pub(crate) struct Connection {
     cfg: Config,
     rx: mpsc::Receiver<ConnectionCommand>,
     events: Box<dyn Fn(ConnectionEvent)>,
-    shard_counters: Arc<ProxyCounters>,
+    shard_counters: Arc<BackendCounterShard>,
     pending: VecDeque<Command>,   // accepted, not yet written
     inflight: VecDeque<Inflight>, // written, awaiting reply
     encoder: MetaRequestEncoder,
@@ -48,7 +48,7 @@ impl Connection {
         cfg: Config,
         rx: mpsc::Receiver<ConnectionCommand>,
         events: Box<dyn Fn(ConnectionEvent)>,
-        shard_counters: Arc<ProxyCounters>,
+        shard_counters: Arc<BackendCounterShard>,
     ) -> Connection {
         let read_buf = BytesMut::with_capacity(cfg.read_buf_initial_capacity);
         Connection {
@@ -453,7 +453,7 @@ mod tests {
             Config::default(),
             rx,
             Box::new(|_| {}),
-            ProxyCounters::new(),
+            BackendCounterShard::new(),
         )
     }
 
