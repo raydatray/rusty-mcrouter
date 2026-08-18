@@ -45,7 +45,7 @@ and never mix:
 flowchart LR
     subgraph proxy threads
         RQ[request path]
-        EM["transition emitters<br/>tko trackers (net)<br/>failover routes (core)<br/>connections (net)<br/>frontend (bin)"]
+        EM["transition emitters<br/>tko trackers (backend)<br/>failover routes (core)<br/>backend connections (backend)<br/>frontend + workers (proxy)"]
     end
     W[workers / control plane] -- events --> BUS
     RQ -- "relaxed increment,<br/>no lock, no alloc" --> SH[counter shards<br/>one per proxy thread]
@@ -130,11 +130,16 @@ a new integration crate, `rusty-mcrouter-observability`:
 ```mermaid
 flowchart TB
     P[rusty-mcrouter-protocol]
-    N["rusty-mcrouter-net<br/>TkoEventRecord, FrontendEventRecord,<br/>BackendEventRecord + counters/sinks"]
+    K[rusty-mcrouter-config]
+    N["rusty-mcrouter-backend<br/>TkoEventRecord, BackendCounterShard,<br/>DestinationCounters + sinks"]
     C["rusty-mcrouter-core<br/>RoutingEventRecord + counters/sink"]
-    O["rusty-mcrouter-observability<br/>OperationalEvent, WorkerEvent, event bus,<br/>log formatting, aggregation, /metrics"]
+    X["rusty-mcrouter-proxy<br/>WorkerEventRecord, FrontendCounterShard,<br/>frontend server + orchestration"]
+    O["rusty-mcrouter-observability<br/>event envelope + bus,<br/>log formatting, aggregation, /metrics"]
     B["rusty-mcrouter (bin)<br/>constructs and wires everything"]
-    P --> N --> C --> O --> B
+    P --> N --> C --> X --> O --> B
+    K --> C
+    K --> X
+    N --> O
 ```
 
 **the dependency rule: leaf crates never import observability.**
@@ -145,10 +150,6 @@ leaf crates define facts.
 observability composes and presents facts.
 the binary wires the system together.
 ```
-
-worker events live in the observability crate itself because proxy
-workers are implemented in the binary — there is no lower crate to
-own them.
 
 ## events (logging path)
 
@@ -341,13 +342,9 @@ binary:          creates shards, hands them to both sides
 ```
 
 ```rust
-// rusty-mcrouter-net — one per proxy thread (the shard). named
-// ProxyCounters, not BackendCounters: in net's type namespace a
-// "Backend" is one server (trait Backend = Rc<Destination>), and this
-// struct is emphatically not per-server. the exported families keep
-// the mcrouter_backend_* prefix, where backend-vs-frontend is the
-// right operator-facing contrast.
-pub struct ProxyCounters {
+// rusty-mcrouter-backend - one per proxy thread. the name states both
+// the measured leg and the storage shape; this is not per-destination.
+pub struct BackendCounterShard {
     // monotonic counters
     pub requests: [[AtomicU64; RESULT_CODE_COUNT]; COMMAND_KIND_COUNT],
     pub latency_us_sum: AtomicU64,
@@ -370,11 +367,12 @@ pub struct ProxyCounters {
 needs a failover flag through `Backend::send` and is decided in the
 routing-counters slice.)
 
-frontend counters in the bin and per-pool counters in core follow the
-same shard shape; gauges derived from existing state — tko counts,
-server states, fail-open — aren't shards at all, they're read straight
-from the live structures at scrape time. per-destination counters are
-a third shape: `DestinationCounters`, an `Arc` block in a weak-dedup
+frontend counters in proxy (`FrontendCounterShard`) and per-pool
+counters in core follow the same shard shape; gauges derived from
+existing state — tko counts, server states, fail-open — aren't shards
+at all, they're read straight from the live structures at scrape time.
+per-destination counters are a third shape: `DestinationCounters`, an
+`Arc` block in a weak-dedup
 registry keyed by server address (`Destination` itself is `Rc` —
 thread-local, unreachable from the scrape thread). per-destination
 counters have exactly one home: the shared `DestinationCounters` block
@@ -395,9 +393,9 @@ scrape-time aggregation (mirrors upstream's read-time `prepare_stats`
 allocate):
 
 ```rust
-// observability — scrape side. ProxyCounters shards → the
+// observability — scrape side. BackendCounterShard values → the
 // mcrouter_backend_* families
-struct BackendSource { shards: Vec<Arc<ProxyCounters>> }
+struct BackendSource { shards: Vec<Arc<BackendCounterShard>> }
 
 impl BackendSource {
     fn encode(&self, out: &mut String) {
@@ -418,7 +416,7 @@ metric inventory — the full "port now" set from the catalog (~20
 families; names follow prometheus conventions, with the upstream
 `stat_list.h` name in metric HELP text for cross-reference):
 
-**frontend (bin)**
+**frontend (proxy, `FrontendCounterShard` shards)**
 
 | metric | type | labels |
 |--------|------|--------|
@@ -428,7 +426,7 @@ families; names follow prometheus conventions, with the upstream
 | `mcrouter_requests_processing` / `_waiting` | gauge | `proxy` — slot map depth |
 | `mcrouter_dev_null_requests_total` | counter | — |
 
-**backend (net, `ProxyCounters` shards)**
+**backend (`rusty-mcrouter-backend`, `BackendCounterShard` shards)**
 
 | metric | type | labels |
 |--------|------|--------|
@@ -546,21 +544,22 @@ control thread's runtime — no framework dependency for one endpoint.
 ## slices
 
 1. **owned event records** — convert `TkoEventRecord<'a>` to owned
-   `Arc<str>` form in net; sink signature change; tests keep their
+   `Arc<str>` form in backend; sink signature change; tests keep their
    collecting sinks. workspace green.
 2. **observability crate skeleton** — `OperationalEvent`, `EventSender`
    + bounded bus + dropped counter, consumer task, log formatting.
    unit tests: load-shedding, drop counting.
-3. **counter shards** — `ProxyCounters` + `DestinationCounters` in net
+3. **counter shards** — `BackendCounterShard` + `DestinationCounters`
+   in backend
    (fold the old destination stats in, wire into `Destination` and the
-   connection actor), frontend counters in bin, `MetricsRegistry` +
-   prometheus text encoding in observability.
+   connection actor), `FrontendCounterShard` in proxy,
+   `MetricsRegistry` + prometheus text encoding in observability.
 4. **/metrics endpoint + binary wiring** — http responder, CLI
    options (`--metrics-port`), end-to-end test: run proxy + mock,
    scrape, assert counters move.
-5. **new event sources** — `FrontendEventRecord`, `BackendEventRecord`,
-   `RoutingEventRecord`, `WorkerEventRecord` as needed (each is small
-   once the bus exists).
+5. **new event sources** — `WorkerEventRecord` in proxy;
+   `FrontendEventRecord`, `BackendEventRecord` and
+   `RoutingEventRecord` as needed (each is small once the bus exists).
 
 ## test matrix
 
