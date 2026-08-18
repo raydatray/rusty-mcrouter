@@ -1,10 +1,10 @@
 use clap::Parser;
-use rusty_mcrouter_config::parse_file;
-use rusty_mcrouter_net::{
+use rusty_mcrouter_backend::{
     counters::ProxyCounters,
     destination::{self, DestinationCountersRegistry},
     tko::TkoTrackerMap,
 };
+use rusty_mcrouter_config::parse_file;
 use rusty_mcrouter_observability::{
     sources::{
         BackendRequestsSource, BackendScalarsSource, DestinationSource, FrontendRequestsSource,

@@ -13,7 +13,7 @@ pub use pool_route::PoolRoute;
 
 use std::{future::Future, pin::Pin, rc::Rc};
 
-use rusty_mcrouter_net::error::SendError;
+use rusty_mcrouter_backend::error::SendError;
 use rusty_mcrouter_protocol::{Reply, Request};
 use thiserror::Error;
 

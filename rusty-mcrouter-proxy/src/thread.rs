@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, rc::Rc, sync::mpsc::SyncSender};
 
+use rusty_mcrouter_backend::{destination, DestinationFactory};
 use rusty_mcrouter_core::build_route;
-use rusty_mcrouter_net::{destination, DestinationFactory};
 use tokio::{runtime::Builder, task::LocalSet};
 
 use crate::{

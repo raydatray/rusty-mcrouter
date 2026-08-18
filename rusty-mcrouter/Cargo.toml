@@ -12,12 +12,12 @@ workspace = true
 anyhow = "1.0.102"
 clap = { version = "4", features = ["derive", "env"] }
 rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
-rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
+rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend" }
 rusty-mcrouter-observability = { path = "../rusty-mcrouter-observability" }
 rusty-mcrouter-proxy = { path = "../rusty-mcrouter-proxy" }
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
-rusty-mcrouter-net = { path = "../rusty-mcrouter-net", features = ["testing"] }
+rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend", features = ["testing"] }
 testcontainers = "0.21"
 tokio = { workspace = true, features = ["full"] }

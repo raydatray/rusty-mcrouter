@@ -84,9 +84,9 @@ mod tests {
     use crate::failover::InOrderPolicy;
     use crate::routes::{DestinationRoute, RouteError};
     use bytes::Bytes;
-    use rusty_mcrouter_net::classify::ResultCode;
-    use rusty_mcrouter_net::error::{ConnectError, LocalError, RequestError, SendError};
-    use rusty_mcrouter_net::test_support::MockBackend;
+    use rusty_mcrouter_backend::classify::ResultCode;
+    use rusty_mcrouter_backend::error::{ConnectError, LocalError, RequestError, SendError};
+    use rusty_mcrouter_backend::test_support::MockBackend;
     use rusty_mcrouter_protocol::reply::{
         ArithmeticReply, ArithmeticResult, ErrorReply, GetReply, StoreReply, StoreResult,
     };

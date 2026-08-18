@@ -1,4 +1,4 @@
-use rusty_mcrouter_net::tko::{TkoEvent, TkoEventRecord};
+use rusty_mcrouter_backend::tko::{TkoEvent, TkoEventRecord};
 use rusty_mcrouter_proxy::{WorkerEvent, WorkerEventRecord};
 
 use crate::events::Event;
@@ -80,7 +80,7 @@ fn worker(r: &WorkerEventRecord) {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use rusty_mcrouter_net::classify::ResultCode;
+    use rusty_mcrouter_backend::classify::ResultCode;
     use tracing::level_filters::LevelFilter;
     use tracing::Level;
     use tracing_subscriber::layer::{Context, SubscriberExt};

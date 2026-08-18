@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use rusty_mcrouter_net::Backend;
+use rusty_mcrouter_backend::Backend;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::selectors::Selector;

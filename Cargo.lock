@@ -1211,11 +1211,21 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rusty-mcrouter-backend",
  "rusty-mcrouter-config",
- "rusty-mcrouter-net",
  "rusty-mcrouter-observability",
  "rusty-mcrouter-proxy",
  "testcontainers",
+ "tokio",
+]
+
+[[package]]
+name = "rusty-mcrouter-backend"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rusty-mcrouter-protocol",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -1234,20 +1244,10 @@ name = "rusty-mcrouter-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "rusty-mcrouter-backend",
  "rusty-mcrouter-config",
- "rusty-mcrouter-net",
  "rusty-mcrouter-protocol",
  "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "rusty-mcrouter-net"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "rusty-mcrouter-protocol",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -1256,7 +1256,7 @@ dependencies = [
 name = "rusty-mcrouter-observability"
 version = "0.1.0"
 dependencies = [
- "rusty-mcrouter-net",
+ "rusty-mcrouter-backend",
  "rusty-mcrouter-proxy",
  "tokio",
  "tracing",
@@ -1279,9 +1279,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "rusty-mcrouter-backend",
  "rusty-mcrouter-config",
  "rusty-mcrouter-core",
- "rusty-mcrouter-net",
  "rusty-mcrouter-protocol",
  "thiserror 2.0.18",
  "tokio",
