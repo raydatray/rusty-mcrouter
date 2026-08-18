@@ -9,4 +9,16 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+anyhow = "1.0.102"
+bytes.workspace = true
+rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
+rusty-mcrouter-core = { path = "../rusty-mcrouter-core" }
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
+rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+rusty-mcrouter-net = { path = "../rusty-mcrouter-net", features = ["testing"] }
+rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol", features = ["testing"] }
+tokio = { workspace = true, features = ["full"] }
