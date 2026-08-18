@@ -67,6 +67,10 @@ impl TkoTracker {
         *self.pool.lock().unwrap() = Some(pool)
     }
 
+    pub(crate) fn key(&self) -> &Arc<str> {
+        &self.key
+    }
+
     #[inline]
     pub fn is_tko(&self) -> bool {
         self.sum_failures.load(Ordering::Relaxed) > self.threshold

@@ -9,16 +9,14 @@ use std::{
 use tokio::time::Instant;
 
 use crate::{
-    destination::{
-        config::Config, destination::Destination, key::Key, DestinationCountersRegistry,
-    },
+    destination::{config::Config, destination::Destination, key::Key, DestinationMetricsRegistry},
     metrics::BackendMetricsShard,
     tko::{PoolTkoTracker, TkoTrackerMap},
 };
 
 pub struct Map {
     tko_map: Arc<TkoTrackerMap>,
-    counters_registry: Arc<DestinationCountersRegistry>,
+    metrics_registry: Arc<DestinationMetricsRegistry>,
     shard_metrics: Arc<BackendMetricsShard>,
     destinations: RefCell<HashMap<Key, Weak<Destination>>>,
 }
@@ -27,12 +25,12 @@ impl Map {
     pub fn new(
         tko_map: Arc<TkoTrackerMap>,
         shard_metrics: Arc<BackendMetricsShard>,
-        counters_registry: Arc<DestinationCountersRegistry>,
+        metrics_registry: Arc<DestinationMetricsRegistry>,
     ) -> Rc<Self> {
         Rc::new(Self {
             tko_map,
             shard_metrics,
-            counters_registry,
+            metrics_registry,
             destinations: RefCell::new(HashMap::new()),
         })
     }
@@ -62,12 +60,12 @@ impl Map {
             tracker.set_pool_tracker(gate);
         }
 
-        let counters = self.counters_registry.counters_for(&key.addr, &tracker);
+        let metrics = self.metrics_registry.metrics_for(&tracker);
         let dest = Destination::new(
             key.clone(),
             cfg.clone(),
             tracker,
-            counters,
+            metrics,
             Arc::clone(&self.shard_metrics),
         );
 
@@ -116,8 +114,6 @@ impl Map {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
-
     use rusty_mcrouter_protocol::test_support::get;
 
     use super::*;
@@ -134,7 +130,7 @@ mod tests {
         Map::new(
             tko_map(),
             BackendMetricsShard::new(),
-            DestinationCountersRegistry::new(),
+            DestinationMetricsRegistry::new(),
         )
     }
 
@@ -186,18 +182,18 @@ mod tests {
     }
 
     /// two timeout-variants of one server are distinct destinations (own
-    /// FIFOs) but ONE counter block: the `destination` label means "server",
+    /// FIFOs) but ONE metric block: the `destination` label means "server",
     /// not "server x timeout".
     #[tokio::test]
-    async fn timeout_variants_share_one_counter_block() {
+    async fn timeout_variants_share_one_metric_block() {
         run_local(async {
             let map = test_map();
             let a = map.destination(key_for("127.0.0.1:9", 100), &test_cfg(), None);
             let b = map.destination(key_for("127.0.0.1:9", 200), &test_cfg(), None);
             assert!(!Rc::ptr_eq(&a, &b));
             assert!(
-                Arc::ptr_eq(a.counters(), b.counters()),
-                "same server must share one counter block"
+                Arc::ptr_eq(a.metrics(), b.metrics()),
+                "same server must share one metric block"
             );
         })
         .await;
@@ -214,7 +210,7 @@ mod tests {
             let map = Map::new(
                 Arc::clone(&tko),
                 BackendMetricsShard::new(),
-                DestinationCountersRegistry::new(),
+                DestinationMetricsRegistry::new(),
             );
             let gate = tko.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
 
@@ -266,12 +262,12 @@ mod tests {
 
             // CloseIdle is processed by the actor asynchronously
             for _ in 0..2000 {
-                if dest.counters().idle_closes.load(Ordering::Relaxed) == 1 {
+                if dest.metrics().idle_closes.load() == 1 {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            assert_eq!(dest.counters().idle_closes.load(Ordering::Relaxed), 1);
+            assert_eq!(dest.metrics().idle_closes.load(), 1);
             assert!(!dest.is_tko(), "an idle close is never health evidence");
 
             dest.send(get(b"b")).await.unwrap();
@@ -307,7 +303,7 @@ mod tests {
 
             let interval = Duration::from_millis(35);
             let deadline = Instant::now() + Duration::from_secs(2);
-            while dest.counters().idle_closes.load(Ordering::Relaxed) == 0 {
+            while dest.metrics().idle_closes.load() == 0 {
                 assert!(
                     Instant::now() < deadline,
                     "tombstone-only connection was never reaped"
@@ -348,7 +344,7 @@ mod tests {
             map.sweep_idle(Duration::from_millis(50)); // idle ~0ms < 50ms
 
             tokio::time::sleep(Duration::from_millis(20)).await;
-            assert_eq!(dest.counters().idle_closes.load(Ordering::Relaxed), 0);
+            assert_eq!(dest.metrics().idle_closes.load(), 0);
             assert_eq!(server.accept_count(), 1);
         })
         .await;

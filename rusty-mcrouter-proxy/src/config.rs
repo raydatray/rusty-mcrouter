@@ -19,7 +19,7 @@ pub struct ProxyThreadConfig {
     pub tko_map: Arc<TkoTrackerMap>,
     /// Cross-thread counters: same-server destinations on different threads
     /// share one scrapeable counter block through it (atomics only).
-    pub counters_registry: Arc<destination::DestinationCountersRegistry>,
+    pub metrics_registry: Arc<destination::DestinationMetricsRegistry>,
     /// This thread's counter shards. Created in main so the scrape
     /// sources hold the same Arcs; this thread is the only writer.
     pub backend_metrics: Arc<BackendMetricsShard>,
