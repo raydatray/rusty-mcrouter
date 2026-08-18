@@ -13,6 +13,7 @@ testing = []
 
 [dependencies]
 rusty-mcrouter-net = { path = "../rusty-mcrouter-net" }
+rusty-mcrouter-proxy = { path = "../rusty-mcrouter-proxy" }
 tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "macros", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

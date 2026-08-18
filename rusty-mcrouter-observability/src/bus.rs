@@ -7,6 +7,7 @@ use std::{
 };
 
 use rusty_mcrouter_net::tko::TkoEventSink;
+use rusty_mcrouter_proxy::WorkerEventSink;
 use tokio::time::Instant;
 
 use crate::{events::Event, logging};
@@ -30,6 +31,12 @@ impl EventSender {
         let sender = self.clone();
 
         Box::new(move |event| sender.emit(Event::Tko(event)))
+    }
+
+    pub fn worker_sink(&self) -> WorkerEventSink {
+        let sender = self.clone();
+
+        Box::new(move |event| sender.emit(Event::Worker(event)))
     }
 
     pub fn emit(&self, event: Event) {
@@ -101,15 +108,19 @@ impl EventConsumer {
 
 #[cfg(test)]
 mod tests {
-    use crate::events::{WorkerEvent, WorkerEventRecord};
+    use rusty_mcrouter_proxy::{WorkerEvent, WorkerEventRecord};
 
     use super::*;
 
-    fn worker_event(proxy_id: usize) -> Event {
-        Event::Worker(WorkerEventRecord {
+    fn worker_record(proxy_id: usize) -> WorkerEventRecord {
+        WorkerEventRecord {
             proxy_id,
             event: WorkerEvent::Started,
-        })
+        }
+    }
+
+    fn worker_event(proxy_id: usize) -> Event {
+        Event::Worker(worker_record(proxy_id))
     }
 
     /// THE contract: a full queue sheds instead of blocking, and every
@@ -117,8 +128,9 @@ mod tests {
     #[test]
     fn full_queue_sheds_and_counts() {
         let (tx, _consumer) = channel(2);
+        let sink = tx.worker_sink();
         for i in 0..5 {
-            tx.emit(worker_event(i));
+            sink(worker_record(i));
         }
         assert_eq!(tx.dropped_total(), 3);
     }
