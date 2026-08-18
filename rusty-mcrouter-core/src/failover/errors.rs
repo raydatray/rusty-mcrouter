@@ -1,5 +1,5 @@
+use rusty_mcrouter_backend::classify::{reply_code, ResultCode};
 use rusty_mcrouter_config::FailoverErrorKind;
-use rusty_mcrouter_net::classify::{reply_code, ResultCode};
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::routes::{Result, RouteError};
@@ -75,7 +75,7 @@ impl FailoverErrors {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use rusty_mcrouter_net::error::{ConnectError, LocalError, RequestError, SendError};
+    use rusty_mcrouter_backend::error::{ConnectError, LocalError, RequestError, SendError};
     use rusty_mcrouter_protocol::reply::{
         ArithmeticReply, ArithmeticResult, DeleteReply, ErrorReply, GetReply, StoreReply,
         StoreResult,

@@ -1,4 +1,4 @@
-use rusty_mcrouter_net::Backend;
+use rusty_mcrouter_backend::Backend;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use super::{Result, Route, RouteError};
@@ -23,8 +23,8 @@ impl<B: Backend> Route for DestinationRoute<B> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use rusty_mcrouter_net::error::{ProtocolError, RequestError, SendError};
-    use rusty_mcrouter_net::test_support::MockBackend;
+    use rusty_mcrouter_backend::error::{ProtocolError, RequestError, SendError};
+    use rusty_mcrouter_backend::test_support::MockBackend;
     use rusty_mcrouter_protocol::reply::{ErrorReply, GetHit, GetReply, StoreReply, StoreResult};
     use rusty_mcrouter_protocol::test_support::{get, store};
     use std::sync::Arc;

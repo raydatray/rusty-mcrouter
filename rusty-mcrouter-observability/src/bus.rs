@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use rusty_mcrouter_net::tko::TkoEventSink;
+use rusty_mcrouter_backend::tko::TkoEventSink;
 use rusty_mcrouter_proxy::WorkerEventSink;
 use tokio::time::Instant;
 
