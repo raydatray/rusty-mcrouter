@@ -6,8 +6,7 @@ use std::{
     time::Duration,
 };
 
-use rusty_mcrouter_backend::tko::TkoEventSink;
-use rusty_mcrouter_proxy::WorkerEventSink;
+use rusty_mcrouter_observability_primitives::EventSink;
 use tokio::time::Instant;
 
 use crate::{events::Event, logging};
@@ -27,16 +26,14 @@ impl Clone for EventSender {
 }
 
 impl EventSender {
-    pub fn tko_sink(&self) -> TkoEventSink {
+    pub fn sink<T>(&self) -> EventSink<T>
+    where
+        T: Send + 'static,
+        Event: From<T>,
+    {
         let sender = self.clone();
 
-        Box::new(move |event| sender.emit(Event::Tko(event)))
-    }
-
-    pub fn worker_sink(&self) -> WorkerEventSink {
-        let sender = self.clone();
-
-        Box::new(move |event| sender.emit(Event::Worker(event)))
+        EventSink::new(move |event: T| sender.emit(event.into()))
     }
 
     pub fn emit(&self, event: Event) {
@@ -128,9 +125,9 @@ mod tests {
     #[test]
     fn full_queue_sheds_and_counts() {
         let (tx, _consumer) = channel(2);
-        let sink = tx.worker_sink();
+        let sink = tx.sink::<WorkerEventRecord>();
         for i in 0..5 {
-            sink(worker_record(i));
+            sink.emit(worker_record(i));
         }
         assert_eq!(tx.dropped_total(), 3);
     }

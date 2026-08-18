@@ -108,7 +108,7 @@ impl TkoTrackerMap {
     }
 
     pub(crate) fn emit(&self, record: TkoEventRecord) {
-        (self.sink)(record)
+        self.sink.emit(record)
     }
 
     pub(crate) fn remove_dead(&self, key: &str) {
@@ -129,7 +129,7 @@ mod tests {
     use crate::tko::tracker::DestToken;
 
     fn null_sink() -> TkoEventSink {
-        Box::new(|_| {})
+        TkoEventSink::new(|_| {})
     }
 
     #[test]
@@ -216,9 +216,9 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = {
             let events = Arc::clone(&events);
-            Box::new(move |rec: TkoEventRecord| {
+            TkoEventSink::new(move |rec: TkoEventRecord| {
                 events.lock().unwrap().push(rec.event);
-            }) as TkoEventSink
+            })
         };
         (sink, events)
     }

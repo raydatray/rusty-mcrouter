@@ -311,7 +311,7 @@ mod tests {
     use crate::tko::pool::FailOpenThresholds;
 
     fn null_sink() -> TkoEventSink {
-        Box::new(|_| {})
+        TkoEventSink::new(|_| {})
     }
 
     /// Tracker via the map (the only production construction path); the map

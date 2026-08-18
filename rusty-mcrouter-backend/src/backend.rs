@@ -125,7 +125,7 @@ mod tests {
     use crate::tko::{DestToken, TkoTrackerMap};
 
     fn factory() -> (Arc<TkoTrackerMap>, DestinationFactory) {
-        let tko = TkoTrackerMap::with_sink(Box::new(|_| {}));
+        let tko = TkoTrackerMap::with_sink(crate::tko::TkoEventSink::new(|_| {}));
         let factory = DestinationFactory::new(Map::new(
             Arc::clone(&tko),
             BackendCounterShard::new(),

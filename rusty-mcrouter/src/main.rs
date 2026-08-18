@@ -181,7 +181,7 @@ fn main() -> anyhow::Result<()> {
 
     // the cross-thread objects: per-server health and per-server counters,
     // shared by every proxy thread's destinations, atomics only
-    let tko_map = TkoTrackerMap::with_sink(observability.events().tko_sink());
+    let tko_map = TkoTrackerMap::with_sink(observability.events().sink());
     let counters_registry = DestinationCountersRegistry::new();
     let defaults = destination_defaults(&args.options);
     let sweep_interval = Duration::from_millis(args.options.reset_inactive_connection_interval_ms);
@@ -244,7 +244,7 @@ fn main() -> anyhow::Result<()> {
             counters_registry: Arc::clone(&counters_registry),
             backend_counters,
             frontend_counters,
-            events: observability.events().worker_sink(),
+            events: observability.events().sink(),
             defaults: defaults.clone(),
             sweep_interval,
         };

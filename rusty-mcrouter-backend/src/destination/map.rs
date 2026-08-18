@@ -127,7 +127,7 @@ mod tests {
     use crate::tko::{DestToken, FailOpenThresholds};
 
     fn tko_map() -> Arc<TkoTrackerMap> {
-        TkoTrackerMap::with_sink(Box::new(|_| {}))
+        TkoTrackerMap::with_sink(crate::tko::TkoEventSink::new(|_| {}))
     }
 
     fn test_map() -> Rc<Map> {

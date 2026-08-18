@@ -1224,6 +1224,7 @@ name = "rusty-mcrouter-backend"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-protocol",
  "thiserror 2.0.18",
  "tokio",
@@ -1257,6 +1258,7 @@ name = "rusty-mcrouter-observability"
 version = "0.1.0"
 dependencies = [
  "rusty-mcrouter-backend",
+ "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-proxy",
  "tokio",
  "tracing",
@@ -1286,6 +1288,7 @@ dependencies = [
  "rusty-mcrouter-backend",
  "rusty-mcrouter-config",
  "rusty-mcrouter-core",
+ "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-protocol",
  "thiserror 2.0.18",
  "tokio",

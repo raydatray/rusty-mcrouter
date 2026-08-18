@@ -95,7 +95,7 @@ pub fn proxy_thread_main(
 
         let _ = ready_tx.send(Ok(bound_addr));
         drop(ready_tx);
-        events(WorkerEventRecord {
+        events.emit(WorkerEventRecord {
             proxy_id,
             event: WorkerEvent::Started,
         });
@@ -137,7 +137,7 @@ pub fn proxy_thread_main(
             }
         };
 
-        events(WorkerEventRecord {
+        events.emit(WorkerEventRecord {
             proxy_id,
             event: WorkerEvent::Stopped,
         });

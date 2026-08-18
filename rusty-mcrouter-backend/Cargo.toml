@@ -13,6 +13,7 @@ testing = []
 
 [dependencies]
 bytes.workspace = true
+rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "macros", "time"] }
