@@ -59,7 +59,7 @@ blanket rules applied throughout:
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| num_soft_tko_count, num_hard_tko_count | port | `mcrouter_tko{kind=}` gauges — TkoCounters, already in 0001 |
+| num_soft_tko_count, num_hard_tko_count | port | `mcrouter_tko{kind=}` gauges — GlobalTkoMetrics, already in 0001 |
 | num_fail_open_state_{entered,exited} | port | counters from EnterFailOpen/ExitFailOpen events; plus `mcrouter_pool_fail_open{pool=}` gauge (0001) |
 | max_num_tko | promql | `max_over_time(mcrouter_tko[...])` |
 
