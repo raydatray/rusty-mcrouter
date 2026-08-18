@@ -3,7 +3,7 @@ use tokio::{
     sync::mpsc::Sender,
 };
 
-use crate::{NetError, Result};
+use crate::{error::Result, FrontendError};
 
 const LISTEN_BACKLOG: u32 = 1024;
 
@@ -34,7 +34,7 @@ impl Server {
                 socket.bind(addr).ok()?;
                 socket.listen(LISTEN_BACKLOG).ok()
             })
-            .ok_or(NetError::NoAddresses)?;
+            .ok_or(FrontendError::NoAddresses)?;
 
         Ok(Self { listener })
     }
@@ -66,7 +66,7 @@ impl Server {
             next = next.wrapping_add(1);
 
             if work_txs[target].send(std_stream).await.is_err() {
-                return Err(NetError::WorkerClosed { worker: target });
+                return Err(FrontendError::WorkerClosed { worker: target });
             }
         }
     }
@@ -101,7 +101,7 @@ mod tests {
             Ok(_) => {
                 panic!("plain bind without SO_REUSEPORT should fail when port is already bound")
             }
-            Err(NetError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse),
+            Err(FrontendError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse),
             Err(other) => panic!("expected io error, got {other:?}"),
         }
     }
