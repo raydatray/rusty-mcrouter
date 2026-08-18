@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-anyhow = "1.0.102"
+anyhow.workspace = true
 bytes.workspace = true
 rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
 rusty-mcrouter-core = { path = "../rusty-mcrouter-core" }
@@ -17,7 +17,7 @@ rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
-tracing = "0.1.44"
+tracing.workspace = true
 
 [dev-dependencies]
 rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend", features = ["testing"] }

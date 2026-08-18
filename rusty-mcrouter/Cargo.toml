@@ -9,8 +9,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-anyhow = "1.0.102"
-clap = { version = "4", features = ["derive", "env"] }
+anyhow.workspace = true
+clap.workspace = true
 rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
 rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend" }
 rusty-mcrouter-observability = { path = "../rusty-mcrouter-observability" }
@@ -19,5 +19,5 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend", features = ["testing"] }
-testcontainers = "0.21"
+testcontainers.workspace = true
 tokio = { workspace = true, features = ["full"] }
