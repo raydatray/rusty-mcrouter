@@ -2,20 +2,50 @@
 rusty-mcrouter is a memcached routing proxy. clients reach it via the **meta protocol**, and rusty-mcrouter routes each request thru a tree of route handles to a destination server, tracking server health and failing over along the way
 
 ## crates
-there are five crates layered bottom up 
+there are seven crates. dependencies point from fact owners toward
+composition and presentation (`A --> B` means B depends on A):
+
 - **`rusty-mcrouter-protocol`** - the meta protocol codec, request and reply types, the encoders and decoders for both requests and replies and key parsing
-- **`rusty-mcrouter-net`** - everything that touches a backend socket. a connection actor that does pipelining and FIFO reply matching. a destination layer that creates one `Destination` per server and timeout pair, own connections and probes in the case of TKOs. a TKO tracker that tracks health per destination, per pool, and for the entire proxy
 - **`rusty-mcrouter-config`** - config file parsing into pools, routes and policies
+- **`rusty-mcrouter-backend`** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
 - **`rusty-mcrouter-core`** - the routing graph, where a config file is transformed into a tree of route handles
-- **`rusty-mcrouter`** - the binary, where all the previous crates come together to create proxy threads and workers, client connection handling and cross thread dispatch
+- **`rusty-mcrouter-proxy`** - the client-facing leg and orchestration: accept loops, frontend protocol handling, proxy threads, workers and cross-thread dispatch
+- **`rusty-mcrouter-observability`** - the event bus and log presentation, metrics aggregation and the `/metrics` endpoint
+- **`rusty-mcrouter`** - the thin binary: cli, options and construct-and-wire startup
+
+```mermaid
+flowchart LR
+    P[rusty-mcrouter-protocol]
+    K[rusty-mcrouter-config]
+    B[rusty-mcrouter-backend]
+    C[rusty-mcrouter-core]
+    X[rusty-mcrouter-proxy]
+    O[rusty-mcrouter-observability]
+    R[rusty-mcrouter]
+
+    P --> B
+    P --> C
+    P --> X
+    K --> C
+    K --> X
+    B --> C
+    B --> X
+    C --> X
+    B --> O
+    X --> O
+    K --> R
+    B --> R
+    X --> R
+    O --> R
+```
 
 ## request lifecycle
 ```mermaid
 sequenceDiagram
     participant C as client
-    participant P as proxy (bin)
+    participant P as frontend (proxy)
     participant R as route tree (core)
-    participant D as destination (net)
+    participant D as destination (backend)
     participant S as server
 
     C->>P: mg foo v q O123

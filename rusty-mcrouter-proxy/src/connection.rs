@@ -3,10 +3,8 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, rc::Rc};
 
 use bytes::{Bytes, BytesMut};
+use rusty_mcrouter_backend::counters::CommandKind;
 use rusty_mcrouter_core::DynRoute;
-use rusty_mcrouter_net::counters::CommandKind;
-use rusty_mcrouter_net::NetError;
-use rusty_mcrouter_observability::frontend::FrontendCounters;
 use rusty_mcrouter_protocol::meta::{
     DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
 };
@@ -18,7 +16,9 @@ use tokio::{
     sync::mpsc,
 };
 
-use crate::proxy::{config::ThreadMode, proxy_set::ProxySet, ProxyHandle};
+use crate::{
+    config::ThreadMode, proxy_set::ProxySet, FrontendCounterShard, FrontendError, ProxyHandle,
+};
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
 const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
@@ -45,7 +45,7 @@ pub struct Connection {
     /// hop-local `MetaReplyPlan` (never routed, never crosses threads) and
     /// flips to `Ready` when its outcome exists.
     slots: BTreeMap<usize, Slot>,
-    counters: Arc<FrontendCounters>, //temp - moved out soon
+    counters: Arc<FrontendCounterShard>,
     next_seq: usize,
     next_write: usize,
     in_flight: usize,
@@ -77,7 +77,7 @@ impl Connection {
         local_route: Rc<dyn DynRoute>,
         proxies: ProxySet,
         mode: ThreadMode,
-        counters: Arc<FrontendCounters>,
+        counters: Arc<FrontendCounterShard>,
     ) -> Self {
         let (reader, writer) = stream.into_split();
         let (completed_tx, completed_rx) = mpsc::channel(COMPLETED_CHANNEL_CAPACITY);
@@ -104,7 +104,7 @@ impl Connection {
         }
     }
 
-    pub async fn run(mut self) -> Result<(), NetError> {
+    pub async fn run(mut self) -> Result<(), FrontendError> {
         loop {
             if !self.input_closed {
                 self.drain_input();
@@ -232,7 +232,7 @@ impl Connection {
 
     /// flush replies that are ready in request order, advancing `next_write`.
     /// A suppressed (quiet) reply writes nothing but still advances.
-    async fn flush_ready(&mut self) -> Result<(), NetError> {
+    async fn flush_ready(&mut self) -> Result<(), FrontendError> {
         self.write_buf.clear();
         while matches!(
             self.slots.get(&self.next_write),
@@ -328,19 +328,19 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
+    use rusty_mcrouter_backend::counters::CommandKind;
+    use rusty_mcrouter_backend::test_support::{run_local, MockBackend};
     use rusty_mcrouter_core::{DestinationRoute, Route};
-    use rusty_mcrouter_net::counters::CommandKind;
-    use rusty_mcrouter_net::test_support::{run_local, MockBackend};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::proxy::message::ProxyMessage;
+    use crate::message::ProxyMessage;
 
     /// a real Connection over a localhost socket pair, with a SameThread
     /// route into a mock backend. the proxy handle channel is never used
     /// (SameThread routes inline) but ProxySet demands one.
     async fn session(
-        counters: Arc<FrontendCounters>,
+        counters: Arc<FrontendCounterShard>,
     ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -385,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn frontend_counters_account_a_pipelined_session() {
         run_local(async {
-            let counters = FrontendCounters::new();
+            let counters = FrontendCounterShard::new();
             let (mut client, task) = session(Arc::clone(&counters)).await;
 
             client

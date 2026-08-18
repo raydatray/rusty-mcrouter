@@ -1,17 +1,20 @@
 use clap::Parser;
-use rusty_mcrouter_config::parse_file;
-use rusty_mcrouter_net::{
-    counters::ProxyCounters,
+use rusty_mcrouter_backend::{
+    counters::BackendCounterShard,
     destination::{self, DestinationCountersRegistry},
     tko::TkoTrackerMap,
 };
+use rusty_mcrouter_config::parse_file;
 use rusty_mcrouter_observability::{
-    frontend::FrontendCounters,
     sources::{
         BackendRequestsSource, BackendScalarsSource, DestinationSource, FrontendRequestsSource,
         FrontendScalarsSource, SelfSource, TkoSource,
     },
     Observability,
+};
+use rusty_mcrouter_proxy::{
+    proxy_thread_main, FrontendCounterShard, ListenerConfig, ProxyHandle, ProxyMessage, ProxySet,
+    ProxyThreadConfig, ThreadMode,
 };
 use tokio::sync::mpsc;
 
@@ -22,12 +25,6 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-mod proxy;
-
-use crate::proxy::{
-    ListenerConfig, ProxyHandle, ProxyMessage, ProxySet, ProxyThreadConfig, ThreadMode,
-};
-
 const WORK_CHANNEL_CAPACITY: usize = 1024;
 const PROXY_CHANNEL_CAPACITY: usize = 1024;
 
@@ -211,7 +208,7 @@ fn main() -> anyhow::Result<()> {
     let mut proxy_rxs_iter = proxy_rxs.into_iter();
     // per-thread counter shards, created here so the scrape sources hold
     // the same Arcs the threads write
-    let mut proxy_shards = Vec::with_capacity(args.num_proxies);
+    let mut backend_shards = Vec::with_capacity(args.num_proxies);
     let mut frontend_shards = Vec::with_capacity(args.num_proxies);
 
     for proxy_id in 0..args.num_proxies {
@@ -230,9 +227,9 @@ fn main() -> anyhow::Result<()> {
             None
         };
 
-        let proxy_counters = ProxyCounters::new();
-        let frontend_counters = FrontendCounters::new();
-        proxy_shards.push(Arc::clone(&proxy_counters));
+        let backend_counters = BackendCounterShard::new();
+        let frontend_counters = FrontendCounterShard::new();
+        backend_shards.push(Arc::clone(&backend_counters));
         frontend_shards.push(Arc::clone(&frontend_counters));
 
         let cfg = ProxyThreadConfig {
@@ -245,9 +242,9 @@ fn main() -> anyhow::Result<()> {
             listener_config,
             tko_map: Arc::clone(&tko_map),
             counters_registry: Arc::clone(&counters_registry),
-            proxy_counters,
+            backend_counters,
             frontend_counters,
-            events: observability.events().clone(),
+            events: observability.events().worker_sink(),
             defaults: defaults.clone(),
             sweep_interval,
         };
@@ -258,7 +255,7 @@ fn main() -> anyhow::Result<()> {
         let handle = std::thread::Builder::new()
             .name(format!("proxy-{proxy_id}"))
             .spawn(move || {
-                if let Err(e) = proxy::proxy_thread_main(cfg, ready_tx) {
+                if let Err(e) = proxy_thread_main(cfg, ready_tx) {
                     eprintln!("proxy-{proxy_id} terminated: {e}");
                     std::process::exit(1);
                 }
@@ -285,10 +282,10 @@ fn main() -> anyhow::Result<()> {
     drop(proxies);
 
     observability.register(Box::new(BackendScalarsSource {
-        shards: proxy_shards.clone(),
+        shards: backend_shards.clone(),
     }));
     observability.register(Box::new(BackendRequestsSource {
-        shards: proxy_shards,
+        shards: backend_shards,
     }));
     observability.register(Box::new(FrontendScalarsSource {
         shards: frontend_shards.clone(),

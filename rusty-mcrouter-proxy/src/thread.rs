@@ -1,11 +1,16 @@
 use std::{net::SocketAddr, rc::Rc, sync::mpsc::SyncSender};
 
+use rusty_mcrouter_backend::{destination, DestinationFactory};
 use rusty_mcrouter_core::build_route;
-use rusty_mcrouter_net::{destination, DestinationFactory, Server};
-use rusty_mcrouter_observability::events::{Event, WorkerEvent, WorkerEventRecord};
 use tokio::{runtime::Builder, task::LocalSet};
 
-use crate::proxy::{ConnectionWorker, ListenerConfig, Proxy, ProxyThreadConfig};
+use crate::{
+    config::{ListenerConfig, ProxyThreadConfig},
+    proxy::Proxy,
+    server::Server,
+    worker::ConnectionWorker,
+    WorkerEvent, WorkerEventRecord,
+};
 
 type ReadyEvent = anyhow::Result<Option<SocketAddr>>;
 
@@ -32,7 +37,7 @@ pub fn proxy_thread_main(
             listener_config,
             tko_map,
             counters_registry,
-            proxy_counters,
+            backend_counters,
             frontend_counters,
             events,
             defaults,
@@ -77,7 +82,7 @@ pub fn proxy_thread_main(
         // thread-local and never shared across threads. Backends are lazy:
         // building over dead servers succeeds, they just start life failing
         // (and TKO via the shared tracker map).
-        let dest_map = destination::Map::new(tko_map, proxy_counters, counters_registry);
+        let dest_map = destination::Map::new(tko_map, backend_counters, counters_registry);
         let _sweep = dest_map.spawn_idle_sweep(sweep_interval);
         let factory = DestinationFactory::new(Rc::clone(&dest_map));
         let route = match build_route(&config, &factory, &defaults) {
@@ -90,10 +95,10 @@ pub fn proxy_thread_main(
 
         let _ = ready_tx.send(Ok(bound_addr));
         drop(ready_tx);
-        events.emit(Event::Worker(WorkerEventRecord {
+        events(WorkerEventRecord {
             proxy_id,
             event: WorkerEvent::Started,
-        }));
+        });
 
         // proxy actor:
         // -  drains this thread's message queue (requests routed here by
@@ -132,10 +137,10 @@ pub fn proxy_thread_main(
             }
         };
 
-        events.emit(Event::Worker(WorkerEventRecord {
+        events(WorkerEventRecord {
             proxy_id,
             event: WorkerEvent::Stopped,
-        }));
+        });
         result
     })
 }

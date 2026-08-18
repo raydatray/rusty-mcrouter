@@ -1,13 +1,13 @@
 use std::rc::Rc;
 
 use bytes::Bytes;
+use rusty_mcrouter_backend::error::SendError;
 use rusty_mcrouter_core::{DynRoute, RouteError};
-use rusty_mcrouter_net::error::SendError;
 use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::Reply;
 use tokio::sync::mpsc;
 
-use crate::proxy::message::{ProxyMessage, ProxyRequest};
+use crate::message::{ProxyMessage, ProxyRequest};
 
 pub struct Proxy {
     // todo - stats/logging will read this; kept for the thread-mode work
@@ -50,10 +50,10 @@ impl Proxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_mcrouter_backend::classify::ResultCode;
+    use rusty_mcrouter_backend::error::RequestError;
+    use rusty_mcrouter_backend::test_support::MockBackend;
     use rusty_mcrouter_core::{DestinationRoute, Route};
-    use rusty_mcrouter_net::classify::ResultCode;
-    use rusty_mcrouter_net::error::RequestError;
-    use rusty_mcrouter_net::test_support::MockBackend;
     use rusty_mcrouter_protocol::test_support::get;
     use tokio::sync::oneshot;
     use tokio::task::LocalSet;
