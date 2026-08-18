@@ -15,7 +15,7 @@ mod thread;
 mod worker;
 
 pub use config::{ListenerConfig, ProxyThreadConfig, ThreadMode};
-pub use counters::FrontendCounters;
+pub use counters::FrontendCounterShard;
 pub use error::FrontendError;
 pub use events::{WorkerEvent, WorkerEventRecord, WorkerEventSink};
 pub use handle::ProxyHandle;
