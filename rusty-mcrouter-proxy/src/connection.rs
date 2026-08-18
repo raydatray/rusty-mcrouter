@@ -5,7 +5,6 @@ use std::{collections::BTreeMap, rc::Rc};
 use bytes::{Bytes, BytesMut};
 use rusty_mcrouter_core::DynRoute;
 use rusty_mcrouter_net::counters::CommandKind;
-use rusty_mcrouter_net::NetError;
 use rusty_mcrouter_protocol::meta::{
     DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
 };
@@ -17,7 +16,9 @@ use tokio::{
     sync::mpsc,
 };
 
-use crate::{config::ThreadMode, proxy_set::ProxySet, FrontendCounters, ProxyHandle};
+use crate::{
+    config::ThreadMode, proxy_set::ProxySet, FrontendCounters, FrontendError, ProxyHandle,
+};
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
 const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
@@ -103,7 +104,7 @@ impl Connection {
         }
     }
 
-    pub async fn run(mut self) -> Result<(), NetError> {
+    pub async fn run(mut self) -> Result<(), FrontendError> {
         loop {
             if !self.input_closed {
                 self.drain_input();
@@ -231,7 +232,7 @@ impl Connection {
 
     /// flush replies that are ready in request order, advancing `next_write`.
     /// A suppressed (quiet) reply writes nothing but still advances.
-    async fn flush_ready(&mut self) -> Result<(), NetError> {
+    async fn flush_ready(&mut self) -> Result<(), FrontendError> {
         self.write_buf.clear();
         while matches!(
             self.slots.get(&self.next_write),
