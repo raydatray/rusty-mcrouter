@@ -1264,6 +1264,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-mcrouter-observability-primitives"
+version = "0.1.0"
+
+[[package]]
 name = "rusty-mcrouter-protocol"
 version = "0.1.0"
 dependencies = [
