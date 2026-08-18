@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rusty_mcrouter_backend::classify::ResultCode;
-use rusty_mcrouter_backend::counters::{BackendCounterShard, CommandKind};
 use rusty_mcrouter_backend::destination::DestinationCountersRegistry;
+use rusty_mcrouter_backend::metrics::{BackendMetricsShard, CommandKind};
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_proxy::FrontendCounterShard;
 
@@ -15,9 +15,9 @@ use crate::metrics::{MetricsSource, MetricsText};
 use crate::shard_source;
 
 shard_source! {
-    /// Backend counter shards -> the mcrouter_backend_* scalar families.
+    /// Backend metric shards -> the mcrouter_backend_* scalar families.
     /// the {command, result} matrix is BackendRequestsSource.
-    pub struct BackendScalarsSource(BackendCounterShard) {
+    pub struct BackendScalarsSource(BackendMetricsShard) wrapped {
         counter latency_us_sum              => "mcrouter_backend_latency_us_sum_total";
         counter connections_opened          => "mcrouter_backend_connections_opened_total";
         counter connections_closed          => "mcrouter_backend_connections_closed_total";
@@ -46,7 +46,7 @@ shard_source! {
 }
 
 pub struct BackendRequestsSource {
-    pub shards: Vec<Arc<BackendCounterShard>>,
+    pub shards: Vec<Arc<BackendMetricsShard>>,
 }
 
 impl MetricsSource for BackendRequestsSource {
@@ -56,7 +56,7 @@ impl MetricsSource for BackendRequestsSource {
                 let total: u64 = self
                     .shards
                     .iter()
-                    .map(|s| s.requests[cmd as usize][code as usize].load(Ordering::Relaxed))
+                    .map(|s| s.requests[cmd as usize][code as usize].load())
                     .sum();
                 out.counter(
                     "mcrouter_backend_requests_total",
@@ -229,8 +229,8 @@ mod tests {
 
     #[test]
     fn backend_sources_sum_real_shards() {
-        let s1 = BackendCounterShard::new();
-        let s2 = BackendCounterShard::new();
+        let s1 = BackendMetricsShard::new();
+        let s2 = BackendMetricsShard::new();
         s1.record_send(CommandKind::Get, ResultCode::Success, 100);
         s2.record_send(CommandKind::Get, ResultCode::Success, 250);
         s2.record_result(CommandKind::Store, ResultCode::Tko);

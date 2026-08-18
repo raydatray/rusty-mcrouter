@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use rusty_mcrouter_backend::counters::COMMAND_KIND_COUNT;
+use rusty_mcrouter_backend::metrics::COMMAND_KIND_COUNT;
 
 #[derive(Default)]
 pub struct FrontendCounterShard {

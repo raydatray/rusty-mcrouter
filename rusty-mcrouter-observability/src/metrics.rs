@@ -89,6 +89,24 @@ impl MetricsRegistry {
 macro_rules! shard_source {
     (
         $(#[$meta:meta])*
+        pub struct $source:ident($shard:ty) wrapped {
+            $( $kind:ident $field:ident => $name:literal; )*
+        }
+    ) => {
+        $(#[$meta])*
+        pub struct $source {
+            pub shards: Vec<std::sync::Arc<$shard>>,
+        }
+
+        impl $crate::metrics::MetricsSource for $source {
+            fn encode(&self, out: &mut $crate::metrics::MetricsText) {
+                $( $crate::shard_source!(@emit_wrapped $kind, self, out, $field, $name); )*
+            }
+        }
+    };
+
+    (
+        $(#[$meta:meta])*
         pub struct $source:ident($shard:ty) {
             $( $kind:ident $field:ident => $name:literal; )*
         }
@@ -119,6 +137,22 @@ macro_rules! shard_source {
             $name,
             &[],
             $self.shards.iter().map(|s| s.$field.load(Ordering::Relaxed)).sum::<i64>(),
+        );
+    };
+
+    (@emit_wrapped counter, $self:ident, $out:ident, $field:ident, $name:literal) => {
+        $out.counter(
+            $name,
+            &[],
+            $self.shards.iter().map(|s| s.$field.load()).sum::<u64>(),
+        );
+    };
+
+    (@emit_wrapped gauge, $self:ident, $out:ident, $field:ident, $name:literal) => {
+        $out.gauge(
+            $name,
+            &[],
+            $self.shards.iter().map(|s| s.$field.load()).sum::<i64>(),
         );
     };
 }

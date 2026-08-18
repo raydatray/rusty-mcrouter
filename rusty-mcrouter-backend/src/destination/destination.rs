@@ -10,9 +10,9 @@ use tokio::time::Instant;
 use crate::{
     classify::{code_of, ResultCode},
     client::{Config as ClientConfig, ConnectionEvent, ConnectionHandle, DownReason},
-    counters::{BackendCounterShard, CommandKind},
     destination::{config::Config, key::Key, probe, DestinationCounters},
     error::{ConnectError, LocalError, SendError},
+    metrics::{BackendMetricsShard, CommandKind},
     tko::{DestToken, TkoEvent, TkoTracker},
 };
 
@@ -24,7 +24,7 @@ pub struct Destination {
     cfg: Config,
     probe: RefCell<Option<tokio::task::JoinHandle<()>>>,
     counters: Arc<DestinationCounters>,
-    shard_counters: Arc<BackendCounterShard>,
+    shard_metrics: Arc<BackendMetricsShard>,
     last_active: Cell<Instant>,
 }
 
@@ -34,7 +34,7 @@ impl Destination {
         cfg: Config,
         tracker: Arc<TkoTracker>,
         counters: Arc<DestinationCounters>,
-        shard_counters: Arc<BackendCounterShard>,
+        shard_metrics: Arc<BackendMetricsShard>,
     ) -> Rc<Self> {
         Rc::new_cyclic(|weak: &Weak<Destination>| {
             let events = {
@@ -59,16 +59,11 @@ impl Destination {
                 key,
                 token: DestToken::allocate(),
                 tracker,
-                conn: ConnectionHandle::spawn(
-                    addr,
-                    client_cfg,
-                    events,
-                    Arc::clone(&shard_counters),
-                ),
+                conn: ConnectionHandle::spawn(addr, client_cfg, events, Arc::clone(&shard_metrics)),
                 cfg,
                 probe: RefCell::new(None),
                 counters,
-                shard_counters,
+                shard_metrics,
                 last_active: Cell::new(Instant::now()),
             }
         })
@@ -104,7 +99,7 @@ impl Destination {
 
         if !self.cfg.disable_tko_tracking && self.tracker.is_tko() {
             self.counters.record_result(ResultCode::Tko);
-            self.shard_counters.record_result(cmd, ResultCode::Tko);
+            self.shard_metrics.record_result(cmd, ResultCode::Tko);
             return Err(SendError::Tko {
                 reason: self.tracker.reason(),
             });
@@ -118,13 +113,11 @@ impl Destination {
         let latency_us = start.elapsed().as_micros() as u64;
 
         if matches!(&result, Err(SendError::Local(LocalError::QueueFull))) {
-            self.shard_counters
-                .queue_full
-                .fetch_add(1, Ordering::Relaxed);
+            self.shard_metrics.queue_full.inc();
         }
 
         self.counters.record_send(code, latency_us);
-        self.shard_counters.record_send(cmd, code, latency_us);
+        self.shard_metrics.record_send(cmd, code, latency_us);
         self.handle_tko(code, false);
 
         result
@@ -142,7 +135,7 @@ impl Destination {
         let latency_us = start.elapsed().as_micros() as u64;
 
         self.counters.record_send(code, latency_us);
-        self.shard_counters
+        self.shard_metrics
             .record_send(CommandKind::Version, code, latency_us);
         self.handle_tko(code, true);
     }
@@ -308,7 +301,7 @@ mod tests {
             cfg,
             Arc::clone(&tracker),
             counters,
-            BackendCounterShard::new(),
+            BackendMetricsShard::new(),
         );
         (map, tracker, dest, events)
     }
@@ -488,7 +481,7 @@ mod tests {
                 cfg(3, 1000, 10_000),
                 Arc::clone(&tracker),
                 counters_b,
-                BackendCounterShard::new(),
+                BackendMetricsShard::new(),
             );
 
             let _ = dest_a.send(get(b"a")).await;
@@ -522,7 +515,7 @@ mod tests {
             let addr: Arc<str> = Arc::from(server.addr.to_string());
             let tracker = map.tracker_for(&addr, 3);
             let counters = DestinationCountersRegistry::new().counters_for(&addr, &tracker);
-            let shard = BackendCounterShard::new();
+            let shard = BackendMetricsShard::new();
             let key = Key {
                 addr,
                 reply_timeout: Some(Duration::from_millis(1000)),
@@ -535,24 +528,23 @@ mod tests {
                 Arc::clone(&shard),
             );
 
-            let get_cell = |code: ResultCode| {
-                shard.requests[CommandKind::Get as usize][code as usize].load(Ordering::Relaxed)
-            };
+            let get_cell =
+                |code: ResultCode| shard.requests[CommandKind::Get as usize][code as usize].load();
 
             dest.send(get(b"a")).await.unwrap();
             assert_eq!(get_cell(ResultCode::Success), 1);
-            let latency_after_success = shard.latency_us_sum.load(Ordering::Relaxed);
+            let latency_after_success = shard.latency_us_sum.load();
             assert!(latency_after_success > 0, "a real send must record latency");
 
             let _ = dest.send(get(b"b")).await; // killed mid-use
             wait_until(|| tracker.is_tko()).await;
-            let latency_after_mark = shard.latency_us_sum.load(Ordering::Relaxed);
+            let latency_after_mark = shard.latency_us_sum.load();
 
             let r = dest.send(get(b"c")).await;
             assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
             assert_eq!(get_cell(ResultCode::Tko), 1);
             assert_eq!(
-                shard.latency_us_sum.load(Ordering::Relaxed),
+                shard.latency_us_sum.load(),
                 latency_after_mark,
                 "fast-fail must not contribute latency"
             );

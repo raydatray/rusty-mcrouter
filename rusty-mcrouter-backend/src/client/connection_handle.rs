@@ -15,8 +15,8 @@ use crate::{
         connection::Connection,
         types::{Command, ConnectionCommand, ConnectionEvent, Payload},
     },
-    counters::BackendCounterShard,
     error::SendError,
+    metrics::BackendMetricsShard,
 };
 
 #[derive(Clone)]
@@ -30,12 +30,12 @@ impl ConnectionHandle {
         addr: Arc<str>,
         cfg: Config,
         events: Box<dyn Fn(ConnectionEvent)>,
-        shard_counters: Arc<BackendCounterShard>,
+        shard_metrics: Arc<BackendMetricsShard>,
     ) -> ConnectionHandle {
         let (tx, rx) = mpsc::channel(cfg.max_pending);
         let reply_timeout = cfg.reply_timeout;
 
-        tokio::task::spawn_local(Connection::new(addr, cfg, rx, events, shard_counters).run());
+        tokio::task::spawn_local(Connection::new(addr, cfg, rx, events, shard_metrics).run());
 
         ConnectionHandle { tx, reply_timeout }
     }
@@ -85,8 +85,6 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::get;
     use rusty_mcrouter_protocol::Reply;
 
-    use std::sync::atomic::Ordering;
-
     use super::*;
     use crate::client::types::DownReason;
     use crate::error::{ConnectError, RequestError};
@@ -100,17 +98,17 @@ mod tests {
     ) -> (
         ConnectionHandle,
         ConnectionEventLog,
-        Arc<BackendCounterShard>,
+        Arc<BackendMetricsShard>,
     ) {
         let (sink, log) = event_log();
-        let counters = BackendCounterShard::new();
+        let metrics = BackendMetricsShard::new();
         let handle = ConnectionHandle::spawn(
             Arc::from(server.addr.to_string()),
             cfg,
             sink,
-            Arc::clone(&counters),
+            Arc::clone(&metrics),
         );
-        (handle, log, counters)
+        (handle, log, metrics)
     }
 
     fn hit_data(reply: Reply) -> Bytes {
@@ -126,18 +124,18 @@ mod tests {
         }
     }
 
-    /// a pipelined burst accounts every shard counter: one connection, one
+    /// a pipelined burst accounts every shard metric: one connection, one
     /// batch of three, bytes both ways, and the depth gauges settle to zero
     /// once every reply is delivered.
     #[tokio::test]
-    async fn shard_counters_track_batches_bytes_and_gauges() {
+    async fn shard_metrics_track_batches_bytes_and_gauges() {
         run_local(async {
             let server = scripted_backend_serial(vec![vec![
                 Step::ReadRequests(3),
                 Step::Write(b"EN\r\nEN\r\nEN\r\n"),
             ]])
             .await;
-            let (handle, _log, counters) = spawn_to(&server, Config::default());
+            let (handle, _log, metrics) = spawn_to(&server, Config::default());
 
             // join! polls all three sends before the actor task ever runs,
             // so they deterministically coalesce into one write batch
@@ -150,13 +148,13 @@ mod tests {
             r2.unwrap();
             r3.unwrap();
 
-            assert_eq!(counters.connections_opened.load(Ordering::Relaxed), 1);
-            assert_eq!(counters.write_batches.load(Ordering::Relaxed), 1);
-            assert_eq!(counters.batched_requests.load(Ordering::Relaxed), 3);
-            assert!(counters.bytes_written.load(Ordering::Relaxed) > 0);
-            assert!(counters.bytes_read.load(Ordering::Relaxed) > 0);
-            assert_eq!(counters.pending_reqs.load(Ordering::Relaxed), 0);
-            assert_eq!(counters.inflight_reqs.load(Ordering::Relaxed), 0);
+            assert_eq!(metrics.connections_opened.load(), 1);
+            assert_eq!(metrics.write_batches.load(), 1);
+            assert_eq!(metrics.batched_requests.load(), 3);
+            assert!(metrics.bytes_written.load() > 0);
+            assert!(metrics.bytes_read.load() > 0);
+            assert_eq!(metrics.pending_reqs.load(), 0);
+            assert_eq!(metrics.inflight_reqs.load(), 0);
         })
         .await;
     }
@@ -173,7 +171,7 @@ mod tests {
                 reply_timeout: None, // the slot can only die with the actor
                 ..Config::default()
             };
-            let (handle, _log, counters) = spawn_to(&server, cfg);
+            let (handle, _log, metrics) = spawn_to(&server, cfg);
 
             // the task owns the only handle: aborting it drops the sender,
             // which is the actor's shutdown signal
@@ -181,18 +179,16 @@ mod tests {
                 let _ = handle.send(get(b"parked")).await;
             });
 
-            while counters.inflight_reqs.load(Ordering::Relaxed) != 1 {
+            while metrics.inflight_reqs.load() != 1 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
 
             task.abort();
 
-            while counters.inflight_reqs.load(Ordering::Relaxed) != 0
-                || counters.pending_reqs.load(Ordering::Relaxed) != 0
-            {
+            while metrics.inflight_reqs.load() != 0 || metrics.pending_reqs.load() != 0 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            assert_eq!(counters.connections_closed.load(Ordering::Relaxed), 1);
+            assert_eq!(metrics.connections_closed.load(), 1);
         })
         .await;
     }
@@ -203,7 +199,7 @@ mod tests {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]])
                     .await;
-            let (handle, _log, _counters) = spawn_to(&server, Config::default());
+            let (handle, _log, _metrics) = spawn_to(&server, Config::default());
 
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(server.accept_count(), 0, "spawn must perform no I/O");
@@ -341,12 +337,12 @@ mod tests {
                 ..Config::default()
             };
             let (sink, log) = event_log();
-            let counters = BackendCounterShard::new();
+            let metrics = BackendMetricsShard::new();
             let handle = ConnectionHandle::spawn(
                 Arc::from(addr.to_string()),
                 cfg,
                 sink,
-                Arc::clone(&counters),
+                Arc::clone(&metrics),
             );
 
             let start = Instant::now();
@@ -356,7 +352,7 @@ mod tests {
                 "got {result:?}"
             );
             assert_eq!(
-                counters.connect_retries.load(Ordering::Relaxed),
+                metrics.connect_retries.load(),
                 0,
                 "refusal must not consume retries"
             );
@@ -385,12 +381,12 @@ mod tests {
                 ..Config::default()
             };
             let (sink, log) = event_log();
-            let counters = BackendCounterShard::new();
+            let metrics = BackendMetricsShard::new();
             let handle = ConnectionHandle::spawn(
                 Arc::from("192.0.2.1:12345"),
                 cfg,
                 sink,
-                Arc::clone(&counters),
+                Arc::clone(&metrics),
             );
 
             let start = Instant::now();
@@ -404,9 +400,9 @@ mod tests {
                 "2 retries must cost 3 connect_timeouts, elapsed {:?}",
                 start.elapsed()
             );
-            assert_eq!(counters.connect_retries.load(Ordering::Relaxed), 2);
+            assert_eq!(metrics.connect_retries.load(), 2);
             assert_eq!(
-                counters.connect_success_after_retry.load(Ordering::Relaxed),
+                metrics.connect_success_after_retry.load(),
                 0,
                 "all retries failed - no success-after-retry"
             );

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, rc::Rc};
 
 use bytes::{Bytes, BytesMut};
-use rusty_mcrouter_backend::counters::CommandKind;
+use rusty_mcrouter_backend::metrics::CommandKind;
 use rusty_mcrouter_core::DynRoute;
 use rusty_mcrouter_protocol::meta::{
     DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
@@ -328,7 +328,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
-    use rusty_mcrouter_backend::counters::CommandKind;
+    use rusty_mcrouter_backend::metrics::CommandKind;
     use rusty_mcrouter_backend::test_support::{run_local, MockBackend};
     use rusty_mcrouter_core::{DestinationRoute, Route};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

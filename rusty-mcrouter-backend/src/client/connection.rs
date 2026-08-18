@@ -1,8 +1,4 @@
-use std::{
-    collections::VecDeque,
-    io,
-    sync::{atomic::Ordering, Arc},
-};
+use std::{collections::VecDeque, io, sync::Arc};
 
 use bytes::BytesMut;
 use rusty_mcrouter_protocol::meta::{MetaReplyDecoder, MetaRequestEncoder};
@@ -18,8 +14,8 @@ use crate::{
         config::Config,
         types::{Command, ConnectionCommand, ConnectionEvent, DownReason, Inflight, Payload},
     },
-    counters::BackendCounterShard,
     error::{ConnectError, LocalError, ProtocolError, RequestError, SendError},
+    metrics::BackendMetricsShard,
 };
 
 pub(crate) struct Connection {
@@ -27,7 +23,7 @@ pub(crate) struct Connection {
     cfg: Config,
     rx: mpsc::Receiver<ConnectionCommand>,
     events: Box<dyn Fn(ConnectionEvent)>,
-    shard_counters: Arc<BackendCounterShard>,
+    shard_metrics: Arc<BackendMetricsShard>,
     pending: VecDeque<Command>,   // accepted, not yet written
     inflight: VecDeque<Inflight>, // written, awaiting reply
     encoder: MetaRequestEncoder,
@@ -48,7 +44,7 @@ impl Connection {
         cfg: Config,
         rx: mpsc::Receiver<ConnectionCommand>,
         events: Box<dyn Fn(ConnectionEvent)>,
-        shard_counters: Arc<BackendCounterShard>,
+        shard_metrics: Arc<BackendMetricsShard>,
     ) -> Connection {
         let read_buf = BytesMut::with_capacity(cfg.read_buf_initial_capacity);
         Connection {
@@ -56,7 +52,7 @@ impl Connection {
             cfg,
             rx,
             events,
-            shard_counters,
+            shard_metrics,
             pending: VecDeque::new(),
             inflight: VecDeque::new(),
             encoder: MetaRequestEncoder::new(),
@@ -93,18 +89,14 @@ impl Connection {
                     continue 'lifecycle;
                 }
             };
-            self.shard_counters
-                .connections_opened
-                .fetch_add(1, Ordering::Relaxed);
+            self.shard_metrics.connections_opened.inc();
             (self.events)(ConnectionEvent::Up);
 
             // up
             let exit = self.pipeline(stream).await;
             self.reset_stream_state(); // ALWAYS clear read buffer and ask for a fresh decoder
 
-            self.shard_counters
-                .connections_closed
-                .fetch_add(1, Ordering::Relaxed);
+            self.shard_metrics.connections_closed.inc();
 
             match exit {
                 PipelineExit::Down(reason) => {
@@ -131,9 +123,7 @@ impl Connection {
                     Ok(res) => res,
                     Err(_elapsed) if retries_left > 0 => {
                         retries_left -= 1;
-                        self.shard_counters
-                            .connect_retries
-                            .fetch_add(1, Ordering::Relaxed);
+                        self.shard_metrics.connect_retries.inc();
                         continue;
                     }
                     Err(_elapsed) => return Err(ConnectError::Timeout),
@@ -144,9 +134,7 @@ impl Connection {
                 Ok(stream) => {
                     let _ = stream.set_nodelay(true);
                     if retries_left < self.cfg.connect_timeout_retries {
-                        self.shard_counters
-                            .connect_success_after_retry
-                            .fetch_add(1, Ordering::Relaxed);
+                        self.shard_metrics.connect_success_after_retry.inc();
                     }
                     return Ok(stream);
                 }
@@ -203,7 +191,7 @@ impl Connection {
                     Ok(0) if self.inflight.is_empty() => return PipelineExit::Closed,
                     Ok(0) => return PipelineExit::Down(DownReason::Eof),
                     Ok(n) => {
-                        self.shard_counters.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
+                        self.shard_metrics.bytes_read.add(n as u64);
 
 
                         if let Err(e) = self.with_depth_gauges(Self::deliver_replies) {
@@ -272,15 +260,11 @@ impl Connection {
             return Ok(());
         }
 
-        self.shard_counters
-            .write_batches
-            .fetch_add(1, Ordering::Relaxed);
-        self.shard_counters
-            .batched_requests
-            .fetch_add(encoded, Ordering::Relaxed);
-        self.shard_counters
+        self.shard_metrics.write_batches.inc();
+        self.shard_metrics.batched_requests.add(encoded);
+        self.shard_metrics
             .bytes_written
-            .fetch_add(self.write_buf.len() as u64, Ordering::Relaxed);
+            .add(self.write_buf.len() as u64);
 
         let write = writer.write_all(&self.write_buf);
         match self.cfg.write_timeout {
@@ -402,15 +386,11 @@ impl Connection {
         let di = self.inflight.len() as i64 - i0 as i64;
 
         if dp != 0 {
-            self.shard_counters
-                .pending_reqs
-                .fetch_add(dp, Ordering::Relaxed);
+            self.shard_metrics.pending_reqs.add(dp);
         }
 
         if di != 0 {
-            self.shard_counters
-                .inflight_reqs
-                .fetch_add(di, Ordering::Relaxed);
+            self.shard_metrics.inflight_reqs.add(di);
         }
 
         out
@@ -419,13 +399,13 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        self.shard_counters
+        self.shard_metrics
             .pending_reqs
-            .fetch_sub(self.pending.len() as i64, Ordering::Relaxed);
+            .sub(self.pending.len() as i64);
 
-        self.shard_counters
+        self.shard_metrics
             .inflight_reqs
-            .fetch_sub(self.inflight.len() as i64, Ordering::Relaxed);
+            .sub(self.inflight.len() as i64);
     }
 }
 
@@ -453,7 +433,7 @@ mod tests {
             Config::default(),
             rx,
             Box::new(|_| {}),
-            BackendCounterShard::new(),
+            BackendMetricsShard::new(),
         )
     }
 
