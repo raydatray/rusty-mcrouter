@@ -1210,17 +1210,13 @@ name = "rusty-mcrouter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "clap",
  "rusty-mcrouter-config",
- "rusty-mcrouter-core",
  "rusty-mcrouter-net",
  "rusty-mcrouter-observability",
- "rusty-mcrouter-protocol",
  "rusty-mcrouter-proxy",
  "testcontainers",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1281,7 +1277,14 @@ dependencies = [
 name = "rusty-mcrouter-proxy"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bytes",
+ "rusty-mcrouter-config",
+ "rusty-mcrouter-core",
  "rusty-mcrouter-net",
+ "rusty-mcrouter-protocol",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

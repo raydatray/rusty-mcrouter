@@ -11,14 +11,13 @@ use rusty_mcrouter_protocol::meta::{
 };
 use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
-use rusty_mcrouter_proxy::FrontendCounters;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
     sync::mpsc,
 };
 
-use crate::proxy::{config::ThreadMode, proxy_set::ProxySet, ProxyHandle};
+use crate::{config::ThreadMode, proxy_set::ProxySet, FrontendCounters, ProxyHandle};
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
 const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
@@ -334,7 +333,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::proxy::message::ProxyMessage;
+    use crate::message::ProxyMessage;
 
     /// a real Connection over a localhost socket pair, with a SameThread
     /// route into a mock backend. the proxy handle channel is never used

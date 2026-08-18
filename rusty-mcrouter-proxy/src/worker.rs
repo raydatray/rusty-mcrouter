@@ -4,10 +4,9 @@ use std::{
 };
 
 use rusty_mcrouter_core::DynRoute;
-use rusty_mcrouter_proxy::FrontendCounters;
 use tokio::sync::mpsc;
 
-use crate::proxy::{config::ThreadMode, connection::Connection, proxy_set::ProxySet};
+use crate::{config::ThreadMode, connection::Connection, proxy_set::ProxySet, FrontendCounters};
 
 /// a proxy thread's socket-handoff loop:
 /// - drains the per-thread socket queue
