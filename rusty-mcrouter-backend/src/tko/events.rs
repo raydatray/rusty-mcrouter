@@ -1,6 +1,6 @@
-// super temporary event sink for tkos until we figure out observability
-
 use std::sync::Arc;
+
+use rusty_mcrouter_observability_primitives::EventSink;
 
 use crate::classify::ResultCode;
 
@@ -26,8 +26,8 @@ pub struct TkoEventRecord {
     pub global_hard_tkos: u64,
 }
 
-pub type TkoEventSink = Box<dyn Fn(TkoEventRecord) + Send + Sync>;
+pub type TkoEventSink = EventSink<TkoEventRecord>;
 
 pub fn default_sink() -> TkoEventSink {
-    Box::new(|rec| eprintln!("tko: {:?} server = {}", rec.event, rec.server))
+    TkoEventSink::new(|rec| eprintln!("tko: {:?} server = {}", rec.event, rec.server))
 }

@@ -1,3 +1,5 @@
+use rusty_mcrouter_observability_primitives::EventSink;
+
 #[derive(Clone, Copy, Debug)]
 pub struct WorkerEventRecord {
     pub proxy_id: usize,
@@ -10,4 +12,4 @@ pub enum WorkerEvent {
     Stopped,
 }
 
-pub type WorkerEventSink = Box<dyn Fn(WorkerEventRecord) + Send + Sync>;
+pub type WorkerEventSink = EventSink<WorkerEventRecord>;

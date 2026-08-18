@@ -262,9 +262,9 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = {
             let events = Arc::clone(&events);
-            Box::new(move |rec: crate::tko::TkoEventRecord| {
+            TkoEventSink::new(move |rec: crate::tko::TkoEventRecord| {
                 events.lock().unwrap().push(rec.event);
-            }) as TkoEventSink
+            })
         };
         (sink, events)
     }
