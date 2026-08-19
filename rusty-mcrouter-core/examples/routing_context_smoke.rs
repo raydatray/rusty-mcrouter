@@ -3,29 +3,15 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use rusty_mcrouter_core::{
-    DynRoute, ErrorRoute, Route, RouteContext, RouteError, RoutingMetricsLayout,
+    DynRoute, ErrorRoute, NullRoute, Route, RouteContext, RouteError, RoutingMetricsLayout,
     RoutingMetricsShard, RoutingState,
 };
-use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::test_support::get;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 const WARMUP: usize = 10_000;
 const ITERATIONS: usize = 1_000_000;
 const FORWARDING_DEPTH: usize = 16;
-
-struct ReadContext;
-
-impl Route for ReadContext {
-    async fn route(
-        &self,
-        context: &RouteContext<'_>,
-        _request: Request,
-    ) -> Result<Reply, RouteError> {
-        black_box(context.metrics());
-        Ok(Reply::Error(ErrorReply::Error))
-    }
-}
 
 struct Forward {
     child: Rc<dyn DynRoute>,
@@ -48,7 +34,7 @@ fn main() {
 
     runtime.block_on(async {
         let ignored_context_route = ErrorRoute::new(None).into_dyn();
-        let read_context_route = ReadContext.into_dyn();
+        let read_context_route = NullRoute.into_dyn();
         let deep_route = forwarding_chain(Rc::clone(&read_context_route));
         let request = get(b"routing-context-smoke");
         let layout = RoutingMetricsLayout::new(Vec::<String>::new());
@@ -73,11 +59,11 @@ fn main() {
             ns_per_op(direct_ignored)
         );
         println!(
-            "direct, context read:    {:.2} ns/op",
+            "direct, NullRoute:       {:.2} ns/op",
             ns_per_op(direct_read)
         );
         println!(
-            "entry, context read:     {:.2} ns/op",
+            "entry, NullRoute:        {:.2} ns/op",
             ns_per_op(entry_read)
         );
         println!(

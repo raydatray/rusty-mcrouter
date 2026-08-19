@@ -9,12 +9,11 @@ use crate::RouteContext;
 pub struct NullRoute;
 
 impl Route for NullRoute {
-    async fn route(&self, _context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+        context.metrics().dev_null_requests.inc();
+
         Ok(match request {
             Request::Get(_) => Reply::Get(GetReply::Miss),
-            // Success with synthesized result fields so a reply plan that
-            // requested c/s still encodes; cas 0 mirrors memcached's
-            // "not a real CAS" convention on non-stores.
             Request::Store(request) => Reply::Store(StoreReply::Success(StoreResult {
                 cas: Some(0),
                 size: Some(request.value.len() as u64),
@@ -30,10 +29,13 @@ impl Route for NullRoute {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use rusty_mcrouter_protocol::test_support::{delete, get, request, store};
 
     use crate::context::test_routing_state;
+    use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
 
     async fn execute(request: Request) -> Result<Reply> {
         let state = test_routing_state();
@@ -78,5 +80,19 @@ mod tests {
     async fn returns_miss_for_debug() {
         let reply = execute(request(b"me k\r\n")).await.unwrap();
         assert_eq!(reply, Reply::Debug(DebugReply::Miss));
+    }
+
+    #[tokio::test]
+    async fn counts_each_invocation() {
+        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+
+        let first = state.context();
+        NullRoute.route(&first, get(b"a")).await.unwrap();
+        let second = state.context();
+        NullRoute.route(&second, get(b"b")).await.unwrap();
+
+        assert_eq!(metrics.dev_null_requests.load(), 2);
     }
 }

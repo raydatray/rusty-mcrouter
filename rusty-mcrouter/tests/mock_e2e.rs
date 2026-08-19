@@ -232,6 +232,19 @@ async fn metrics_endpoint_reports_traffic() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_endpoint_reports_null_route_requests() {
+    let fx = start_router(r#"{ "route": "NullRoute" }"#, 60_001).await;
+
+    exchange(fx.router_addr, b"mg discarded v\r\n", b"EN\r\n").await;
+
+    let body = scrape(fx.metrics_addr).await;
+    assert!(
+        body.contains("rusty_mcrouter_dev_null_requests_total 1\n"),
+        "{body}"
+    );
+}
+
 /// a dead backend marks hard on first contact (connect refused) and the
 /// scrape shows it: tko gauge up, destination down, tko-result counted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
