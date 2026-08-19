@@ -10,9 +10,9 @@ composition and presentation (`A --> B` means B depends on A):
 - **`rusty-mcrouter-observability-primitives`** - std-only metric cells and event sink mechanics shared by fact-owning crates; no domain records or presentation logic
 - **`rusty-mcrouter-backend`** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
 - **`rusty-mcrouter-core`** - the routing graph, where a config file is transformed into a tree of route handles
-- **`rusty-mcrouter-proxy`** - the client-facing leg and orchestration: accept loops, frontend protocol handling, proxy threads, workers and cross-thread dispatch
-- **`rusty-mcrouter-observability`** - the event bus and log presentation, metrics aggregation and the `/metrics` endpoint
-- **`rusty-mcrouter`** - the thin binary: cli, options and construct-and-wire startup
+- **`rusty-mcrouter-proxy`** - the client-facing leg and orchestration: proxy runtimes, frontend protocol handling, connections and cross-thread dispatch
+- **`rusty-mcrouter-observability`** - event and metric components, Hyper-based `/metrics` handling and presentation
+- **`rusty-mcrouter`** - the binary composition layer: cli, process supervision and the control runtime
 
 ```mermaid
 flowchart LR
@@ -44,6 +44,43 @@ flowchart LR
     Q --> O
 ```
 
+## runtime ownership
+
+```mermaid
+flowchart TB
+    M[main process supervisor]
+    M --> PT0[ProxyThread 0]
+    M --> PTN[ProxyThread N]
+    M --> CT[ControlThread]
+    PT0 --> PR0[ProxyRuntime]
+    PTN --> PRN[ProxyRuntime]
+    CT --> CR[ControlRuntime]
+    CR --> EC[EventConsumer]
+    CR --> MH[MetricsHttp]
+```
+
+`Handle` means a cloneable mailbox. `Thread` means unique OS-thread ownership
+plus joining. `Runtime` means the actor and task state that lives on that
+thread's current-thread Tokio runtime.
+
+| path | delivery contract |
+|---|---|
+| proxy request channel | reliable and backpressured |
+| proxy command channel | reliable and prioritized ahead of requests |
+| control command channel | reliable and prioritized |
+| event sender | best effort; bounded queue may shed |
+
+`ProxyRuntime` owns routed-request tasks, client connections, listener and
+destination-sweep tasks. `ControlRuntime` owns event presentation, the metrics
+listener and at most 32 concurrent metrics connection tasks. No OS thread or
+long-lived runtime task is intentionally detached.
+
+Startup binds listeners and waits for each thread's ready acknowledgement
+before printing `READY` and `METRICS`. Ctrl-C and unexpected thread exits are
+reported to main. Main stops and joins proxy threads first, allowing their
+worker-stop events to reach the control runtime, then drains and joins the
+control thread.
+
 ## request lifecycle
 ```mermaid
 sequenceDiagram
@@ -56,8 +93,8 @@ sequenceDiagram
     C->>P: mg foo v q O123
     Note over P: MetaRequestDecoder<br/>Request + MetaReplyPlan<br/>seq=N, plan pinned to conn
     P->>R: Request
-    Note over R: pool, hash, failover<br/>skips TKO'd destinations<br/>consults fail-open
-    R->>D: Destination::send
+    Note over R: pool, hash, failover<br/>reaches TKO destinations, which fast-fail<br/>consults fail-open
+    R->>D: Destination::prepare_send
     Note over D: MetaRequestEncoder<br/>canonical bytes + Expectation<br/>q/O/k stripped
     D->>S: mg foo v
     S-->>D: HD

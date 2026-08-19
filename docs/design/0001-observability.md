@@ -633,8 +633,8 @@ impl Observability {
     pub fn new(bus_capacity: usize) -> Self;
     pub fn events(&self) -> &EventSender;
     pub fn register(&mut self, source: Box<dyn MetricsSource>);
-    pub fn spawn(self, metrics_addr: Option<SocketAddr>)
-        -> io::Result<Option<SocketAddr>>;
+    pub fn into_parts(self, metrics_addr: Option<SocketAddr>)
+        -> io::Result<(Option<SocketAddr>, ObservabilityParts)>;
 }
 ```
 
@@ -648,18 +648,21 @@ let metrics = RoutingMetricsShard::new(Arc::clone(&layout));
 let state = RoutingState::with_event_sink(metrics, obs.events().sink());
 let route = build_route(&config, &factory, &defaults, state.layout())?;
 obs.register(Box::new(RoutingSource { shards }));
-obs.spawn(metrics_addr)?;
+let (metrics_addr, parts) = obs.into_parts(metrics_addr)?;
+let control = ControlThread::spawn(parts, process_events)?;
 ```
 
-the /metrics server is a minimal hand-rolled http responder on the
-control thread's runtime — no framework dependency for one endpoint.
+the control thread owns event consumption and a Hyper HTTP/1 metrics service.
+the service disables keep-alive, applies a five-second connection timeout and
+tracks at most 32 concurrent connection tasks. excess connections increment
+`rusty_mcrouter_metrics_http_rejected_total` and are closed.
 
 ## implementation record
 
 the shipped slices are: owned TKO, routing, and worker event records;
 the bounded shedding bus; per-proxy frontend/backend/routing shards;
-shared per-destination blocks; live TKO/fail-open sources; the minimal
-HTTP endpoint; and binary construction/wiring. route instrumentation is
+shared per-destination blocks; live TKO/fail-open sources; the Hyper
+HTTP endpoint; and supervised binary construction/wiring. route instrumentation is
 guarded by `rusty-mcrouter/tests/route_graph_observability.rs`, which
 parses real config, builds a graph with mock backends, executes through
 the proxy boundary, renders the real `RoutingSource`, and asserts
@@ -686,3 +689,5 @@ healthy and failover metrics.
 - stock `process_*` collection remains deferred.
 - additional frontend/backend event families should be added only for
   rare transitions with a concrete operational consumer.
+- config reload commands, an admin HTTP API and graceful request draining are
+  deferred; the current control command surface contains shutdown only.
