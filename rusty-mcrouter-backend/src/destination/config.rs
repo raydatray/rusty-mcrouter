@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
-pub struct Config {
+pub struct DestinationConfig {
     pub connect_timeout: Option<Duration>,
     pub reply_timeout: Option<Duration>,
     pub connect_timeout_retries: usize,
@@ -11,7 +11,7 @@ pub struct Config {
     pub disable_tko_tracking: bool,
 }
 
-impl Default for Config {
+impl Default for DestinationConfig {
     /// mcrouter's defaults (mcrouter_options_list.h): server_timeout 1000ms
     /// (connect_timeout defaults to it), 0 connect retries, 3 failures to
     /// TKO, probes from 10s backing off to 60s, tracking enabled.

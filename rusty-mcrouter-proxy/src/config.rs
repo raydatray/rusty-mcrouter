@@ -36,7 +36,7 @@ pub struct ProxyThreadConfig {
     pub events: WorkerEventSink,
     /// Router-level destination defaults (derived from RouterOptions once in
     /// main); pools override via server_timeout/connect_timeout.
-    pub defaults: destination::Config,
+    pub defaults: destination::DestinationConfig,
     /// Idle-connection sweep interval; zero disables.
     pub sweep_interval: Duration,
 }

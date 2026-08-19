@@ -85,7 +85,7 @@ pub trait BackendFactory {
     fn make(
         &self,
         server: &str,
-        cfg: &destination::Config,
+        cfg: &destination::DestinationConfig,
         pool: &PoolHealth<'_>,
     ) -> Result<Self::Backend, BackendFactoryError>;
 }
@@ -108,7 +108,7 @@ impl BackendFactory for DestinationFactory {
     fn make(
         &self,
         server: &str,
-        cfg: &destination::Config,
+        cfg: &destination::DestinationConfig,
         pool: &PoolHealth<'_>,
     ) -> Result<Rc<Destination>, BackendFactoryError> {
         let valid = server
@@ -168,7 +168,7 @@ mod tests {
     async fn factory_makes_lazy_destinations_and_dedups() {
         run_local(async {
             let (_tko, factory) = factory();
-            let cfg = destination::Config::default();
+            let cfg = destination::DestinationConfig::default();
             let pool = PoolHealth::ungated("pool");
 
             // no listener at this addr: make still succeeds (lazy)
@@ -183,7 +183,7 @@ mod tests {
     async fn invalid_addresses_fail_at_build_time() {
         run_local(async {
             let (_tko, factory) = factory();
-            let cfg = destination::Config::default();
+            let cfg = destination::DestinationConfig::default();
             let pool = PoolHealth::ungated("pool");
 
             for addr in ["localhost", "host:notaport", "host:99999", ":11211", ""] {
@@ -204,7 +204,7 @@ mod tests {
     async fn gated_pool_attaches_fail_open_gate() {
         run_local(async {
             let (_tko, factory) = factory();
-            let cfg = destination::Config::default();
+            let cfg = destination::DestinationConfig::default();
             let pool = PoolHealth {
                 pool_name: "gated",
                 fail_open: Some(FailOpenThresholds { enter: 1, exit: 1 }),
@@ -235,7 +235,7 @@ mod tests {
             let backend = factory
                 .make(
                     &server.addr.to_string(),
-                    &destination::Config::default(),
+                    &destination::DestinationConfig::default(),
                     &PoolHealth::ungated("pool"),
                 )
                 .unwrap();

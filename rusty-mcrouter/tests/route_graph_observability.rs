@@ -37,7 +37,7 @@ impl BackendFactory for Factory {
     fn make(
         &self,
         server: &str,
-        _cfg: &destination::Config,
+        _cfg: &destination::DestinationConfig,
         _pool: &PoolHealth<'_>,
     ) -> Result<Self::Backend, BackendFactoryError> {
         self.backends
@@ -63,7 +63,7 @@ fn build(
     let route = build_route(
         config,
         factory,
-        &destination::Config::default(),
+        &destination::DestinationConfig::default(),
         state.layout(),
     )
     .unwrap();

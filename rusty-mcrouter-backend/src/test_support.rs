@@ -156,7 +156,7 @@ impl BackendFactory for MockBackendFactory {
     fn make(
         &self,
         server: &str,
-        _cfg: &crate::destination::Config,
+        _cfg: &crate::destination::DestinationConfig,
         _pool: &PoolHealth<'_>,
     ) -> Result<MockBackend, BackendFactoryError> {
         if self.fail_addr.as_deref() == Some(server) {

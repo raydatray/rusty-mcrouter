@@ -71,7 +71,7 @@ type Result<T> = std::result::Result<T, BuildError>;
 pub fn build_route<F: BackendFactory>(
     config: &ConfigDocument,
     factory: &F,
-    defaults: &destination::Config,
+    defaults: &destination::DestinationConfig,
     metrics_layout: &RoutingMetricsLayout,
 ) -> Result<Rc<dyn DynRoute>> {
     let entry = match &config.route {
@@ -86,7 +86,7 @@ pub fn build_route<F: BackendFactory>(
 struct RouteBuilder<'a, F: BackendFactory> {
     config: &'a ConfigDocument,
     factory: &'a F,
-    defaults: &'a destination::Config,
+    defaults: &'a destination::DestinationConfig,
     metrics_layout: &'a RoutingMetricsLayout,
     pool_cache: BTreeMap<String, Vec<Rc<DestinationRoute<F::Backend>>>>,
 }
@@ -95,7 +95,7 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
     fn new(
         config: &'a ConfigDocument,
         factory: &'a F,
-        defaults: &'a destination::Config,
+        defaults: &'a destination::DestinationConfig,
         metrics_layout: &'a RoutingMetricsLayout,
     ) -> Self {
         Self {
@@ -236,9 +236,9 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
 /// connect_timeout > reply_timeout lets callers overshoot their deadline
 /// while a connect is pending.
 fn pool_destination_config(
-    defaults: &destination::Config,
+    defaults: &destination::DestinationConfig,
     pool: &PoolConfig,
-) -> destination::Config {
+) -> destination::DestinationConfig {
     let mut cfg = defaults.clone();
     if let Some(ms) = pool.server_timeout_ms {
         cfg.reply_timeout = Some(Duration::from_millis(ms));
@@ -350,8 +350,8 @@ mod tests {
 
     use crate::{RoutingMetricsShard, RoutingState};
 
-    fn defaults() -> destination::Config {
-        destination::Config::default()
+    fn defaults() -> destination::DestinationConfig {
+        destination::DestinationConfig::default()
     }
 
     struct BuiltRoute {
