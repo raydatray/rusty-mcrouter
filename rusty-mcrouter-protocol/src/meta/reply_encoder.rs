@@ -5,7 +5,8 @@ use crate::key::MAX_KEY_BYTES;
 use crate::meta::reply_decoder::MAX_REPLY_LINE_BYTES;
 use crate::meta::request_decoder::MAX_OPAQUE_BYTES;
 use crate::meta::{command, wire, KeyEncoding, MetaQuietPolicy, MetaReplyPlan};
-use crate::reply::{ArithmeticReply, DeleteReply, ErrorReply, GetReply, Reply, StoreReply};
+use crate::reply::{ArithmeticReply, DeleteReply, ErrorReply, GetReply, StoreReply};
+use crate::Reply;
 
 #[derive(Debug, Default)]
 pub struct MetaReplyEncoder;

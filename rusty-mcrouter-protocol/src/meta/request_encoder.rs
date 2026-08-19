@@ -1,9 +1,9 @@
 use bytes::BytesMut;
 use thiserror::Error;
 
-use crate::key::{Key, MAX_KEY_BYTES};
+use crate::key::MAX_KEY_BYTES;
 use crate::meta::{command, wire, MetaReplyExpectation};
-use crate::request::Request;
+use crate::{Key, Request};
 
 #[derive(Debug, Default)]
 pub struct MetaRequestEncoder;

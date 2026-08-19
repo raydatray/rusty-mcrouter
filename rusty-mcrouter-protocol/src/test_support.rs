@@ -8,13 +8,11 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::key::Key;
 use crate::meta::{
     DecodedMetaCommand, MetaReplyDecoder, MetaReplyExpectation, MetaReplyPlan, MetaRequestDecoder,
     MetaRequestEncoder,
 };
-use crate::reply::Reply;
-use crate::request::Request;
+use crate::{Key, Reply, Request};
 
 /// A validated cache key.
 #[track_caller]

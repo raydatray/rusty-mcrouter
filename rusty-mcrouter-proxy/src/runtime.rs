@@ -6,14 +6,9 @@ use rusty_mcrouter_core::{DynRoute, RoutingState};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::{
-    config::ThreadMode,
-    connection::Connection,
-    message::{ProxyCommand, ProxyRequest},
-    proxy_set::ProxySet,
-    routing::route_request,
-    FrontendMetricsShard,
-};
+use crate::connection::Connection;
+use crate::routing::route_request;
+use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, ThreadMode};
 
 pub(crate) struct ProxyRuntime {
     proxy_id: usize,

@@ -4,10 +4,8 @@ use std::{
 };
 
 use crate::tko::{
-    events::{default_sink, TkoEventRecord, TkoEventSink},
-    metrics::GlobalTkoMetrics,
-    pool::{FailOpenThresholds, PoolTkoTracker},
-    tracker::TkoTracker,
+    default_sink, FailOpenThresholds, GlobalTkoMetrics, PoolTkoTracker, TkoEventRecord,
+    TkoEventSink, TkoTracker,
 };
 
 pub struct TkoTrackerMap {
@@ -126,7 +124,7 @@ impl TkoTrackerMap {
 mod tests {
     use super::*;
     use crate::classify::ResultCode;
-    use crate::tko::tracker::DestToken;
+    use crate::tko::DestToken;
 
     fn null_sink() -> TkoEventSink {
         TkoEventSink::new(|_| {})
@@ -203,7 +201,7 @@ mod tests {
 
     // ── contention suite: std::thread, no tokio ─────────────────────────
 
-    use crate::tko::events::TkoEvent;
+    use crate::tko::TkoEvent;
     use std::sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc, Barrier,

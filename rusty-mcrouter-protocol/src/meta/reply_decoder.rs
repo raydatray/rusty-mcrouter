@@ -6,7 +6,8 @@ use crate::meta::tokens::{
     find_line, parse_usize, split_tokens, BadNumber, FindLine, FlagError, UnexpectedArgument,
 };
 use crate::meta::{GetSuccessShape, MetaReplyExpectation};
-use crate::reply::{ErrorReply, Reply};
+use crate::reply::ErrorReply;
+use crate::Reply;
 
 pub const MAX_REPLY_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_REPLY_VALUE_BYTES: usize = 1024 * 1024;

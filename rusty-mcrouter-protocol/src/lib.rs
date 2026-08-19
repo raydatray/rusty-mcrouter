@@ -6,6 +6,6 @@ pub mod request;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 
-pub use key::Key;
-pub use reply::Reply;
-pub use request::{Request, RequestKind};
+pub use crate::key::Key;
+pub use crate::reply::Reply;
+pub use crate::request::{Request, RequestKind};

@@ -1,7 +1,5 @@
-use super::{
-    furc::{furc_hash, FURC_MAX_POOL_SIZE},
-    Result, Selector, SelectorBuildError,
-};
+use crate::selectors::furc::{furc_hash, FURC_MAX_POOL_SIZE};
+use crate::selectors::{Result, Selector, SelectorBuildError};
 
 pub struct Ch3 {
     n: u32,

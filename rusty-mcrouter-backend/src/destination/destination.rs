@@ -8,15 +8,15 @@ use std::{
 use rusty_mcrouter_protocol::{Reply, Request, RequestKind};
 use tokio::time::Instant;
 
+use crate::destination::probe::probe_loop;
 use crate::{
-    backend::{PreparedSend, TkoRejection},
     classify::{code_of, ResultCode},
     connection::{BackendConnectionConfig, ConnectionEvent, ConnectionHandle, DownReason},
-    destination::{probe, DestinationConfig, DestinationKey, DestinationMetrics},
+    destination::{DestinationConfig, DestinationKey, DestinationMetrics},
     error::{ConnectError, LocalError, SendError},
     metrics::BackendMetricsShard,
     tko::{DestToken, TkoEvent, TkoTracker},
-    Backend,
+    Backend, PreparedSend, TkoRejection,
 };
 
 pub struct Destination {
@@ -184,7 +184,7 @@ impl Destination {
     }
 
     fn start_probing(self: &Rc<Self>) {
-        let task = tokio::task::spawn_local(probe::probe_loop(
+        let task = tokio::task::spawn_local(probe_loop(
             Rc::downgrade(self),
             self.cfg.probe_delay_initial,
             self.cfg.probe_delay_max,

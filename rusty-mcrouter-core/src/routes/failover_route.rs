@@ -3,11 +3,10 @@ use std::rc::Rc;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::failover::{route_code, FailoverErrors, FailoverPolicy};
+use crate::routes::{DynRoute, Result, Route, RouteError};
 use crate::{
     FailoverErrorClass, FailoverPolicyKind, RouteContext, RoutingEvent, RoutingEventRecord,
 };
-
-use super::{DynRoute, Result, Route, RouteError};
 
 pub struct FailoverRoute {
     children: Vec<Rc<dyn DynRoute>>,

@@ -1,4 +1,4 @@
-use super::Selector;
+use crate::selectors::Selector;
 
 const CRC32_TABLE: [u32; 256] = crc_32_table();
 

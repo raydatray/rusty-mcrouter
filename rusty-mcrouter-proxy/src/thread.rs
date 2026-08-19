@@ -4,12 +4,8 @@ use rusty_mcrouter_backend::{destination, DestinationFactory};
 use rusty_mcrouter_core::{build_route, RoutingState};
 use tokio::{runtime::Builder, task::LocalSet};
 
-use crate::{
-    config::{ListenerConfig, ProxyThreadConfig},
-    runtime::ProxyRuntime,
-    server::Server,
-    WorkerEvent, WorkerEventRecord,
-};
+use crate::runtime::ProxyRuntime;
+use crate::{ListenerConfig, ProxyThreadConfig, Server, WorkerEvent, WorkerEventRecord};
 
 type ReadyEvent = anyhow::Result<Option<SocketAddr>>;
 

@@ -2,7 +2,7 @@ use bytes::Bytes;
 use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 
-use super::{Result, Route};
+use crate::routes::{Result, Route};
 use crate::RouteContext;
 
 pub struct ErrorRoute {

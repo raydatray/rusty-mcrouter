@@ -4,7 +4,7 @@ mod delete;
 mod get;
 mod store;
 
-use crate::key::Key;
+use crate::Key;
 
 pub use arithmetic::{
     ArithmeticMode, ArithmeticRequest, ArithmeticTemporalInstruction,
