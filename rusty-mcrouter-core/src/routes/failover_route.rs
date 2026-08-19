@@ -151,7 +151,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::failover::InOrderPolicy;
+    use crate::failover::{InOrderPolicy, LeastFailuresPolicy};
     use crate::routes::{DestinationRoute, RouteError};
     use bytes::Bytes;
     use rusty_mcrouter_backend::classify::ResultCode;
@@ -178,6 +178,10 @@ mod tests {
 
     fn dest(backend: MockBackend) -> Rc<dyn DynRoute> {
         DestinationRoute::new(backend).into_dyn()
+    }
+
+    fn pooled_dest(backend: MockBackend, pool_index: usize) -> Rc<dyn DynRoute> {
+        DestinationRoute::for_pool(backend, pool_index).into_dyn()
     }
 
     fn timeout() -> SendError {
@@ -378,6 +382,142 @@ mod tests {
             0
         );
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_primary_error_claims_final_attribution() {
+        let route = in_order(vec![
+            pooled_dest(MockBackend::failing(timeout()), 0),
+            pooled_dest(MockBackend::replying(numeric(1)), 1),
+        ]);
+        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let context = state.context();
+
+        let result = route.route(&context, get(b"key")).await;
+        assert_eq!(result.as_ref().unwrap(), &numeric(1));
+        context.finish(&result);
+
+        assert_eq!(metrics.pools[0].requests.load(), 1);
+        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
+        assert_eq!(metrics.pools[0].final_errors.load(), 0);
+        assert_eq!(metrics.pools[1].requests.load(), 1);
+        assert_eq!(metrics.pools[1].completed_requests.load(), 0);
+        assert_eq!(metrics.pools[1].final_errors.load(), 0);
+    }
+
+    #[tokio::test]
+    async fn final_error_is_attributed_once_to_first_sendable_pool() {
+        let route = in_order(vec![
+            pooled_dest(MockBackend::failing(timeout()), 0),
+            pooled_dest(MockBackend::failing(timeout()), 1),
+        ]);
+        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let context = state.context();
+
+        let result = route.route(&context, get(b"key")).await;
+        assert!(result.is_err());
+        context.finish(&result);
+
+        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
+        assert_eq!(metrics.pools[0].final_errors.load(), 1);
+        assert_eq!(metrics.pools[1].completed_requests.load(), 0);
+        assert_eq!(metrics.pools[1].final_errors.load(), 0);
+    }
+
+    #[tokio::test]
+    async fn tko_primary_does_not_claim_final_attribution() {
+        let route = in_order(vec![
+            pooled_dest(MockBackend::failing(tko()), 0),
+            pooled_dest(MockBackend::replying(numeric(1)), 1),
+        ]);
+        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let context = state.context();
+
+        let result = route.route(&context, get(b"key")).await;
+        assert_eq!(result.as_ref().unwrap(), &numeric(1));
+        context.finish(&result);
+
+        assert_eq!(metrics.pools[0].requests.load(), 1);
+        assert_eq!(metrics.pools[0].duration_us_sum.load(), 0);
+        assert_eq!(metrics.pools[0].completed_requests.load(), 0);
+        assert_eq!(metrics.pools[1].requests.load(), 1);
+        assert_eq!(metrics.pools[1].completed_requests.load(), 1);
+    }
+
+    #[tokio::test]
+    async fn all_tko_attempts_have_no_final_pool_attribution() {
+        let route = in_order(vec![
+            pooled_dest(MockBackend::failing(tko()), 0),
+            pooled_dest(MockBackend::failing(tko()), 1),
+        ]);
+        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let context = state.context();
+
+        let result = route.route(&context, get(b"key")).await;
+        assert!(result.is_err());
+        context.finish(&result);
+
+        assert_eq!(metrics.pools[0].requests.load(), 1);
+        assert_eq!(metrics.pools[1].requests.load(), 1);
+        assert_eq!(metrics.pools[0].completed_requests.load(), 0);
+        assert_eq!(metrics.pools[1].completed_requests.load(), 0);
+    }
+
+    #[tokio::test]
+    async fn least_failures_uses_its_policy_metric_label() {
+        let route = FailoverRoute::new(
+            vec![
+                dest(MockBackend::failing(timeout())),
+                dest(MockBackend::replying(numeric(1))),
+            ],
+            FailoverErrors::default(),
+            Box::new(LeastFailuresPolicy::new(2, 2)),
+            usize::MAX,
+        )
+        .unwrap();
+        let (state, metrics, _events) = instrumented_state();
+        let context = state.context();
+
+        assert_eq!(
+            route.route(&context, get(b"key")).await.unwrap(),
+            numeric(1)
+        );
+        assert_eq!(
+            metrics.failover[FailoverPolicyKind::LeastFailures as usize].load(),
+            1
+        );
+        assert_eq!(
+            metrics.failover[FailoverPolicyKind::InOrder as usize].load(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_failover_emits_for_each_exhausted_route() {
+        let inner = in_order(vec![
+            dest(MockBackend::failing(timeout())),
+            dest(MockBackend::failing(timeout())),
+        ])
+        .into_dyn();
+        let outer = in_order(vec![inner, dest(MockBackend::failing(timeout()))]);
+        let (state, _metrics, events) = instrumented_state();
+        let context = state.context();
+
+        assert!(outer.route(&context, get(b"key")).await.is_err());
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|record| record.event == RoutingEvent::FailoverTargetsExhausted));
     }
 
     #[tokio::test]

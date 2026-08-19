@@ -91,12 +91,17 @@ impl MockBackend {
 }
 
 impl Backend for MockBackend {
-    async fn send(&self, req: Request) -> Result<Reply, SendError> {
+    fn prepare_send(
+        &self,
+        req: Request,
+    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, SendError> {
         self.inner.received.lock().unwrap().push(req);
-        match &self.inner.response {
+        let result = match &self.inner.response {
             MockResponse::Reply(reply) => Ok(reply.clone()),
+            MockResponse::Error(err @ SendError::Tko { .. }) => return Err(err.clone()),
             MockResponse::Error(err) => Err(err.clone()),
-        }
+        };
+        Ok(async move { result })
     }
 }
 

@@ -1,41 +1,171 @@
 use rusty_mcrouter_backend::Backend;
 use rusty_mcrouter_protocol::{Reply, Request};
+use tokio::time::Instant;
 
 use super::{Result, Route, RouteError};
 use crate::RouteContext;
 
 pub struct DestinationRoute<B: Backend> {
     backend: B,
+    pool_index: Option<usize>,
 }
 
 impl<B: Backend> DestinationRoute<B> {
     pub fn new(backend: B) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            pool_index: None,
+        }
+    }
+
+    pub(crate) fn for_pool(backend: B, pool_index: usize) -> Self {
+        Self {
+            backend,
+            pool_index: Some(pool_index),
+        }
     }
 }
 
 impl<B: Backend> Route for DestinationRoute<B> {
-    async fn route(&self, _context: &RouteContext<'_>, request: Request) -> Result<Reply> {
-        self.backend.send(request).await.map_err(RouteError::from)
+    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+        let started = Instant::now();
+        let result = match self.backend.prepare_send(request) {
+            Err(error) => Err(error),
+            Ok(prepared) => {
+                if let Some(pool_index) = self.pool_index {
+                    context.select_pool(pool_index);
+                }
+
+                let result = prepared.await;
+
+                if let Some(pool_index) = self.pool_index {
+                    context.metrics().pools[pool_index]
+                        .duration_us_sum
+                        .add(started.elapsed().as_micros() as u64);
+                }
+
+                result
+            }
+        };
+
+        if let Some(pool_index) = self.pool_index {
+            context.metrics().pools[pool_index].requests.inc();
+        }
+
+        result.map_err(RouteError::from)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use super::*;
     use bytes::Bytes;
     use rusty_mcrouter_backend::error::{ProtocolError, RequestError, SendError};
     use rusty_mcrouter_backend::test_support::MockBackend;
     use rusty_mcrouter_protocol::reply::{ErrorReply, GetHit, GetReply, StoreReply, StoreResult};
     use rusty_mcrouter_protocol::test_support::{get, store};
-    use std::sync::Arc;
 
     use crate::context::test_routing_state;
+    use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
+
+    struct DelayedBackend;
+
+    impl Backend for DelayedBackend {
+        fn prepare_send(
+            &self,
+            _request: Request,
+        ) -> std::result::Result<
+            impl Future<Output = std::result::Result<Reply, SendError>> + '_,
+            SendError,
+        > {
+            Ok(async {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                Ok(Reply::Get(GetReply::Miss))
+            })
+        }
+    }
 
     async fn execute<B: Backend>(route: &DestinationRoute<B>, request: Request) -> Result<Reply> {
         let state = test_routing_state();
         let context = state.context();
         route.route(&context, request).await
+    }
+
+    #[tokio::test]
+    async fn attributed_send_records_attempt_and_final_metrics() {
+        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let route = DestinationRoute::for_pool(MockBackend::miss(), 0);
+        let context = state.context();
+
+        let result = route.route(&context, get(b"foo")).await;
+        context.finish(&result);
+
+        assert_eq!(metrics.pools[0].requests.load(), 1);
+        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
+        assert_eq!(metrics.pools[0].final_errors.load(), 0);
+    }
+
+    #[tokio::test]
+    async fn sendable_attempt_records_elapsed_duration() {
+        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let route = DestinationRoute::for_pool(DelayedBackend, 0);
+        let context = state.context();
+
+        let result = route.route(&context, get(b"foo")).await;
+        context.finish(&result);
+
+        assert!(metrics.pools[0].duration_us_sum.load() >= 1_000);
+        assert!(metrics.pools[0].total_duration_us_sum.load() >= 1_000);
+    }
+
+    #[tokio::test]
+    async fn attributed_error_counts_as_final_error() {
+        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let route = DestinationRoute::for_pool(
+            MockBackend::replying(Reply::Error(ErrorReply::Server(None))),
+            0,
+        );
+        let context = state.context();
+
+        let result = route.route(&context, get(b"foo")).await;
+        context.finish(&result);
+
+        assert_eq!(metrics.pools[0].requests.load(), 1);
+        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
+        assert_eq!(metrics.pools[0].final_errors.load(), 1);
+    }
+
+    #[tokio::test]
+    async fn tko_attempt_records_no_duration_or_final_attribution() {
+        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let route = DestinationRoute::for_pool(
+            MockBackend::failing(SendError::Tko {
+                reason: rusty_mcrouter_backend::classify::ResultCode::Timeout,
+            }),
+            0,
+        );
+        let context = state.context();
+
+        let result = route.route(&context, get(b"foo")).await;
+        context.finish(&result);
+
+        assert!(result.is_err());
+        assert_eq!(metrics.pools[0].requests.load(), 1);
+        assert_eq!(metrics.pools[0].duration_us_sum.load(), 0);
+        assert_eq!(metrics.pools[0].completed_requests.load(), 0);
+        assert_eq!(metrics.pools[0].final_errors.load(), 0);
     }
 
     #[tokio::test]

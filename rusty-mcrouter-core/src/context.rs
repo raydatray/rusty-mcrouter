@@ -1,6 +1,12 @@
-use std::{rc::Rc, sync::Arc};
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
-use crate::{RoutingEventRecord, RoutingEventSink, RoutingMetricsLayout, RoutingMetricsShard};
+use rusty_mcrouter_backend::classify::reply_code;
+use rusty_mcrouter_protocol::Reply;
+use tokio::time::Instant;
+
+use crate::{
+    RouteError, RoutingEventRecord, RoutingEventSink, RoutingMetricsLayout, RoutingMetricsShard,
+};
 
 pub struct RoutingState {
     metrics: Arc<RoutingMetricsShard>,
@@ -9,6 +15,8 @@ pub struct RoutingState {
 
 pub struct RouteContext<'a> {
     state: &'a RoutingState,
+    selected_pool: Cell<Option<usize>>,
+    started: Instant,
 }
 
 impl RouteContext<'_> {
@@ -18,6 +26,32 @@ impl RouteContext<'_> {
 
     pub(crate) fn emit(&self, event: RoutingEventRecord) {
         self.state.events.emit(event);
+    }
+
+    pub(crate) fn select_pool(&self, index: usize) {
+        if self.selected_pool.get().is_none() {
+            self.selected_pool.set(Some(index));
+        }
+    }
+
+    pub fn finish(self, result: &Result<Reply, RouteError>) {
+        let Some(index) = self.selected_pool.get() else {
+            return;
+        };
+        let pool = self
+            .state
+            .metrics
+            .pool(index)
+            .expect("selected pool index must exist in routing metrics layout");
+        pool.completed_requests.inc();
+        pool.total_duration_us_sum
+            .add(self.started.elapsed().as_micros() as u64);
+        if result
+            .as_ref()
+            .map_or(true, |reply| reply_code(reply).is_error())
+        {
+            pool.final_errors.inc();
+        }
     }
 }
 
@@ -38,7 +72,11 @@ impl RoutingState {
     }
 
     pub fn context(&self) -> RouteContext<'_> {
-        RouteContext { state: self }
+        RouteContext {
+            state: self,
+            selected_pool: Cell::new(None),
+            started: Instant::now(),
+        }
     }
 }
 
@@ -144,5 +182,50 @@ mod tests {
         second_result.unwrap();
         assert_eq!(first_observations.get(), 2);
         assert_eq!(second_observations.get(), 2);
+    }
+
+    #[test]
+    fn first_sendable_pool_wins_within_one_context() {
+        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let context = state.context();
+        context.select_pool(0);
+        context.select_pool(1);
+
+        context.finish(&Ok(Reply::Get(GetReply::Miss)));
+
+        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
+        assert_eq!(metrics.pools[1].completed_requests.load(), 0);
+    }
+
+    #[test]
+    fn concurrent_contexts_keep_selected_pools_isolated() {
+        let layout = RoutingMetricsLayout::new(["first".to_string(), "second".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+        let first = state.context();
+        let second = state.context();
+        first.select_pool(0);
+        second.select_pool(1);
+
+        first.finish(&Ok(Reply::Get(GetReply::Miss)));
+        second.finish(&Ok(Reply::Get(GetReply::Miss)));
+
+        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
+        assert_eq!(metrics.pools[1].completed_requests.load(), 1);
+    }
+
+    #[test]
+    fn request_without_selected_pool_has_no_final_pool_metrics() {
+        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(Arc::clone(&metrics));
+
+        state.context().finish(&Ok(Reply::Get(GetReply::Miss)));
+
+        assert_eq!(metrics.pools[0].completed_requests.load(), 0);
+        assert_eq!(metrics.pools[0].final_errors.load(), 0);
+        assert_eq!(metrics.pools[0].total_duration_us_sum.load(), 0);
     }
 }

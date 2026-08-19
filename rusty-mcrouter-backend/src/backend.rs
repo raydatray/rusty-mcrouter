@@ -17,13 +17,18 @@ use crate::tko::FailOpenThresholds;
 /// is `Rc<Destination>` (TKO fast-fail + the reconnecting connection actor);
 /// tests use `MockBackend`.
 pub trait Backend: 'static {
-    fn send(&self, req: Request) -> impl Future<Output = Result<Reply, SendError>>;
+    fn prepare_send(
+        &self,
+        req: Request,
+    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, SendError>;
 }
 
 impl Backend for Rc<Destination> {
-    // Explicit path, not `self.send(...)`, to avoid recursing into this trait method.
-    async fn send(&self, req: Request) -> Result<Reply, SendError> {
-        Destination::send(self, req).await
+    fn prepare_send(
+        &self,
+        req: Request,
+    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, SendError> {
+        Destination::prepare_send(self, req)
     }
 }
 
@@ -137,7 +142,10 @@ mod tests {
     /// Route-shaped consumption: a generic fn constrained on Backend driving
     /// the production impl end to end.
     async fn through_trait<B: Backend>(backend: &B, req: Request) -> Result<Reply, SendError> {
-        backend.send(req).await
+        match backend.prepare_send(req) {
+            Ok(prepared) => prepared.await,
+            Err(error) => Err(error),
+        }
     }
 
     #[tokio::test]
