@@ -14,6 +14,13 @@ use rusty_mcrouter_observability_primitives::Counter;
 use crate::bus::{channel, EventConsumer, EventSender};
 use crate::metrics::{MetricsRegistry, MetricsSource};
 
+pub struct ObservabilityParts {
+    pub consumer: EventConsumer,
+    pub registry: Arc<MetricsRegistry>,
+    pub metrics_listener: Option<std::net::TcpListener>,
+    pub http_rejected: Arc<Counter>,
+}
+
 /// the wiring handle: construct FIRST in main (installs the tracing
 /// subscriber), hand out sinks, register sources, then spawn() the
 /// control thread (bus consumer + optional /metrics server).
@@ -58,10 +65,10 @@ impl Observability {
         Arc::clone(&self.http_rejected)
     }
 
-    /// binds the metrics listener (if any) and spawns the control thread.
-    /// returns the bound address so an ephemeral port can be reported.
-    /// the consumer runs until every EventSender clone is dropped.
-    pub fn spawn(self, metrics_addr: Option<SocketAddr>) -> io::Result<Option<SocketAddr>> {
+    pub fn into_parts(
+        self,
+        metrics_addr: Option<SocketAddr>,
+    ) -> io::Result<(Option<SocketAddr>, ObservabilityParts)> {
         let listener = match metrics_addr {
             Some(addr) => {
                 let listener = std::net::TcpListener::bind(addr)?;
@@ -72,58 +79,15 @@ impl Observability {
         };
         let bound = listener.as_ref().map(|l| l.local_addr()).transpose()?;
 
-        let Observability {
-            events,
-            mut consumer,
-            registry,
-            http_rejected,
-        } = self;
-        drop(events); // sinks hold their own clones; ours must not keep the consumer alive
-
-        std::thread::Builder::new()
-            .name("observability".into())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_io()
-                    .enable_time()
-                    .build()
-                    .expect("observability runtime");
-                let result = rt.block_on(async move {
-                    let registry = Arc::new(registry);
-                    let mut metrics = listener.map(|listener| {
-                        http::MetricsHttp::new(
-                            tokio::net::TcpListener::from_std(listener)
-                                .expect("register metrics listener"),
-                            registry,
-                            http_rejected,
-                        )
-                    });
-
-                    loop {
-                        match &mut metrics {
-                            Some(metrics) => tokio::select! {
-                                event = consumer.recv() => {
-                                    let Some(event) = event else {
-                                        anyhow::bail!("event channel closed");
-                                    };
-                                    logging::write(&event);
-                                }
-                                result = metrics.step() => result?,
-                            },
-                            None => {
-                                let Some(event) = consumer.recv().await else {
-                                    return Ok(());
-                                };
-                                logging::write(&event);
-                            }
-                        }
-                    }
-                });
-                if let Err(error) = result {
-                    tracing::error!(%error, "observability service stopped");
-                }
-            })?;
-
-        Ok(bound)
+        drop(self.events); // leaf-owned sinks keep the event channel alive
+        Ok((
+            bound,
+            ObservabilityParts {
+                consumer: self.consumer,
+                registry: Arc::new(self.registry),
+                metrics_listener: listener,
+                http_rejected: self.http_rejected,
+            },
+        ))
     }
 }
