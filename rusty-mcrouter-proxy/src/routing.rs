@@ -94,7 +94,7 @@ mod tests {
         let route = build_route(
             &config,
             &MockBackendFactory::new(),
-            &destination::Config::default(),
+            &destination::DestinationConfig::default(),
             state.layout(),
         )
         .unwrap();

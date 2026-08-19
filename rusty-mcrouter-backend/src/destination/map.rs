@@ -9,7 +9,7 @@ use std::{
 use tokio::time::Instant;
 
 use crate::{
-    destination::{Config, Destination, DestinationKey, DestinationMetricsRegistry},
+    destination::{Destination, DestinationConfig, DestinationKey, DestinationMetricsRegistry},
     metrics::BackendMetricsShard,
     tko::{PoolTkoTracker, TkoTrackerMap},
 };
@@ -44,7 +44,7 @@ impl Map {
     pub fn destination(
         &self,
         key: DestinationKey,
-        cfg: &Config,
+        cfg: &DestinationConfig,
         pool_tracker: Option<Arc<PoolTkoTracker>>,
     ) -> Rc<Destination> {
         if let Some(existing) = self.destinations.borrow().get(&key).and_then(Weak::upgrade) {
@@ -143,8 +143,8 @@ mod tests {
         )
     }
 
-    fn test_cfg() -> Config {
-        Config {
+    fn test_cfg() -> DestinationConfig {
+        DestinationConfig {
             connect_timeout: Some(Duration::from_millis(1000)),
             reply_timeout: Some(Duration::from_millis(1000)),
             connect_timeout_retries: 0,

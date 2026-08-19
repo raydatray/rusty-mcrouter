@@ -8,7 +8,7 @@ mod map;
 mod metrics;
 mod probe;
 
-pub use config::Config;
+pub use config::DestinationConfig;
 pub use destination::Destination;
 pub use key::DestinationKey;
 pub use map::Map;

@@ -12,7 +12,7 @@ use crate::{
     backend::{PreparedSend, TkoRejection},
     classify::{code_of, ResultCode},
     client::{Config as ClientConfig, ConnectionEvent, ConnectionHandle, DownReason},
-    destination::{probe, Config, DestinationKey, DestinationMetrics},
+    destination::{probe, DestinationConfig, DestinationKey, DestinationMetrics},
     error::{ConnectError, LocalError, SendError},
     metrics::BackendMetricsShard,
     tko::{DestToken, TkoEvent, TkoTracker},
@@ -24,7 +24,7 @@ pub struct Destination {
     token: DestToken,
     tracker: Arc<TkoTracker>,
     conn: ConnectionHandle,
-    cfg: Config,
+    cfg: DestinationConfig,
     probe: RefCell<Option<tokio::task::JoinHandle<()>>>,
     metrics: Arc<DestinationMetrics>,
     shard_metrics: Arc<BackendMetricsShard>,
@@ -34,7 +34,7 @@ pub struct Destination {
 impl Destination {
     pub fn new(
         key: DestinationKey,
-        cfg: Config,
+        cfg: DestinationConfig,
         tracker: Arc<TkoTracker>,
         metrics: Arc<DestinationMetrics>,
         shard_metrics: Arc<BackendMetricsShard>,
@@ -287,8 +287,12 @@ mod tests {
         (sink, events)
     }
 
-    fn cfg(failures_until_tko: u64, reply_timeout_ms: u64, probe_initial_ms: u64) -> Config {
-        Config {
+    fn cfg(
+        failures_until_tko: u64,
+        reply_timeout_ms: u64,
+        probe_initial_ms: u64,
+    ) -> DestinationConfig {
+        DestinationConfig {
             connect_timeout: Some(Duration::from_millis(1000)),
             reply_timeout: Some(Duration::from_millis(reply_timeout_ms)),
             connect_timeout_retries: 0,
@@ -305,7 +309,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn dest_for(
         server: &ScriptedServer,
-        cfg: Config,
+        cfg: DestinationConfig,
     ) -> (
         Arc<TkoTrackerMap>,
         Arc<TkoTracker>,

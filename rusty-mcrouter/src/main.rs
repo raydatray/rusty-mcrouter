@@ -130,8 +130,8 @@ struct RouterOptions {
     disable_tko_tracking: bool,
 }
 
-fn destination_defaults(o: &RouterOptions) -> destination::Config {
-    destination::Config {
+fn destination_defaults(o: &RouterOptions) -> destination::DestinationConfig {
+    destination::DestinationConfig {
         // connect_timeout defaults to the server timeout, like mcrouter
         // (McRouteHandleProvider-inl.h:197-205); pools may override both
         connect_timeout: Some(Duration::from_millis(o.server_timeout_ms)),
