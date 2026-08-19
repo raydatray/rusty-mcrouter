@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use rusty_mcrouter_backend::classify::ResultCode;
 use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
-use rusty_mcrouter_backend::metrics::{BackendMetricsShard, CommandKind};
+use rusty_mcrouter_backend::metrics::BackendMetricsShard;
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_core::{FailoverErrorClass, FailoverPolicyKind, RoutingMetricsShard};
 use rusty_mcrouter_observability_primitives::Counter;
+use rusty_mcrouter_protocol::RequestKind;
 use rusty_mcrouter_proxy::FrontendMetricsShard;
 
 use crate::metrics::{MetricsSource, MetricsText};
@@ -52,17 +53,17 @@ pub struct BackendRequestsSource {
 
 impl MetricsSource for BackendRequestsSource {
     fn encode(&self, out: &mut MetricsText) {
-        for cmd in CommandKind::ALL {
+        for kind in RequestKind::ALL {
             for code in ResultCode::ALL {
                 let total: u64 = self
                     .shards
                     .iter()
-                    .map(|s| s.requests[cmd as usize][code as usize].load())
+                    .map(|s| s.requests[kind as usize][code as usize].load())
                     .sum();
                 out.counter(
                     "rusty_mcrouter_backend_requests_total",
                     &[
-                        ("command", cmd.prometheus_label()),
+                        ("command", kind.meta_command()),
                         ("result", code.prometheus_label()),
                     ],
                     total,
@@ -78,15 +79,15 @@ pub struct FrontendRequestsSource {
 
 impl MetricsSource for FrontendRequestsSource {
     fn encode(&self, out: &mut MetricsText) {
-        for cmd in CommandKind::ALL {
+        for kind in RequestKind::ALL {
             let total: u64 = self
                 .shards
                 .iter()
-                .map(|s| s.requests[cmd as usize].load())
+                .map(|s| s.requests[kind as usize].load())
                 .sum();
             out.counter(
                 "rusty_mcrouter_requests_total",
-                &[("command", cmd.prometheus_label())],
+                &[("command", kind.meta_command())],
                 total,
             );
         }
@@ -326,9 +327,9 @@ mod tests {
     fn backend_sources_sum_real_shards() {
         let s1 = BackendMetricsShard::new();
         let s2 = BackendMetricsShard::new();
-        s1.record_send(CommandKind::Get, ResultCode::Success, 100);
-        s2.record_send(CommandKind::Get, ResultCode::Success, 250);
-        s2.record_result(CommandKind::Store, ResultCode::Tko);
+        s1.record_send(RequestKind::Get, ResultCode::Success, 100);
+        s2.record_send(RequestKind::Get, ResultCode::Success, 250);
+        s2.record_result(RequestKind::Store, ResultCode::Tko);
 
         let text = render(BackendRequestsSource {
             shards: vec![Arc::clone(&s1), Arc::clone(&s2)],
@@ -348,7 +349,7 @@ mod tests {
     #[test]
     fn frontend_sources_render() {
         let shard = FrontendMetricsShard::new();
-        shard.requests[CommandKind::Get as usize].add(3);
+        shard.requests[RequestKind::Get as usize].add(3);
         shard.failed.inc();
 
         let text = render(FrontendRequestsSource {

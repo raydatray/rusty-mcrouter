@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, rc::Rc};
 
 use bytes::{Bytes, BytesMut};
-use rusty_mcrouter_backend::metrics::CommandKind;
 use rusty_mcrouter_core::{DynRoute, RoutingState};
 use rusty_mcrouter_protocol::meta::{
     DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
@@ -154,7 +153,7 @@ impl Connection {
                     request,
                     reply_plan,
                 })) => {
-                    self.metrics.requests[CommandKind::of(&request) as usize].inc();
+                    self.metrics.requests[request.kind() as usize].inc();
                     self.metrics.processing.inc();
                     let seq = self.take_seq();
                     self.slots.insert(
@@ -333,7 +332,6 @@ async fn route_one(target: RouteTarget, request: Request) -> Reply {
 mod tests {
     use std::sync::Arc;
 
-    use rusty_mcrouter_backend::metrics::CommandKind;
     use rusty_mcrouter_backend::test_support::{run_local, MockBackend};
     use rusty_mcrouter_core::{DestinationRoute, Route, RoutingMetricsLayout, RoutingMetricsShard};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -409,7 +407,10 @@ mod tests {
             // error and a client-visible error reply
             assert_eq!(lines[2], "ERROR", "garbage must answer in pipeline order");
 
-            assert_eq!(metrics.requests[CommandKind::Get as usize].load(), 1);
+            assert_eq!(
+                metrics.requests[rusty_mcrouter_protocol::RequestKind::Get as usize].load(),
+                1
+            );
             assert_eq!(metrics.noops.load(), 1);
             assert_eq!(metrics.parse_errors.load(), 1);
             assert_eq!(

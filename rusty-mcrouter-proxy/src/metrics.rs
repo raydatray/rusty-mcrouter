@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use rusty_mcrouter_backend::metrics::COMMAND_KIND_COUNT;
 use rusty_mcrouter_observability_primitives::{Counter, Gauge};
+use rusty_mcrouter_protocol::RequestKind;
 
 #[derive(Default)]
 pub struct FrontendMetricsShard {
-    pub requests: [Counter; COMMAND_KIND_COUNT],
+    pub requests: [Counter; RequestKind::COUNT],
     pub noops: Counter,
     pub parse_errors: Counter,
     pub failed: Counter,

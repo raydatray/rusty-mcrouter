@@ -12,7 +12,7 @@ use crate::{
     client::{Config as ClientConfig, ConnectionEvent, ConnectionHandle, DownReason},
     destination::{config::Config, key::Key, probe, DestinationMetrics},
     error::{ConnectError, LocalError, SendError},
-    metrics::{BackendMetricsShard, CommandKind},
+    metrics::BackendMetricsShard,
     tko::{DestToken, TkoEvent, TkoTracker},
 };
 
@@ -93,13 +93,13 @@ impl Destination {
         self.conn.close_idle()
     }
 
-    pub async fn send(self: &Rc<Self>, req: Request) -> Result<Reply, SendError> {
+    pub async fn send(self: &Rc<Self>, request: Request) -> Result<Reply, SendError> {
         self.last_active.set(Instant::now());
-        let cmd = CommandKind::of(&req);
+        let kind = request.kind();
 
         if !self.cfg.disable_tko_tracking && self.tracker.is_tko() {
             self.metrics.record_result(ResultCode::Tko);
-            self.shard_metrics.record_result(cmd, ResultCode::Tko);
+            self.shard_metrics.record_result(kind, ResultCode::Tko);
             return Err(SendError::Tko {
                 reason: self.tracker.reason(),
             });
@@ -107,7 +107,7 @@ impl Destination {
 
         let start = Instant::now();
         let inflight = InflightGuard::new(&self.metrics);
-        let result = self.conn.send(req).await;
+        let result = self.conn.send(request).await;
         drop(inflight);
         let code = code_of(&result);
         let latency_us = start.elapsed().as_micros() as u64;
@@ -117,7 +117,7 @@ impl Destination {
         }
 
         self.metrics.record_send(code, latency_us);
-        self.shard_metrics.record_send(cmd, code, latency_us);
+        self.shard_metrics.record_send(kind, code, latency_us);
         self.handle_tko(code, false);
 
         result
@@ -127,16 +127,11 @@ impl Destination {
         self.last_active.set(Instant::now());
         self.metrics.probes_sent.inc();
 
-        let start = Instant::now();
         let inflight = InflightGuard::new(&self.metrics);
         let result = self.conn.send_probe().await;
         drop(inflight);
         let code = code_of(&result);
-        let latency_us = start.elapsed().as_micros() as u64;
 
-        self.metrics.record_send(code, latency_us);
-        self.shard_metrics
-            .record_send(CommandKind::Version, code, latency_us);
         self.handle_tko(code, true);
     }
 
@@ -528,8 +523,10 @@ mod tests {
                 Arc::clone(&shard),
             );
 
-            let get_cell =
-                |code: ResultCode| shard.requests[CommandKind::Get as usize][code as usize].load();
+            let get_cell = |code: ResultCode| {
+                shard.requests[rusty_mcrouter_protocol::RequestKind::Get as usize][code as usize]
+                    .load()
+            };
 
             dest.send(get(b"a")).await.unwrap();
             assert_eq!(get_cell(ResultCode::Success), 1);
@@ -591,6 +588,41 @@ mod tests {
 
             dest.send(get(b"a")).await.unwrap();
             assert_eq!(dest.metrics().inflight_reqs.load(), 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn probe_is_not_counted_as_a_routed_request() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![vec![
+                Step::ReadRequests(1),
+                Step::Write(b"VERSION 1.6.39\r\n"),
+            ]])
+            .await;
+            let (_map, _tracker, dest, _events) = dest_for(&server, cfg(3, 1000, 10_000));
+
+            dest.send_probe().await;
+
+            let backend_requests: u64 = dest
+                .shard_metrics
+                .requests
+                .iter()
+                .flatten()
+                .map(|counter| counter.load())
+                .sum();
+            let destination_requests: u64 = dest
+                .metrics
+                .requests
+                .iter()
+                .map(|counter| counter.load())
+                .sum();
+
+            assert_eq!(backend_requests, 0);
+            assert_eq!(destination_requests, 0);
+            assert_eq!(dest.shard_metrics.latency_us_sum.load(), 0);
+            assert_eq!(dest.metrics.latency_us_sum.load(), 0);
+            assert_eq!(dest.metrics.probes_sent.load(), 1);
         })
         .await;
     }
