@@ -1,14 +1,15 @@
 ---
-status: draft
+status: partial
 created: 2026-08-16
+updated: 2026-08-18
 reference: ../reference/stats.md
 ---
 
 # 0001: observability — prometheus metrics + event logging
 
 prometheus-based metrics and structured event logging for
-rusty-mcrouter. faithful to upstream where it counts — **zero
-allocation and zero locks on proxy threads** — while replacing the
+rusty-mcrouter. faithful to upstream where it counts — **no allocation
+or locks to record a metric** — while replacing the
 fb-internal export machinery (ods JSON dumps) with a prometheus
 scrape endpoint, per our OSS-alternatives philosophy.
 
@@ -16,12 +17,80 @@ scrape endpoint, per our OSS-alternatives philosophy.
 
 - proxy threads record facts into preallocated, single-writer
   counters; nothing on the request path allocates, locks, or formats
-- discrete transitions (tko marks, fail-open, worker lifecycle) become
-  structured log events, delivered off-thread
+- discrete transitions (tko marks, fail-open, failover exhaustion,
+  worker lifecycle) become structured log events, delivered off-thread
 - one `/metrics` endpoint carrying **every metric relevant to us**,
   including per-destination — there is no second observability surface
 - no dependency cycles: leaf crates define facts, observability
   composes them, the binary wires it
+
+## slice status
+
+| slice | status |
+|---|---|
+| route graph | implemented |
+| backend + destination | partial |
+| frontend | partial |
+| process + exposition metadata | deferred |
+| remaining event domains | partial |
+
+the remaining event domains include config lifecycle events. config is
+currently loaded once at startup; hot reload and its attempt/success/failure
+events are not implemented by the route-graph slice.
+
+## route-graph slice contract
+
+routing instrumentation uses an explicit `&RouteContext` argument on
+every route call. there is no task-local or global routing state. each
+top-level request creates one context containing:
+
+- a borrowed per-proxy `RoutingState`;
+- a `Cell<Option<usize>>` holding the first pool whose destination was
+  sendable;
+- the route start time.
+
+the binary builds one immutable `RoutingMetricsLayout` from configured
+pool names. every proxy shard shares that layout, and route construction
+resolves pool names to bounded integer indexes once. the request path
+does no pool-name lookup and creates no metric cells.
+
+`Backend::prepare_send` performs the sole synchronous TKO gate and returns an
+unboxed future only when the destination is sendable. `DestinationRoute`
+claims the first pool after successful preparation and before awaiting that
+future, matching mcrouter's `maySend` then `setPoolStatsIndex` ordering without
+a second health check.
+
+pool metrics deliberately separate attempts from final outcomes:
+
+- `pool_requests_total` updates once per reached destination, including
+  TKO fast-fails and failover attempts. `pool_duration_us_sum_total`
+  records elapsed time only after the backend passes its sole TKO gate,
+  so an already-TKO attempt contributes zero duration;
+- the first sendable pool receives exactly one
+  `pool_completed_requests_total` update at the local or queued-proxy
+  execution boundary;
+- later failover pools never overwrite that selection. the selected
+  pool receives `pool_requests_failed_total` when the final
+  route result is an error, and `pool_total_duration_us_sum_total`
+  receives the whole route duration;
+- a request whose reached destinations all fast-fail as already TKO has
+  attempts but no final pool attribution.
+
+failover counters follow route-policy decisions rather than backend hop
+count:
+
+- `failover_total` increments once when at least one policy-selected
+  backup candidate exists;
+- `failover_policy_errors_total` counts error/TKO outcomes presented to
+  the policy while deciding whether or where to continue. this includes
+  a failing primary even when no backup exists; the terminal selected
+  target is not a policy error because no next decision follows it;
+- `failover_exhausted_total` and its routing event fire when the final
+  policy-selected target returns an error. stopping at a separate error
+  budget is not target exhaustion;
+- TKO fast-fails are free error-budget tries. least-failures
+  `max_tries` limits policy candidates including the primary, and policy
+  health records actual error outcomes rather than failover eligibility.
 
 ## non-goals (this design)
 
@@ -45,7 +114,7 @@ and never mix:
 flowchart LR
     subgraph proxy threads
         RQ[request path]
-        EM["transition emitters<br/>tko trackers (backend)<br/>failover routes (core)<br/>backend connections (backend)<br/>frontend + workers (proxy)"]
+        EM["transition emitters<br/>tko trackers (backend)<br/>failover routes (core)<br/>workers (proxy)"]
     end
     W[workers / control plane] -- events --> BUS
     RQ -- "relaxed increment,<br/>no lock, no alloc" --> SH[metric shards<br/>one per proxy thread]
@@ -56,15 +125,13 @@ flowchart LR
         AGG --> HTTP["/metrics"]
     end
     HTTP --> PROM[(prometheus)]
-    CONS --> LOG[stdout / tracing subscriber]
+    CONS --> LOG[stderr / tracing subscriber]
 ```
 
 every emitter goes through its own crate-local sink
-(`TkoEventSink`, `RoutingEventSink`, ...) into the same bus. examples
-of non-tko events: failover exhausted its targets for a request class
-(`Routing`, warn), connect storms / repeated protocol desyncs
-(`Backend`, warn), client connection limit hit (`Frontend`, warn),
-worker started/stopped (`Worker`, info). the discipline stays the
+(`TkoEventSink`, `RoutingEventSink`, ...) into the same bus. the
+implemented non-tko events are failover target exhaustion (`Routing`,
+warn) and worker start/stop (`Worker`, info). the discipline stays the
 same regardless of source: **transitions and rare anomalies only** —
 a per-request fact (a single failover hop, a normal miss) is a
 counter, never an event, or the bus becomes a firehose that sheds
@@ -125,7 +192,7 @@ so we count, forever, and never reset or rotate. consequences:
 
 ## architecture
 
-a new integration crate, `rusty-mcrouter-observability`:
+the integration crate, `rusty-mcrouter-observability`:
 
 ```mermaid
 flowchart TB
@@ -142,8 +209,10 @@ flowchart TB
     K --> X
     N --> O
     Q --> N
+    Q --> C
     Q --> X
     Q --> O
+    C --> O
 ```
 
 **the dependency rule: leaf crates never import observability.**
@@ -176,37 +245,33 @@ allocation):
 
 ```rust
 pub struct TkoEventRecord {
+    pub event: TkoEvent,
     pub server: Arc<str>,
     pub pool: Option<Arc<str>>,
-    pub transition: TkoTransition,
-    // reason, consecutive_failures, global gauges — as today
+    pub reason: ResultCode,
+    pub consecutive_failures: u64,
+    pub global_soft_tkos: i64,
+    pub global_hard_tkos: i64,
 }
 ```
-
-> migration note: today's `TkoEventRecord<'a>` in `tko/events.rs`
-> borrows `&'a str` and the module self-describes as temporary. this
-> design replaces it: owned record, same fields, sink takes the record
-> by value.
 
 observability wraps sinks around one envelope + bounded queue:
 
 ```rust
-pub enum OperationalEvent {
+pub enum Event {
     Tko(TkoEventRecord),
-    Frontend(FrontendEventRecord),
-    Backend(BackendEventRecord),
     Routing(RoutingEventRecord),
     Worker(WorkerEventRecord),
 }
 
-impl From<TkoEventRecord> for OperationalEvent {
+impl From<TkoEventRecord> for Event {
     fn from(record: TkoEventRecord) -> Self {
         Self::Tko(record)
     }
 }
 
 impl EventSender {
-    pub fn emit(&self, event: OperationalEvent) {
+    pub fn emit(&self, event: Event) {
         if self.tx.try_send(event).is_err() {
             self.dropped.inc(); // never block a proxy thread
         }
@@ -215,12 +280,12 @@ impl EventSender {
     pub fn sink<T>(&self) -> EventSink<T>
     where
         T: Send + 'static,
-        OperationalEvent: From<T>,
+        Event: From<T>,
     { /* clone sender, wrap record.into() */ }
 }
 ```
 
-`From<Record> for OperationalEvent` is the compile-time link between
+`From<Record> for Event` is the compile-time link between
 domain-owned records and the presentation envelope. adding an event source
 does not require another source-specific adapter method.
 
@@ -237,11 +302,11 @@ strings), and all of it runs on the control thread:
 
 ```rust
 // observability/src/logging.rs
-pub fn write(event: &OperationalEvent) {
+pub fn write(event: &Event) {
     match event {
-        OperationalEvent::Tko(r) => tko(r),
-        OperationalEvent::Worker(r) => worker(r),
-        // frontend / backend / routing analogous
+        Event::Tko(r) => tko(r),
+        Event::Routing(r) => routing(r),
+        Event::Worker(r) => worker(r),
     }
 }
 
@@ -250,37 +315,37 @@ fn tko(r: &TkoEventRecord) {
     // rather than a computed level.
     let server = &*r.server;
     let pool = r.pool.as_deref();
-    match r.transition {
-        TkoTransition::MarkSoft => tracing::warn!(
-            target: "mcrouter::tko",
+    match r.event {
+        TkoEvent::MarkSoftTko => tracing::warn!(
+            target: "rusty-mcrouter-observability::tko",
             server, pool,
             reason = ?r.reason,
             consecutive_failures = r.consecutive_failures,
             soft = r.global_soft_tkos, hard = r.global_hard_tkos,
             "destination marked soft tko"
         ),
-        TkoTransition::MarkHard => tracing::warn!(
-            target: "mcrouter::tko",
+        TkoEvent::MarkHardTko => tracing::warn!(
+            target: "rusty-mcrouter-observability::tko",
             server, pool, reason = ?r.reason,
             "destination marked hard tko"
         ),
-        TkoTransition::UnMark => tracing::info!(
-            target: "mcrouter::tko",
+        TkoEvent::UnMarkTko => tracing::info!(
+            target: "rusty-mcrouter-observability::tko",
             server, pool,
             "destination recovered"
         ),
-        TkoTransition::RemoveFromConfig => tracing::info!(
-            target: "mcrouter::tko",
+        TkoEvent::RemoveFromConfig => tracing::info!(
+            target: "rusty-mcrouter-observability::tko",
             server, pool,
             "tko'd destination removed from config"
         ),
-        TkoTransition::EnterFailOpen => tracing::error!(
-            target: "mcrouter::tko",
+        TkoEvent::EnterFailOpen => tracing::error!(
+            target: "rusty-mcrouter-observability::tko",
             pool,
             "pool entered fail-open: all destinations tko'd"
         ),
-        TkoTransition::ExitFailOpen => tracing::info!(
-            target: "mcrouter::tko",
+        TkoEvent::ExitFailOpen => tracing::info!(
+            target: "rusty-mcrouter-observability::tko",
             pool,
             "pool exited fail-open"
         ),
@@ -293,7 +358,7 @@ level policy, so it's a decision and not per-callsite vibes:
 | level | meaning here | examples |
 |-------|--------------|----------|
 | error | losing capacity / degraded correctness envelope | EnterFailOpen |
-| warn  | a destination-level state change an operator may act on | MarkSoftTko, MarkHardTko, event-queue drops |
+| warn  | a routing or destination state an operator may act on | MarkSoftTko, MarkHardTko, failover target exhaustion, event-queue drops |
 | info  | recovery and lifecycle | UnMarkTko, ExitFailOpen, RemoveFromConfig, worker start/stop |
 | debug+| not the bus's job — high-volume diagnostics stay out of the event system entirely |
 
@@ -308,7 +373,7 @@ two mechanical notes:
   counter moved — the counter is the source of truth, the log line is
   a courtesy.
 
-the subscriber (fmt layer, env-filter, stdout) is installed once by
+the subscriber (fmt layer, env-filter, stderr) is installed once by
 `Observability::new` in the binary; leaf crates never touch
 `tracing` directly — they only ever call their sink.
 
@@ -323,7 +388,7 @@ all logging must ride the bus:
 - **startup, shutdown, config load/parse errors, cli validation, the
   control thread's own machinery** — plain `tracing::info!/error!` is
   correct here. these run before/off the data plane, blocking on
-  stdout is fine, and startup errors especially must not depend on
+  stderr is fine, and startup errors especially must not depend on
   the event pipeline they precede (an early config error should print
   even if the bus was never constructed).
 - **tests and dev tools** — use `tracing` freely.
@@ -341,7 +406,7 @@ sequenceDiagram
     participant C as consumer (control thread)
 
     T->>S: record_soft_failure wins, emit(TkoEventRecord)
-    Note over S: wrap in OperationalEvent::Tko<br/>Arc clones only, no alloc
+    Note over S: wrap in Event::Tko<br/>Arc clones only, no payload alloc
     S->>Q: try_send
     alt queue full
         Q-->>S: Err
@@ -349,7 +414,7 @@ sequenceDiagram
     else
         Q->>C: recv
         Note over C: format log line HERE,<br/>off the hot path
-        C->>C: write to stdout/tracing
+        C->>C: write to stderr/tracing
     end
 ```
 
@@ -369,7 +434,7 @@ binary:          creates shards, hands them to both sides
 // the measured leg and the storage shape; this is not per-destination.
 pub struct BackendMetricsShard {
     // monotonic counters
-    pub requests: [[Counter; RESULT_CODE_COUNT]; COMMAND_KIND_COUNT],
+    pub requests: [[Counter; RESULT_CODE_COUNT]; RequestKind::COUNT],
     pub latency_us_sum: Counter,
     pub connections_opened: Counter,
     pub connections_closed: Counter,   // incl. idle closes
@@ -386,9 +451,10 @@ pub struct BackendMetricsShard {
 }
 ```
 
-(the `leg` label from the metric table has no dimension here yet — it
-needs a failover flag through `Backend::send` and is decided in the
-routing-counters slice.)
+backend request metrics intentionally do not carry a `leg` label.
+normal and failover attempts are distinguished at the config-bounded
+pool layer; adding a backend leg dimension would duplicate that signal
+across the higher-cardinality command/result matrix.
 
 frontend metrics in proxy (`FrontendMetricsShard`) and per-pool
 counters in core follow the same shard shape; gauges derived from
@@ -404,12 +470,12 @@ is no separate thread-local stats struct on `Destination` (there used
 to be — it duplicated every write), and one should not be
 reintroduced.
 
-divergence from upstream, deliberate: upstream uses non-atomic
-relaxed load+store (single-writer arrays). our `Counter` and `Gauge`
-primitives wrap atomics with `Relaxed` ordering — same cost on x86/arm for uncontended
-single-writer increments, and the scrape-side reads are sound without
-`unsafe`. shards mean no cache-line contention between proxy threads;
-pad/align per shard.
+divergence from upstream, deliberate: upstream uses non-atomic relaxed
+load+store under a single-writer invariant. our `Counter` and `Gauge`
+use atomic read-modify-write operations with `Relaxed` ordering. this
+pays the atomic instruction cost so scrape-thread reads are sound
+without locks or `unsafe`; per-proxy cache-line-aligned shards keep the
+operation uncontended.
 
 scrape-time aggregation (mirrors upstream's read-time `prepare_stats`
 — the write path is allocation-free, the scrape path is allowed to
@@ -429,31 +495,31 @@ impl BackendSource {
             }
         }
         // # TYPE rusty_mcrouter_backend_requests_total counter
-        // rusty_mcrouter_backend_requests_total{result="timeout"} 1234
+        // rusty_mcrouter_backend_requests_total{command="mg",result="timeout"} 1234
         ...
     }
 }
 ```
 
-metric inventory — the full "port now" set from the catalog (~20
-families; names follow prometheus conventions, with the upstream
-`stat_list.h` name in metric HELP text for cross-reference):
+implemented metric inventory (names and labels are API):
 
 **frontend (proxy, `FrontendMetricsShard` shards)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `rusty_mcrouter_requests_total` | counter | `proxy`, `command` |
-| `rusty_mcrouter_requests_failed_total` | counter | `pool` — client-visible errors (upstream `final_result_error`) |
+| `rusty_mcrouter_requests_total` | counter | `command` |
+| `rusty_mcrouter_noops_total` | counter | — |
+| `rusty_mcrouter_parse_errors_total` | counter | — |
+| `rusty_mcrouter_requests_failed_total` | counter | —; client-visible errors (upstream `final_result_error`) |
 | `rusty_mcrouter_client_connections` | gauge | — |
-| `rusty_mcrouter_requests_processing` / `_waiting` | gauge | `proxy` — slot map depth |
-| `rusty_mcrouter_dev_null_requests_total` | counter | — |
+| `rusty_mcrouter_requests_processing` | gauge | —; slot map depth |
 
 **backend (`rusty-mcrouter-backend`, `BackendMetricsShard` shards)**
 
 | metric | type | labels |
 |--------|------|--------|
-| `rusty_mcrouter_backend_requests_total` | counter | `result`, `leg` (normal/failover), `command` |
+| `rusty_mcrouter_backend_requests_total` | counter | `command`, `result` |
+| `rusty_mcrouter_backend_latency_us_sum_total` | counter | — |
 | `rusty_mcrouter_backend_connections_opened_total` / `_closed_total` | counter | — |
 | `rusty_mcrouter_backend_connect_retries_total` / `_retry_successes_total` | counter | — |
 | `rusty_mcrouter_backend_write_batches_total` / `_batched_requests_total` | counter | — (avg batch = promql) |
@@ -467,8 +533,8 @@ families; names follow prometheus conventions, with the upstream
 |--------|------|--------|
 | `rusty_mcrouter_tko` | gauge | `kind` (soft/hard) — GlobalTkoMetrics |
 | `rusty_mcrouter_suspect_servers` | gauge | — sus_servers scan |
-| `rusty_mcrouter_servers` | gauge | `state` (up/down/closed/new) |
 | `rusty_mcrouter_pool_fail_open` | gauge | `pool` |
+| `rusty_mcrouter_pool_destinations_tko` | gauge | `pool` |
 | `rusty_mcrouter_fail_open_entered_total` / `_exited_total` | counter | `pool` |
 
 **routing (core)**
@@ -478,14 +544,35 @@ families; names follow prometheus conventions, with the upstream
 | `rusty_mcrouter_failover_total` | counter | `policy` (inorder/least_failures) |
 | `rusty_mcrouter_failover_exhausted_total` | counter | `policy` |
 | `rusty_mcrouter_failover_policy_errors_total` | counter | `class` (result/tko) |
+| `rusty_mcrouter_dev_null_requests_total` | counter | — |
 
 **pool (core, config-bounded label cardinality)**
 
 | metric | type | labels |
 |--------|------|--------|
 | `rusty_mcrouter_pool_requests_total` | counter | `pool` |
-| `rusty_mcrouter_pool_connections` | gauge | `pool` |
-| `rusty_mcrouter_pool_duration_us_sum_total` | counter | `pool` — mean via promql |
+| `rusty_mcrouter_pool_duration_us_sum_total` | counter | `pool` — per-attempt duration; mean via PromQL with requests |
+| `rusty_mcrouter_pool_completed_requests_total` | counter | `pool` — final attribution denominator |
+| `rusty_mcrouter_pool_requests_failed_total` | counter | `pool` — final errors only |
+| `rusty_mcrouter_pool_total_duration_us_sum_total` | counter | `pool` — whole-route duration; mean via PromQL with completed requests |
+
+operator examples:
+
+```promql
+# Requests per second entering failover.
+sum by (policy) (rate(rusty_mcrouter_failover_total[5m]))
+
+# Raw pool-attempts / pool-attributed-completions ratio.
+# All-TKO requests contribute attempts but no completion, by design.
+sum(rate(rusty_mcrouter_pool_requests_total[5m]))
+/
+sum(rate(rusty_mcrouter_pool_completed_requests_total[5m]))
+
+# Final failure ratio by first sendable pool.
+rate(rusty_mcrouter_pool_requests_failed_total[5m])
+/
+rate(rusty_mcrouter_pool_completed_requests_total[5m])
+```
 
 **per-destination (default on — non-multiplied except `result`)**
 
@@ -494,13 +581,15 @@ families; names follow prometheus conventions, with the upstream
 | `rusty_mcrouter_destination_up` | gauge | `destination` (0 = tko'd) |
 | `rusty_mcrouter_destination_requests_total` | counter | `destination`, `result` |
 | `rusty_mcrouter_destination_latency_us_sum_total` | counter | `destination` — mean via promql |
+| `rusty_mcrouter_destination_connects_total` | counter | `destination` |
+| `rusty_mcrouter_destination_idle_closes_total` | counter | `destination` |
+| `rusty_mcrouter_destination_probes_sent` | gauge | `destination` — current TKO episode |
 | `rusty_mcrouter_destination_inflight_reqs` | gauge | `destination` |
 
-**latency / meta / self**
+**self**
 
 | metric | type | labels |
 |--------|------|--------|
-| `rusty_mcrouter_duration_us_sum_total` | counter | `op` (get/update) — mean = `rate(sum)/rate(requests)` |
 | `rusty_mcrouter_build_info` | info gauge | `version` |
 | `rusty_mcrouter_start_time_seconds` | gauge | — |
 | `rusty_mcrouter_proxies` | gauge | — |
@@ -516,16 +605,17 @@ boundaries that keep this list honest:
   aggregate-only — command anomalies are keyspace questions, answered
   by the aggregate `{command, result}` family; adding `command` per
   destination is a one-line change if a real need shows up.
-- `command` label = the meta five + mn, `result` = our ResultCode,
-  `pool`/`proxy`/`destination` = config-bounded. no label sourced from
+- `command` label = the five routed meta commands; `mn` has its own
+  scalar counter. `result` = our `ResultCode`, while
+  `pool`/`destination` are config-bounded. no label is sourced from
   keys.
 - latency is exported as monotonic µs sums, never pre-digested
   averages (see "why no bins"). the per-destination latency EWMA that
   used to live in a thread-local `DestinationStats` is gone entirely —
   sum+count superseded it, and the struct itself was folded into
   `DestinationMetrics`.
-- process metrics (`process_*`) come from a stock collector, not
-  hand-rolled.
+- process metrics (`process_*`) remain deferred to a stock collector;
+  they are not hand-rolled here.
 - **a counter field may only exist if its emit site can be named in
   one sentence.** this rule already killed `socket_writes` /
   `socket_partial_writes` (upstream observes raw nonblocking write
@@ -533,76 +623,66 @@ boundaries that keep this list honest:
   batches and partials unobservable — see catalog).
 
 the full upstream inventory (232 stats + 76 per-command names) with a
-port/fold/defer/n-a decision for every entry lives in the companion
-catalog: `0001-observability-catalog.md`. slice 3 may land this list
-in two waves (backend + tko first, routing/pool second) — but the
-target is the whole table.
+port/fold/defer/n/a decision for every entry lives in the companion
+catalog: `0001-observability-catalog.md`.
 
 ## public api and wiring
 
 ```rust
-pub struct Observability { events: EventSender, metrics: MetricsRegistry }
-
 impl Observability {
-    pub fn new(options: ObservabilityOptions) -> Self;
+    pub fn new(bus_capacity: usize) -> Self;
     pub fn events(&self) -> &EventSender;
-    pub fn metrics(&self) -> &MetricsRegistry;
-    pub async fn run(self, listener: TcpListener); // consumer + /metrics server
+    pub fn register(&mut self, source: Box<dyn MetricsSource>);
+    pub fn spawn(self, metrics_addr: Option<SocketAddr>)
+        -> io::Result<Option<SocketAddr>>;
 }
 ```
 
 binary wiring:
 
 ```rust
-let obs = Observability::new(opts);
+let mut obs = Observability::new(event_bus_capacity);
 let tko_map = TkoTrackerMap::with_sink(obs.events().sink());
-let route = build_route(&config, &factory, &defaults, obs.events().sink())?;
-// control thread: spawn consume_events and serve_prometheus as separate
-// tasks (not one select! — neither should silently die with the other)
+let layout = RoutingMetricsLayout::new(config.pools.keys().cloned());
+let metrics = RoutingMetricsShard::new(Arc::clone(&layout));
+let state = RoutingState::with_event_sink(metrics, obs.events().sink());
+let route = build_route(&config, &factory, &defaults, state.layout())?;
+obs.register(Box::new(RoutingSource { shards }));
+obs.spawn(metrics_addr)?;
 ```
 
 the /metrics server is a minimal hand-rolled http responder on the
 control thread's runtime — no framework dependency for one endpoint.
 
-## slices
+## implementation record
 
-1. **owned event records** — convert `TkoEventRecord<'a>` to owned
-   `Arc<str>` form in backend; sink signature change; tests keep their
-   collecting sinks. workspace green.
-2. **observability crate skeleton** — `OperationalEvent`, `EventSender`
-   + bounded bus + dropped counter, consumer task, log formatting.
-   unit tests: load-shedding, drop counting.
-3. **metric shards** — `BackendMetricsShard` + `DestinationMetrics`
-   in backend
-   (fold the old destination stats in, wire into `Destination` and the
-   connection actor), `FrontendMetricsShard` in proxy,
-   `MetricsRegistry` + prometheus text encoding in observability.
-4. **/metrics endpoint + binary wiring** — http responder, CLI
-   options (`--metrics-port`), end-to-end test: run proxy + mock,
-   scrape, assert counters move.
-5. **new event sources** — `WorkerEventRecord` in proxy;
-   `FrontendEventRecord`, `BackendEventRecord` and
-   `RoutingEventRecord` as needed (each is small once the bus exists).
+the shipped slices are: owned TKO, routing, and worker event records;
+the bounded shedding bus; per-proxy frontend/backend/routing shards;
+shared per-destination blocks; live TKO/fail-open sources; the minimal
+HTTP endpoint; and binary construction/wiring. route instrumentation is
+guarded by `rusty-mcrouter/tests/route_graph_observability.rs`, which
+parses real config, builds a graph with mock backends, executes through
+the proxy boundary, renders the real `RoutingSource`, and asserts
+healthy and failover metrics.
 
 ## test matrix
 
 - bus: full queue sheds and counts, consumer drains in order, sender
   clone per thread
-- counters: shard sums match known traffic through mock memcached;
-  encode output parses as prometheus text format
-- integration: tko mark/unmark produces `MarkSoftTko` log line and
-  gauge transitions 0→1→0; fail-open event fires exactly once
-- perf smoke: `.bench/` route throughput unchanged with observability
-  wired vs no-op sinks
+- counters: shard sums and every indexed command/result cell are
+  covered by unit tests
+- routing: failover entry, policy error, exhaustion, TKO free tries,
+  per-pool attempts, and final attribution are asserted independently
+- integration: process-level mock tests scrape `/metrics`; route-graph
+  tests cover healthy and primary-to-backup paths through the proxy
 
-## open questions
+## deferred follow-ups
 
 - latency histograms: prometheus-native histograms want preallocated
   bucket arrays (fine for the no-alloc rule) but bucket boundaries
   need choosing. sum+count already gives means; histograms add
   percentiles, and a histogram is just sum+count+buckets — a natural
-  extension of what ships here. defer to a follow-up?
-- event bus channel: tokio mpsc vs crossbeam for the try_send path
-  from non-async contexts (Drop impls emit events!) — needs a
-  decision in slice 2. note `Destination::drop` fires
-  `RemoveFromConfig` from a sync context today.
+  extension of what ships here.
+- stock `process_*` collection remains deferred.
+- additional frontend/backend event families should be added only for
+  rare transitions with a concrete operational consumer.
