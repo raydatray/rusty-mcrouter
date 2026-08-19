@@ -1,5 +1,13 @@
 # rusty-mcrouter threading model (architecture)
 
+> Historical MVP snapshot. The current tree consolidates per-proxy work under
+> `ProxyRuntime`, owns OS-thread lifecycle through `ProxyThread`, and hosts
+> observability under `ControlRuntime`/`ControlThread`. See
+> [`../../architecture/README.md`](../../architecture/README.md) for the current
+> ownership and shutdown model. The `Proxy` actor, `ConnectionWorker`, combined
+> proxy message queue and "no graceful shutdown" statements below are retained
+> only as implementation history.
+
 how threading works in the current tree: `N` proxy OS threads, each a
 single-threaded Tokio runtime with its own route graph, fed by round-robined
 accepted sockets. Each connection parses pipelined requests, dispatches each one
