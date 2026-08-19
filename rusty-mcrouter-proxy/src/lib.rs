@@ -21,4 +21,4 @@ pub use message::{ProxyCommand, ProxyRequest};
 pub use metrics::FrontendMetricsShard;
 pub use proxy_set::ProxySet;
 pub use server::Server;
-pub use thread::{proxy_thread_main, ProxyThread};
+pub use thread::proxy_thread_main;

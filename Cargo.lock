@@ -1219,6 +1219,7 @@ dependencies = [
  "rusty-mcrouter-proxy",
  "testcontainers",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
