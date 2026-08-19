@@ -1,4 +1,5 @@
 use rusty_mcrouter_backend::tko::{TkoEvent, TkoEventRecord};
+use rusty_mcrouter_core::{RoutingEvent, RoutingEventRecord};
 use rusty_mcrouter_proxy::{WorkerEvent, WorkerEventRecord};
 
 use crate::events::Event;
@@ -6,7 +7,19 @@ use crate::events::Event;
 pub fn write(event: &Event) {
     match event {
         Event::Tko(r) => tko(r),
+        Event::Routing(r) => routing(r),
         Event::Worker(r) => worker(r),
+    }
+}
+
+fn routing(record: &RoutingEventRecord) {
+    match record.event {
+        RoutingEvent::FailoverTargetsExhausted => tracing::warn!(
+            target: "rusty-mcrouter-observability::routing",
+            policy = record.policy.prometheus_label(),
+            command = record.command.meta_command(),
+            "failover exhausted all policy-selected targets"
+        ),
     }
 }
 
@@ -81,6 +94,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use rusty_mcrouter_backend::classify::ResultCode;
+    use rusty_mcrouter_core::{FailoverPolicyKind, RoutingEvent};
+    use rusty_mcrouter_protocol::RequestKind;
     use tracing::level_filters::LevelFilter;
     use tracing::Level;
     use tracing_subscriber::layer::{Context, SubscriberExt};
@@ -160,6 +175,16 @@ mod tests {
             event: WorkerEvent::Started,
         });
         assert_eq!(levels_for(&[started]), vec![Level::INFO]);
+    }
+
+    #[test]
+    fn failover_exhaustion_is_warn() {
+        let event = Event::Routing(RoutingEventRecord {
+            event: RoutingEvent::FailoverTargetsExhausted,
+            policy: FailoverPolicyKind::InOrder,
+            command: RequestKind::Get,
+        });
+        assert_eq!(levels_for(&[event]), vec![Level::WARN]);
     }
 
     /// every event writes exactly one line - nothing is silently eaten.

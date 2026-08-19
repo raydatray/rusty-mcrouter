@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use rusty_mcrouter_backend::{destination, metrics::BackendMetricsShard, tko::TkoTrackerMap};
 use rusty_mcrouter_config::ConfigDocument;
-use rusty_mcrouter_core::RoutingMetricsShard;
+use rusty_mcrouter_core::{RoutingEventSink, RoutingMetricsShard};
 use tokio::sync::mpsc;
 
 use crate::{message::ProxyMessage, proxy_set::ProxySet, FrontendMetricsShard, WorkerEventSink};
@@ -26,6 +26,7 @@ pub struct ProxyThreadConfig {
     pub backend_metrics: Arc<BackendMetricsShard>,
     pub frontend_metrics: Arc<FrontendMetricsShard>,
     pub routing_metrics: Arc<RoutingMetricsShard>,
+    pub routing_events: RoutingEventSink,
     /// Worker lifecycle events are emitted through a leaf-owned sink.
     pub events: WorkerEventSink,
     /// Router-level destination defaults (derived from RouterOptions once in

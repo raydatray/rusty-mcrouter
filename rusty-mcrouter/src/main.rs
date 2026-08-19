@@ -250,6 +250,7 @@ fn main() -> anyhow::Result<()> {
             backend_metrics,
             frontend_metrics,
             routing_metrics,
+            routing_events: observability.events().sink(),
             events: observability.events().sink(),
             defaults: defaults.clone(),
             sweep_interval,
