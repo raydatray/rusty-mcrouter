@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -16,10 +17,15 @@ struct Stack {
 }
 
 async fn start_router(config_body: &str, tag: u16) -> Stack {
-    start_router_with_args(config_body, tag, &[]).await
+    start_router_with_args(config_body, tag, 1, &[]).await
 }
 
-async fn start_router_with_args(config_body: &str, tag: u16, extra_args: &[&str]) -> Stack {
+async fn start_router_with_args(
+    config_body: &str,
+    tag: u16,
+    num_proxies: usize,
+    extra_args: &[&str],
+) -> Stack {
     let config_path = std::env::temp_dir().join(format!("rusty-mcrouter-mock-e2e-{tag}.json"));
     std::fs::write(&config_path, config_body).unwrap();
 
@@ -27,7 +33,7 @@ async fn start_router_with_args(config_body: &str, tag: u16, extra_args: &[&str]
         .arg("--config")
         .arg(&config_path)
         .arg("--num-proxies")
-        .arg("1")
+        .arg(num_proxies.to_string())
         .arg("--metrics-addr")
         .arg("127.0.0.1:0")
         .args(extra_args)
@@ -80,6 +86,22 @@ async fn scrape(addr: SocketAddr) -> String {
     let response = String::from_utf8(response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     response.split_once("\r\n\r\n").unwrap().1.to_string()
+}
+
+fn assert_series(body: &str, name: &str, labels: &[(&str, &str)], expected: u64) {
+    let mut rendered = String::from(name);
+    if !labels.is_empty() {
+        rendered.push('{');
+        for (index, (key, value)) in labels.iter().enumerate() {
+            if index != 0 {
+                rendered.push(',');
+            }
+            write!(rendered, "{key}=\"{value}\"").unwrap();
+        }
+        rendered.push('}');
+    }
+    writeln!(rendered, " {expected}").unwrap();
+    assert!(body.contains(&rendered), "missing {rendered:?} in:\n{body}");
 }
 
 async fn start_stack() -> Stack {
@@ -245,6 +267,17 @@ async fn metrics_endpoint_reports_null_route_requests() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn null_route_sums_two_proxy_shards() {
+    let fx = start_router_with_args(r#"{ "route": "NullRoute" }"#, 60_002, 2, &[]).await;
+
+    exchange(fx.router_addr, b"mg first v\r\n", b"EN\r\n").await;
+    exchange(fx.router_addr, b"mg second v\r\n", b"EN\r\n").await;
+
+    let body = scrape(fx.metrics_addr).await;
+    assert_series(&body, "rusty_mcrouter_dev_null_requests_total", &[], 2);
+}
+
 /// a dead backend marks hard on first contact (connect refused) and the
 /// scrape shows it: tko gauge up, destination down, tko-result counted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -257,7 +290,7 @@ async fn metrics_endpoint_reports_tko() {
     let config_body = format!(
         r#"{{ "pools": {{ "memcached": {{ "servers": ["{dead_addr}"] }} }}, "route": "PoolRoute|memcached" }}"#
     );
-    let fx = start_router_with_args(&config_body, dead_addr.port(), &[]).await;
+    let fx = start_router_with_args(&config_body, dead_addr.port(), 1, &[]).await;
 
     // first send fails and marks hard; retry until the mark lands
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -306,4 +339,94 @@ async fn failover_from_failing_primary_serves_from_secondary() {
         b"VA 6\r\nbackup\r\n",
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failover_metrics_count_one_entry_and_three_pool_attempts() {
+    let primary = spawn_failing_mock_memcached().await;
+    let backup_1 = spawn_failing_mock_memcached().await;
+    let backup_2 = spawn_mock_memcached().await;
+
+    exchange(backup_2, b"ms route_obs 5\r\nvalue\r\n", b"HD\r\n").await;
+
+    let config = format!(
+        r#"{{
+            "pools": {{
+                "primary": {{"servers": ["{primary}"]}},
+                "backup_1": {{"servers": ["{backup_1}"]}},
+                "backup_2": {{"servers": ["{backup_2}"]}}
+            }},
+            "route": {{
+                "type": "FailoverRoute",
+                "children": [
+                    "PoolRoute|primary",
+                    "PoolRoute|backup_1",
+                    "PoolRoute|backup_2"
+                ]
+            }}
+        }}"#
+    );
+    let stack = start_router(&config, primary.port()).await;
+
+    exchange(
+        stack.router_addr,
+        b"mg route_obs v\r\n",
+        b"VA 5\r\nvalue\r\n",
+    )
+    .await;
+
+    let body = scrape(stack.metrics_addr).await;
+    assert_series(
+        &body,
+        "rusty_mcrouter_failover_total",
+        &[("policy", "inorder")],
+        1,
+    );
+    for pool in ["primary", "backup_1", "backup_2"] {
+        assert_series(
+            &body,
+            "rusty_mcrouter_pool_requests_total",
+            &[("pool", pool)],
+            1,
+        );
+    }
+    assert_series(
+        &body,
+        "rusty_mcrouter_pool_completed_requests_total",
+        &[("pool", "primary")],
+        1,
+    );
+    assert_series(
+        &body,
+        "rusty_mcrouter_pool_completed_requests_total",
+        &[("pool", "backup_2")],
+        0,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_proxy_shards_sum_into_one_pool_series() {
+    let backend = spawn_mock_memcached().await;
+    let config = format!(
+        r#"{{"pools": {{"pool": {{"servers": ["{backend}"]}}}}, "route": "PoolRoute|pool"}}"#
+    );
+    let stack = start_router_with_args(&config, backend.port(), 2, &[]).await;
+
+    exchange(stack.router_addr, b"mg first v\r\n", b"EN\r\n").await;
+    exchange(stack.router_addr, b"mg second v\r\n", b"EN\r\n").await;
+
+    let body = scrape(stack.metrics_addr).await;
+    assert_series(
+        &body,
+        "rusty_mcrouter_pool_requests_total",
+        &[("pool", "pool")],
+        2,
+    );
+    assert_series(
+        &body,
+        "rusty_mcrouter_pool_completed_requests_total",
+        &[("pool", "pool")],
+        2,
+    );
+    assert_series(&body, "rusty_mcrouter_proxies", &[], 2);
 }

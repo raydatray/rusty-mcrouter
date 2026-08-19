@@ -20,6 +20,7 @@ pub use events::{WorkerEvent, WorkerEventRecord, WorkerEventSink};
 pub use handle::ProxyHandle;
 pub use message::{ProxyMessage, ProxyRequest};
 pub use metrics::FrontendMetricsShard;
+pub use proxy::Proxy;
 pub use proxy_set::ProxySet;
 pub use server::Server;
 pub use thread::proxy_thread_main;
