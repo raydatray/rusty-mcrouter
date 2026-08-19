@@ -5,10 +5,11 @@ use rusty_mcrouter_backend::{
     tko::TkoTrackerMap,
 };
 use rusty_mcrouter_config::parse_file;
+use rusty_mcrouter_core::{RoutingMetricsLayout, RoutingMetricsShard};
 use rusty_mcrouter_observability::{
     sources::{
         BackendRequestsSource, BackendScalarsSource, DestinationSource, FrontendRequestsSource,
-        FrontendScalarsSource, SelfSource, TkoSource,
+        FrontendScalarsSource, RoutingSource, SelfSource, TkoSource,
     },
     Observability,
 };
@@ -178,6 +179,7 @@ fn main() -> anyhow::Result<()> {
     let mut observability = Observability::new(1024);
 
     let config = Arc::new(parse_file(&args.config)?);
+    let routing_layout = RoutingMetricsLayout::new(config.pools.keys().cloned());
 
     // the cross-thread objects: per-server health and per-server counters,
     // shared by every proxy thread's destinations, atomics only
@@ -210,6 +212,7 @@ fn main() -> anyhow::Result<()> {
     // the same Arcs the threads write
     let mut backend_metric_shards = Vec::with_capacity(args.num_proxies);
     let mut frontend_metric_shards = Vec::with_capacity(args.num_proxies);
+    let mut routing_metric_shards = Vec::with_capacity(args.num_proxies);
 
     for proxy_id in 0..args.num_proxies {
         let has_listener = proxy_id < num_listening_sockets;
@@ -229,8 +232,10 @@ fn main() -> anyhow::Result<()> {
 
         let backend_metrics = BackendMetricsShard::new();
         let frontend_metrics = FrontendMetricsShard::new();
+        let routing_metrics = RoutingMetricsShard::new(Arc::clone(&routing_layout));
         backend_metric_shards.push(Arc::clone(&backend_metrics));
         frontend_metric_shards.push(Arc::clone(&frontend_metrics));
+        routing_metric_shards.push(routing_metrics);
 
         let cfg = ProxyThreadConfig {
             proxy_id,
@@ -292,6 +297,9 @@ fn main() -> anyhow::Result<()> {
     }));
     observability.register(Box::new(FrontendRequestsSource {
         shards: frontend_metric_shards,
+    }));
+    observability.register(Box::new(RoutingSource {
+        shards: routing_metric_shards,
     }));
     observability.register(Box::new(TkoSource {
         map: Arc::clone(&tko_map),
