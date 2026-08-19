@@ -41,19 +41,18 @@ impl Proxy {
     ) {
         tokio::task::spawn_local(async move {
             let context = routing_state.context();
-            let reply = route
-                .route_dyn(&context, req.request)
-                .await
-                .unwrap_or_else(|err| {
-                    let msg = match &err {
-                        // mcrouter's TkoReply wording (verified DestinationRoute.h:177-179)
-                        RouteError::Backend(SendError::Tko { reason }) => {
-                            Bytes::from(format!("Server unavailable. Reason: {reason:?}"))
-                        }
-                        _ => Bytes::from_static(b"backend unavailable"),
-                    };
-                    Reply::Error(ErrorReply::Server(Some(msg)))
-                });
+            let result = route.route_dyn(&context, req.request).await;
+            context.finish(&result);
+            let reply = result.unwrap_or_else(|err| {
+                let msg = match &err {
+                    // mcrouter's TkoReply wording (verified DestinationRoute.h:177-179)
+                    RouteError::Backend(SendError::Tko { reason }) => {
+                        Bytes::from(format!("Server unavailable. Reason: {reason:?}"))
+                    }
+                    _ => Bytes::from_static(b"backend unavailable"),
+                };
+                Reply::Error(ErrorReply::Server(Some(msg)))
+            });
 
             let _ = req.reply_tx.send(reply);
         });
@@ -62,11 +61,17 @@ impl Proxy {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use rusty_mcrouter_backend::classify::ResultCode;
+    use rusty_mcrouter_backend::destination;
     use rusty_mcrouter_backend::error::RequestError;
-    use rusty_mcrouter_backend::test_support::MockBackend;
-    use rusty_mcrouter_core::{DestinationRoute, Route, RoutingMetricsLayout, RoutingMetricsShard};
+    use rusty_mcrouter_backend::test_support::{MockBackend, MockBackendFactory};
+    use rusty_mcrouter_config::parse;
+    use rusty_mcrouter_core::{
+        build_route, DestinationRoute, Route, RoutingMetricsLayout, RoutingMetricsShard,
+    };
     use rusty_mcrouter_protocol::test_support::get;
     use tokio::sync::oneshot;
     use tokio::task::LocalSet;
@@ -113,5 +118,41 @@ mod tests {
                 b"Server unavailable. Reason: Timeout"
             ))))
         );
+    }
+
+    #[tokio::test]
+    async fn queued_proxy_request_finishes_pool_metrics() {
+        let config =
+            parse(r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#)
+                .unwrap();
+        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let metrics = RoutingMetricsShard::new(layout);
+        let routing_state = RoutingState::new(Arc::clone(&metrics));
+        let route = build_route(
+            &config,
+            &MockBackendFactory::new(),
+            &destination::Config::default(),
+            routing_state.layout(),
+        )
+        .unwrap();
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        LocalSet::new()
+            .run_until(async move {
+                Proxy::spawn_request(
+                    route,
+                    routing_state,
+                    ProxyRequest {
+                        request: get(b"foo"),
+                        reply_tx,
+                    },
+                );
+                reply_rx.await.unwrap()
+            })
+            .await;
+
+        assert_eq!(metrics.pools[0].requests.load(), 1);
+        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
+        assert_eq!(metrics.pools[0].final_errors.load(), 0);
     }
 }
