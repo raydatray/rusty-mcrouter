@@ -1,9 +1,10 @@
 use std::{rc::Rc, sync::Arc};
 
-use crate::{RoutingMetricsLayout, RoutingMetricsShard};
+use crate::{RoutingEventRecord, RoutingEventSink, RoutingMetricsLayout, RoutingMetricsShard};
 
 pub struct RoutingState {
     metrics: Arc<RoutingMetricsShard>,
+    events: RoutingEventSink,
 }
 
 pub struct RouteContext<'a> {
@@ -14,11 +15,22 @@ impl RouteContext<'_> {
     pub fn metrics(&self) -> &RoutingMetricsShard {
         &self.state.metrics
     }
+
+    pub(crate) fn emit(&self, event: RoutingEventRecord) {
+        self.state.events.emit(event);
+    }
 }
 
 impl RoutingState {
     pub fn new(metrics: Arc<RoutingMetricsShard>) -> Rc<Self> {
-        Rc::new(Self { metrics })
+        Self::with_event_sink(metrics, RoutingEventSink::new(|_| {}))
+    }
+
+    pub fn with_event_sink(
+        metrics: Arc<RoutingMetricsShard>,
+        events: RoutingEventSink,
+    ) -> Rc<Self> {
+        Rc::new(Self { metrics, events })
     }
 
     pub fn layout(&self) -> &Arc<RoutingMetricsLayout> {

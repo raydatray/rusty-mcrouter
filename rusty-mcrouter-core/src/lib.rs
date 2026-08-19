@@ -1,4 +1,5 @@
 mod context;
+mod events;
 mod failover;
 mod metrics;
 mod route_builder;
@@ -6,6 +7,7 @@ mod routes;
 mod selectors;
 
 pub use crate::context::{RouteContext, RoutingState};
+pub use crate::events::{RoutingEvent, RoutingEventRecord, RoutingEventSink};
 pub use crate::metrics::{
     FailoverErrorClass, FailoverPolicyKind, PoolMetrics, RoutingMetricsLayout, RoutingMetricsShard,
 };
