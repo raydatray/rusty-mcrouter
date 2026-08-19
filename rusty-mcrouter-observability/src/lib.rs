@@ -9,6 +9,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use rusty_mcrouter_observability_primitives::Counter;
+
 use crate::bus::{channel, EventConsumer, EventSender};
 use crate::metrics::{MetricsRegistry, MetricsSource};
 
@@ -19,6 +21,7 @@ pub struct Observability {
     events: EventSender,
     consumer: EventConsumer,
     registry: MetricsRegistry,
+    http_rejected: Arc<Counter>,
 }
 
 impl Observability {
@@ -39,6 +42,7 @@ impl Observability {
             events,
             consumer,
             registry: MetricsRegistry::new(),
+            http_rejected: Arc::new(Counter::default()),
         }
     }
 
@@ -48,6 +52,10 @@ impl Observability {
 
     pub fn register(&mut self, source: Box<dyn MetricsSource>) {
         self.registry.register(source);
+    }
+
+    pub fn http_rejected_counter(&self) -> Arc<Counter> {
+        Arc::clone(&self.http_rejected)
     }
 
     /// binds the metrics listener (if any) and spawns the control thread.
@@ -66,8 +74,9 @@ impl Observability {
 
         let Observability {
             events,
-            consumer,
+            mut consumer,
             registry,
+            http_rejected,
         } = self;
         drop(events); // sinks hold their own clones; ours must not keep the consumer alive
 
@@ -79,14 +88,40 @@ impl Observability {
                     .enable_time()
                     .build()
                     .expect("observability runtime");
-                rt.block_on(async move {
-                    if let Some(listener) = listener {
-                        let listener = tokio::net::TcpListener::from_std(listener)
-                            .expect("register metrics listener");
-                        tokio::spawn(http::serve(listener, Arc::new(registry)));
+                let result = rt.block_on(async move {
+                    let registry = Arc::new(registry);
+                    let mut metrics = listener.map(|listener| {
+                        http::MetricsHttp::new(
+                            tokio::net::TcpListener::from_std(listener)
+                                .expect("register metrics listener"),
+                            registry,
+                            http_rejected,
+                        )
+                    });
+
+                    loop {
+                        match &mut metrics {
+                            Some(metrics) => tokio::select! {
+                                event = consumer.recv() => {
+                                    let Some(event) = event else {
+                                        anyhow::bail!("event channel closed");
+                                    };
+                                    logging::write(&event);
+                                }
+                                result = metrics.step() => result?,
+                            },
+                            None => {
+                                let Some(event) = consumer.recv().await else {
+                                    return Ok(());
+                                };
+                                logging::write(&event);
+                            }
+                        }
                     }
-                    consumer.run().await;
                 });
+                if let Err(error) = result {
+                    tracing::error!(%error, "observability service stopped");
+                }
             })?;
 
         Ok(bound)

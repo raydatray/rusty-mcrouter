@@ -305,6 +305,7 @@ fn main() -> anyhow::Result<()> {
     }));
     observability.register(Box::new(SelfSource {
         dropped: observability.events().dropped_counter(),
+        http_rejected: observability.http_rejected_counter(),
         num_proxies: args.num_proxies,
         start_unix_secs: SystemTime::now()
             .duration_since(UNIX_EPOCH)

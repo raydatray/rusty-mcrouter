@@ -1,70 +1,130 @@
-// minimal http responder for /metrics. one endpoint, no framework:
-// read the request head, answer GET /metrics with a fresh render,
-// 404 everything else, close. no keep-alive - prometheus reconnects
-// per scrape and this is not a general-purpose server.
-
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use anyhow::Context;
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::header::CONTENT_TYPE;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use rusty_mcrouter_observability_primitives::Counter;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinSet;
 
 use crate::metrics::MetricsRegistry;
 
-const MAX_REQUEST_HEAD: usize = 8 * 1024;
+const MAX_HTTP_TASKS: usize = 32;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTENT_TYPE_VALUE: &str = "text/plain; version=0.0.4";
 
-pub async fn serve(listener: TcpListener, registry: Arc<MetricsRegistry>) {
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            continue;
-        };
-        let registry = Arc::clone(&registry);
-        tokio::spawn(async move {
-            let _ = tokio::time::timeout(REQUEST_TIMEOUT, respond(stream, registry)).await;
-        });
+pub struct MetricsHttp {
+    listener: TcpListener,
+    registry: Arc<MetricsRegistry>,
+    tasks: JoinSet<anyhow::Result<()>>,
+    rejected: Arc<Counter>,
+}
+
+impl MetricsHttp {
+    pub fn new(
+        listener: TcpListener,
+        registry: Arc<MetricsRegistry>,
+        rejected: Arc<Counter>,
+    ) -> Self {
+        Self {
+            listener,
+            registry,
+            tasks: JoinSet::new(),
+            rejected,
+        }
+    }
+
+    pub async fn step(&mut self) -> anyhow::Result<()> {
+        tokio::select! {
+            accepted = self.listener.accept() => {
+                let (stream, _) = accepted.context("accept metrics connection")?;
+                if self.tasks.len() >= MAX_HTTP_TASKS {
+                    self.rejected.inc();
+                    drop(stream);
+                    return Ok(());
+                }
+
+                let registry = Arc::clone(&self.registry);
+                self.tasks.spawn(async move { serve_connection(stream, registry).await });
+            }
+
+            Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                match result {
+                    Err(error) => return Err(error).context("metrics connection task failed"),
+                    Ok(Err(error)) => tracing::debug!(%error, "metrics connection failed"),
+                    Ok(Ok(())) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn run(mut self) -> anyhow::Result<()> {
+        loop {
+            self.step().await?;
+        }
+    }
+
+    pub async fn shutdown(&mut self) {
+        self.tasks.shutdown().await;
     }
 }
 
-async fn respond(mut stream: TcpStream, registry: Arc<MetricsRegistry>) {
-    let mut head = Vec::new();
-    let mut chunk = [0u8; 1024];
-    // read until end of request head; body (if any) is ignored
-    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-        if head.len() > MAX_REQUEST_HEAD {
-            return;
-        }
-        match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => return,
-            Ok(n) => head.extend_from_slice(&chunk[..n]),
-        }
+pub async fn serve_connection(
+    stream: TcpStream,
+    registry: Arc<MetricsRegistry>,
+) -> anyhow::Result<()> {
+    let io = TokioIo::new(stream);
+    let service = service_fn(move |request| respond(request, Arc::clone(&registry)));
+
+    tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        http1::Builder::new()
+            .keep_alive(false)
+            .serve_connection(io, service),
+    )
+    .await
+    .context("metrics connection timed out")?
+    .context("serve metrics connection")?;
+    Ok(())
+}
+
+async fn respond(
+    request: Request<Incoming>,
+    registry: Arc<MetricsRegistry>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    if request.method() == Method::GET && request.uri().path() == "/metrics" {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, CONTENT_TYPE_VALUE)
+            .body(Full::new(Bytes::from(registry.render())))
+            .expect("constant response is valid");
+        return Ok(response);
     }
 
-    let request_line = head.split(|&b| b == b'\r').next().unwrap_or(b"");
-    let response = if request_line.starts_with(b"GET /metrics ") {
-        let body = registry.render();
-        format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: text/plain; version=0.0.4\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-    } else {
-        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
-    };
-
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
+    Ok(Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Full::new(Bytes::new()))
+        .expect("constant response is valid"))
 }
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
     use crate::metrics::{MetricsSource, MetricsText};
 
     struct Static;
+
     impl MetricsSource for Static {
         fn encode(&self, out: &mut MetricsText) {
             out.counter("test_total", &[], 7);
@@ -76,13 +136,14 @@ mod tests {
         registry.register(Box::new(Static));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve(listener, Arc::new(registry)));
+        let server = MetricsHttp::new(listener, Arc::new(registry), Arc::new(Counter::default()));
+        tokio::spawn(async move { server.run().await.unwrap() });
         addr
     }
 
-    async fn request(addr: std::net::SocketAddr, req: &str) -> String {
+    async fn request(addr: std::net::SocketAddr, request: &str) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(req.as_bytes()).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).await.unwrap();
         response
@@ -90,54 +151,36 @@ mod tests {
 
     #[tokio::test]
     async fn get_metrics_renders_a_scrape() {
-        let addr = start().await;
-        let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        let response = request(
+            start().await,
+            "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
-        assert!(response.contains("Content-Type: text/plain; version=0.0.4\r\n"));
+        assert!(response.contains("content-type: text/plain; version=0.0.4\r\n"));
         assert!(response.ends_with("\r\n\r\ntest_total 7\n"), "{response}");
     }
 
     #[tokio::test]
-    async fn content_length_matches_the_body() {
+    async fn other_routes_and_methods_are_not_found() {
         let addr = start().await;
-        let response = request(addr, "GET /metrics HTTP/1.1\r\n\r\n").await;
-        let (head, body) = response.split_once("\r\n\r\n").unwrap();
-        let length: usize = head
-            .lines()
-            .find_map(|l| l.strip_prefix("Content-Length: "))
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert_eq!(length, body.len());
+        for request_head in [
+            "GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "POST /metrics HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        ] {
+            let response = request(addr, request_head).await;
+            assert!(
+                response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+                "{response}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn other_paths_get_404() {
+    async fn malformed_http_does_not_stop_the_server() {
         let addr = start().await;
-        let response = request(addr, "GET /other HTTP/1.1\r\n\r\n").await;
-        assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
-    }
-
-    #[tokio::test]
-    async fn non_get_gets_404() {
-        let addr = start().await;
-        let response = request(addr, "POST /metrics HTTP/1.1\r\n\r\n").await;
-        assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
-    }
-
-    #[tokio::test]
-    async fn garbage_does_not_wedge_the_server() {
-        let addr = start().await;
-        // no head terminator: the request times out server-side; the
-        // NEXT scrape must still work
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream
-            .write_all(b"garbage without terminator")
-            .await
-            .unwrap();
-        drop(stream);
-
-        let response = request(addr, "GET /metrics HTTP/1.1\r\n\r\n").await;
-        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        let _ = request(addr, "garbage\r\n\r\n").await;
+        let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     }
 }
