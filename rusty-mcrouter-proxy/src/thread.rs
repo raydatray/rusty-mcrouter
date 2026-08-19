@@ -40,6 +40,7 @@ pub fn proxy_thread_main(
             backend_metrics,
             frontend_metrics,
             routing_metrics,
+            routing_events,
             events,
             defaults,
             sweep_interval,
@@ -86,7 +87,7 @@ pub fn proxy_thread_main(
         let dest_map = destination::Map::new(tko_map, backend_metrics, metrics_registry);
         let _sweep = dest_map.spawn_idle_sweep(sweep_interval);
         let factory = DestinationFactory::new(Rc::clone(&dest_map));
-        let routing_state = RoutingState::new(routing_metrics);
+        let routing_state = RoutingState::with_event_sink(routing_metrics, routing_events);
         let route = match build_route(&config, &factory, &defaults) {
             Ok(r) => r,
             Err(e) => {
