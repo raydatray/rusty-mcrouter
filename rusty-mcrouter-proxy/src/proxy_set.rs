@@ -1,6 +1,6 @@
 use rusty_mcrouter_protocol::Request;
 
-use crate::{config::ThreadMode, handle::ProxyHandle};
+use crate::{ProxyHandle, ThreadMode};
 
 #[derive(Clone)]
 pub struct ProxySet {

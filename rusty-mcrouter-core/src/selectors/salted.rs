@@ -1,4 +1,4 @@
-use super::Selector;
+use crate::selectors::Selector;
 
 pub struct Salted {
     inner: Box<dyn Selector>,

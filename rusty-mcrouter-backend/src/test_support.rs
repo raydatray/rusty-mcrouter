@@ -20,10 +20,8 @@ use tokio::net::{TcpListener, TcpStream};
 
 pub use crate::connection::{ConnectionEvent, DownReason};
 
-use crate::backend::{
-    Backend, BackendFactory, BackendFactoryError, PoolHealth, PreparedSend, TkoRejection,
-};
 use crate::error::SendError;
+use crate::{Backend, BackendFactory, BackendFactoryError, PoolHealth, PreparedSend, TkoRejection};
 
 /// Runs a future inside a fresh `LocalSet`. The backend connection actor is
 /// spawned via

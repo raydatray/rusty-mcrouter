@@ -3,25 +3,25 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
 
-use crate::meta::reply_decoder::MAX_REPLY_LINE_BYTES;
-use crate::meta::reply_decoder::{MetaReplyDecodeError, INVALID_RESPONSE, SHAPE_MISMATCH};
-use crate::meta::reply_encoder::{encoded_key_too_long, reply_line_too_long, MetaReplyEncodeError};
-use crate::meta::request_decoder::MAX_COMMAND_LINE_BYTES;
+use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
+use crate::meta::reply_encoder::{encoded_key_too_long, reply_line_too_long};
 use crate::meta::request_decoder::{
     bad_argument, flag_error, parse_key, recoverable_client_error, require_hint_argument,
-    DecodedMetaCommand, MetaRequestDecodeError, BAD_COMMAND_LINE, INVALID_FLAG,
+    BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
 };
-use crate::meta::request_encoder::{
-    command_line_too_long, write_backend_key, MetaRequestEncodeError,
-};
+use crate::meta::request_encoder::{command_line_too_long, write_backend_key};
 use crate::meta::tokens::{flags, require_no_argument, split_tokens, FlagBudget};
-use crate::meta::{wire, KeyEncoding, MetaReplyExpectation, MetaReplyPlan};
+use crate::meta::{
+    wire, DecodedMetaCommand, KeyEncoding, MetaReplyDecodeError, MetaReplyEncodeError,
+    MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError, MetaRequestEncodeError,
+};
 
 /// memcached's `me` response carries a small, fixed set of `<name>=<value>`
 /// fields; the cap bounds a misbehaving backend.
 pub const MAX_DEBUG_FIELDS: usize = 64;
-use crate::reply::{DebugField, DebugHit, DebugReply, Reply};
-use crate::request::{DebugRequest, Request};
+use crate::reply::{DebugField, DebugHit, DebugReply};
+use crate::request::DebugRequest;
+use crate::{Reply, Request};
 
 pub fn parse_request<'a>(
     mut tokens: impl Iterator<Item = &'a [u8]>,

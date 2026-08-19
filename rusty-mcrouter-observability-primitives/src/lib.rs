@@ -1,5 +1,5 @@
 mod events;
 mod metrics;
 
-pub use events::EventSink;
-pub use metrics::{Counter, Gauge};
+pub use crate::events::EventSink;
+pub use crate::metrics::{Counter, Gauge};

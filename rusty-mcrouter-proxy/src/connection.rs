@@ -14,10 +14,8 @@ use tokio::{
     sync::mpsc,
 };
 
-use crate::{
-    config::ThreadMode, proxy_set::ProxySet, routing::complete_route, FrontendError,
-    FrontendMetricsShard, ProxyHandle,
-};
+use crate::routing::complete_route;
+use crate::{FrontendError, FrontendMetricsShard, ProxyHandle, ProxySet, ThreadMode};
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
 const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
@@ -334,7 +332,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::message::{ProxyCommand, ProxyRequest};
+    use crate::{ProxyCommand, ProxyRequest};
 
     /// a real Connection over a localhost socket pair, with a SameThread
     /// route into a mock backend. the proxy handle channel is never used

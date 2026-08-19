@@ -8,10 +8,7 @@ use rusty_mcrouter_observability_primitives::Gauge;
 use crate::{
     classify::ResultCode,
     tko::{
-        events::{TkoEvent, TkoEventRecord},
-        map::TkoTrackerMap,
-        metrics::GlobalTkoMetrics,
-        pool::{GateDecision, PoolTkoTracker},
+        GateDecision, GlobalTkoMetrics, PoolTkoTracker, TkoEvent, TkoEventRecord, TkoTrackerMap,
     },
 };
 
@@ -312,9 +309,7 @@ impl Drop for TkoTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tko::events::TkoEventSink;
-    use crate::tko::map::TkoTrackerMap;
-    use crate::tko::pool::FailOpenThresholds;
+    use crate::tko::{FailOpenThresholds, TkoEventSink, TkoTrackerMap};
 
     fn null_sink() -> TkoEventSink {
         TkoEventSink::new(|_| {})

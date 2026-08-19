@@ -2,7 +2,7 @@ use rusty_mcrouter_backend::Backend;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::time::Instant;
 
-use super::{Result, Route, RouteError};
+use crate::routes::{Result, Route, RouteError};
 use crate::RouteContext;
 
 pub struct DestinationRoute<B: Backend> {

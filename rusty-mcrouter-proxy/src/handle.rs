@@ -4,7 +4,7 @@ use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::message::{ProxyCommand, ProxyRequest};
+use crate::{ProxyCommand, ProxyRequest};
 
 #[derive(Clone)]
 pub struct ProxyHandle {

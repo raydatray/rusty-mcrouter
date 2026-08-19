@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use crate::key::Key;
+use crate::Key;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreRequest {

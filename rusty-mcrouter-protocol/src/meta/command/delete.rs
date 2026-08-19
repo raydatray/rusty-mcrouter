@@ -2,29 +2,27 @@
 
 use bytes::BytesMut;
 
-use crate::meta::reply_decoder::{
-    MetaReplyDecodeError, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH,
-};
-use crate::meta::reply_encoder::{
-    reply_line_too_long, write_key_token, write_opaque, MetaReplyEncodeError,
-};
+use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
+use crate::meta::reply_encoder::{reply_line_too_long, write_key_token, write_opaque};
 use crate::meta::request_decoder::{
     bad_argument, bad_number, capacity_error, flag_error, parse_opaque, recoverable_client_error,
-    require_hint_argument, resolve_key, DecodedMetaCommand, MetaRequestDecodeError,
-    BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
+    require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
+    MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
-    MetaRequestEncodeError,
 };
 use crate::meta::tokens::{
     flags, parse_i32, parse_u32, parse_u64, require_no_argument, split_tokens, FlagBudget,
 };
 use crate::meta::{
-    wire, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyExpectation, MetaReplyPlan,
+    wire, DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
+    MetaReplyEncodeError, MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError,
+    MetaRequestEncodeError,
 };
-use crate::reply::{DeleteReply, Reply};
-use crate::request::{DeleteRequest, Request};
+use crate::reply::DeleteReply;
+use crate::request::DeleteRequest;
+use crate::{Reply, Request};
 
 pub fn parse_request<'a>(
     mut tokens: impl Iterator<Item = &'a [u8]>,

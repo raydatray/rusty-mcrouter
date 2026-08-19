@@ -3,14 +3,14 @@ use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 
 use crate::bounded_list::CapacityExceeded;
-use crate::key::{Key, MAX_KEY_BYTES};
+use crate::key::MAX_KEY_BYTES;
 use crate::meta::command;
 use crate::meta::tokens::{
     find_line, split_tokens, BadNumber, FindLine, FlagError, UnexpectedArgument,
 };
 use crate::meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan};
 use crate::reply::ErrorReply;
-use crate::request::Request;
+use crate::{Key, Request};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;

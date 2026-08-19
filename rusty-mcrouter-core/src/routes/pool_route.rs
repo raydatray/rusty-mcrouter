@@ -3,12 +3,10 @@ use std::rc::Rc;
 use rusty_mcrouter_backend::Backend;
 use rusty_mcrouter_protocol::{Reply, Request};
 
+use crate::routes::selection_route::SelectionRoute;
+use crate::routes::{DestinationRoute, DynRoute, Result, Route};
 use crate::selectors::Selector;
 use crate::RouteContext;
-
-use super::{
-    destination_route::DestinationRoute, selection_route::SelectionRoute, DynRoute, Result, Route,
-};
 
 pub struct PoolRoute {
     pool_name: String,

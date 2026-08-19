@@ -1,4 +1,5 @@
-use crate::{bounded_list::BoundedList, key::Key};
+use crate::bounded_list::BoundedList;
+use crate::Key;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetRequest {

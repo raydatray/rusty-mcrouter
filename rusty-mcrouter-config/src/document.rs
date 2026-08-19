@@ -4,8 +4,7 @@ use serde::de::{self, Deserializer};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::ConfigError;
-use crate::{pool::PoolConfig, route::RouteHandleConfig};
+use crate::{ConfigError, PoolConfig, RouteHandleConfig};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigDocument {
@@ -155,7 +154,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::route::HashConfig;
+    use crate::HashConfig;
 
     use super::*;
 
