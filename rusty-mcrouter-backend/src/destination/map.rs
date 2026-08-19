@@ -115,12 +115,20 @@ impl Map {
 #[cfg(test)]
 mod tests {
     use rusty_mcrouter_protocol::test_support::get;
+    use rusty_mcrouter_protocol::{Reply, Request};
 
     use super::*;
     use crate::classify::ResultCode;
     use crate::error::{RequestError, SendError};
     use crate::test_support::{run_local, scripted_backend_serial, Step};
     use crate::tko::{DestToken, FailOpenThresholds};
+
+    async fn send(dest: &Rc<Destination>, request: Request) -> Result<Reply, SendError> {
+        match dest.prepare_send(request) {
+            Ok(prepared) => prepared.await,
+            Err(error) => Err(error),
+        }
+    }
 
     fn tko_map() -> Arc<TkoTrackerMap> {
         TkoTrackerMap::with_sink(crate::tko::TkoEventSink::new(|_| {}))
@@ -256,7 +264,7 @@ mod tests {
             let map = test_map();
             let dest = map.destination(key_for(&server.addr.to_string(), 1000), &test_cfg(), None);
 
-            dest.send(get(b"a")).await.unwrap();
+            send(&dest, get(b"a")).await.unwrap();
             tokio::time::sleep(Duration::from_millis(60)).await;
             map.sweep_idle(Duration::from_millis(50)); // idle 60ms >= 50ms
 
@@ -270,7 +278,7 @@ mod tests {
             assert_eq!(dest.metrics().idle_closes.load(), 1);
             assert!(!dest.is_tko(), "an idle close is never health evidence");
 
-            dest.send(get(b"b")).await.unwrap();
+            send(&dest, get(b"b")).await.unwrap();
             assert_eq!(server.accept_count(), 2);
         })
         .await;
@@ -294,7 +302,7 @@ mod tests {
             let dest = map.destination(key_for(&server.addr.to_string(), 20), &cfg, None);
             let tracker = Arc::clone(dest.tracker());
 
-            let result = dest.send(get(b"a")).await;
+            let result = send(&dest, get(b"a")).await;
             assert!(matches!(
                 result,
                 Err(SendError::Request(RequestError::Timeout { sent: true }))
@@ -340,7 +348,7 @@ mod tests {
             let map = test_map();
             let dest = map.destination(key_for(&server.addr.to_string(), 1000), &test_cfg(), None);
 
-            dest.send(get(b"a")).await.unwrap(); // last_active = now
+            send(&dest, get(b"a")).await.unwrap(); // last_active = now
             map.sweep_idle(Duration::from_millis(50)); // idle ~0ms < 50ms
 
             tokio::time::sleep(Duration::from_millis(20)).await;

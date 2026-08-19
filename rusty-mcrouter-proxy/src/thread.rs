@@ -88,7 +88,7 @@ pub fn proxy_thread_main(
         let _sweep = dest_map.spawn_idle_sweep(sweep_interval);
         let factory = DestinationFactory::new(Rc::clone(&dest_map));
         let routing_state = RoutingState::with_event_sink(routing_metrics, routing_events);
-        let route = match build_route(&config, &factory, &defaults) {
+        let route = match build_route(&config, &factory, &defaults, routing_state.layout()) {
             Ok(r) => r,
             Err(e) => {
                 let _ = ready_tx.send(Err(anyhow::anyhow!("build_route failed: {e}")));

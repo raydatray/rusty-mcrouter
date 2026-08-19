@@ -14,6 +14,7 @@ use crate::{
     failover::{code_of_kind, FailoverErrors, FailoverPolicy, InOrderPolicy, LeastFailuresPolicy},
     routes::{DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, Route},
     selectors::{Ch3, Crc32, Salted, Selector, SelectorBuildError},
+    RoutingMetricsLayout,
 };
 
 #[derive(Debug, Error)]
@@ -23,6 +24,9 @@ pub enum BuildError {
 
     #[error("pool `{name}` has zero servers; refusing to construct empty PoolRoute")]
     EmptyPool { name: String },
+
+    #[error("pool `{name}` is missing from the routing metrics layout")]
+    PoolMissingFromMetricsLayout { name: String },
 
     #[error("FailoverRoute has zero children; refusing to construct an empty failover")]
     EmptyFailover,
@@ -68,13 +72,14 @@ pub fn build_route<F: BackendFactory>(
     config: &ConfigDocument,
     factory: &F,
     defaults: &destination::Config,
+    metrics_layout: &RoutingMetricsLayout,
 ) -> Result<Rc<dyn DynRoute>> {
     let entry = match &config.route {
         RouteEntry::Single(handle) => handle,
         RouteEntry::Prefixed(_) => return Err(BuildError::PrefixRoutingNotImplemented),
     };
 
-    let mut route_builder = RouteBuilder::new(config, factory, defaults);
+    let mut route_builder = RouteBuilder::new(config, factory, defaults, metrics_layout);
     route_builder.build_handle(entry)
 }
 
@@ -82,15 +87,22 @@ struct RouteBuilder<'a, F: BackendFactory> {
     config: &'a ConfigDocument,
     factory: &'a F,
     defaults: &'a destination::Config,
+    metrics_layout: &'a RoutingMetricsLayout,
     pool_cache: BTreeMap<String, Vec<Rc<DestinationRoute<F::Backend>>>>,
 }
 
 impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
-    fn new(config: &'a ConfigDocument, factory: &'a F, defaults: &'a destination::Config) -> Self {
+    fn new(
+        config: &'a ConfigDocument,
+        factory: &'a F,
+        defaults: &'a destination::Config,
+        metrics_layout: &'a RoutingMetricsLayout,
+    ) -> Self {
         Self {
             config,
             factory,
             defaults,
+            metrics_layout,
             pool_cache: BTreeMap::new(),
         }
     }
@@ -176,6 +188,13 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
             });
         }
 
+        let pool_index = self
+            .metrics_layout
+            .pool_metrics_index(pool_name)
+            .ok_or_else(|| BuildError::PoolMissingFromMetricsLayout {
+                name: pool_name.to_string(),
+            })?;
+
         let dest_cfg = pool_destination_config(self.defaults, pool_config);
         let pool_health = PoolHealth {
             pool_name,
@@ -197,7 +216,9 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
                     server: server.clone(),
                     source,
                 })?;
-            destinations.push(Rc::new(DestinationRoute::<F::Backend>::new(backend)));
+            destinations.push(Rc::new(DestinationRoute::<F::Backend>::for_pool(
+                backend, pool_index,
+            )));
         }
 
         self.pool_cache
@@ -327,14 +348,29 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::get;
     use rusty_mcrouter_protocol::{Reply, Request};
 
-    use crate::context::test_routing_state;
+    use crate::{RoutingMetricsShard, RoutingState};
 
     fn defaults() -> destination::Config {
         destination::Config::default()
     }
 
-    fn build<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> Result<Rc<dyn DynRoute>> {
-        build_route(cfg, factory, &defaults())
+    struct BuiltRoute {
+        route: Rc<dyn DynRoute>,
+        #[allow(dead_code)]
+        metrics: std::sync::Arc<RoutingMetricsShard>,
+        state: Rc<RoutingState>,
+    }
+
+    fn build<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> Result<BuiltRoute> {
+        let layout = RoutingMetricsLayout::new(cfg.pools.keys().cloned());
+        let route = build_route(cfg, factory, &defaults(), &layout)?;
+        let metrics = RoutingMetricsShard::new(layout);
+        let state = RoutingState::new(std::sync::Arc::clone(&metrics));
+        Ok(BuiltRoute {
+            route,
+            metrics,
+            state,
+        })
     }
 
     fn expect_err<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> BuildError {
@@ -344,10 +380,11 @@ mod tests {
         }
     }
 
-    async fn execute(route: &Rc<dyn DynRoute>, request: Request) -> crate::routes::Result<Reply> {
-        let state = test_routing_state();
-        let context = state.context();
-        route.route_dyn(&context, request).await
+    async fn execute(fixture: &BuiltRoute, request: Request) -> crate::routes::Result<Reply> {
+        let context = fixture.state.context();
+        let result = fixture.route.route_dyn(&context, request).await;
+        context.finish(&result);
+        result
     }
 
     #[tokio::test]
@@ -418,6 +455,20 @@ mod tests {
         let cfg = parse(r#"{"pools": {"E": {"servers": []}}, "route": "PoolRoute|E"}"#).unwrap();
         let err = expect_err(&cfg, &MockBackendFactory::new());
         assert!(matches!(err, BuildError::EmptyPool { ref name } if name == "E"));
+    }
+
+    #[test]
+    fn errors_when_pool_is_missing_from_metrics_layout() {
+        let cfg = parse(r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#)
+            .unwrap();
+        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+        let err = build_route(&cfg, &MockBackendFactory::new(), &defaults(), &layout)
+            .err()
+            .expect("build should fail");
+        assert!(matches!(
+            err,
+            BuildError::PoolMissingFromMetricsLayout { ref name } if name == "P"
+        ));
     }
 
     #[test]
@@ -537,7 +588,8 @@ mod tests {
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
         let cfg = parse(json).unwrap();
         let d = defaults();
-        let mut builder = RouteBuilder::new(&cfg, &factory, &d);
+        let layout = RoutingMetricsLayout::new(cfg.pools.keys().cloned());
+        let mut builder = RouteBuilder::new(&cfg, &factory, &d, &layout);
         let d1 = builder.get_or_build_destinations("P").unwrap();
         let d2 = builder.get_or_build_destinations("P").unwrap();
         assert!(

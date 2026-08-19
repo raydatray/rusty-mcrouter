@@ -1,10 +1,11 @@
 use std::{
     cell::{Cell, RefCell},
+    future::Future,
     rc::{Rc, Weak},
     sync::Arc,
 };
 
-use rusty_mcrouter_protocol::{Reply, Request};
+use rusty_mcrouter_protocol::{Reply, Request, RequestKind};
 use tokio::time::Instant;
 
 use crate::{
@@ -93,7 +94,10 @@ impl Destination {
         self.conn.close_idle()
     }
 
-    pub async fn send(self: &Rc<Self>, request: Request) -> Result<Reply, SendError> {
+    pub(crate) fn prepare_send(
+        self: &Rc<Self>,
+        request: Request,
+    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, SendError> {
         self.last_active.set(Instant::now());
         let kind = request.kind();
 
@@ -105,6 +109,14 @@ impl Destination {
             });
         }
 
+        Ok(async move { self.send_prepared(request, kind).await })
+    }
+
+    async fn send_prepared(
+        self: &Rc<Self>,
+        request: Request,
+        kind: RequestKind,
+    ) -> Result<Reply, SendError> {
         let start = Instant::now();
         let inflight = InflightGuard::new(&self.metrics);
         let result = self.conn.send(request).await;
@@ -246,6 +258,13 @@ mod tests {
     use crate::test_support::{run_local, scripted_backend_serial, ScriptedServer, Step};
     use crate::tko::{TkoEventSink, TkoTrackerMap};
 
+    async fn send(dest: &Rc<Destination>, request: Request) -> Result<Reply, SendError> {
+        match dest.prepare_send(request) {
+            Ok(prepared) => prepared.await,
+            Err(error) => Err(error),
+        }
+    }
+
     fn collecting_sink() -> (TkoEventSink, Arc<Mutex<Vec<TkoEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = {
@@ -322,18 +341,20 @@ mod tests {
 
             // mid-use close: request fails Dropped (non-TKO), the Down(Eof)
             // event is the hard evidence that marks instantly
-            let r = dest.send(get(b"a")).await;
+            let r = send(&dest, get(b"a")).await;
             assert!(matches!(r, Err(SendError::Request(_))), "got {r:?}");
             wait_until(|| tracker.is_tko()).await;
             assert!(tracker.is_hard_tko());
 
             let accepts = server.accept_count();
             for _ in 0..5 {
-                let r = dest.send(get(b"x")).await;
+                let r = send(&dest, get(b"x")).await;
                 assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
             }
+            let prepared = dest.prepare_send(get(b"observed"));
+            assert!(matches!(prepared, Err(SendError::Tko { .. })));
             assert_eq!(server.accept_count(), accepts, "fast-fail must do zero I/O");
-            assert_eq!(dest.metrics().result_count(ResultCode::Tko), 5);
+            assert_eq!(dest.metrics().result_count(ResultCode::Tko), 6);
         })
         .await;
     }
@@ -351,7 +372,7 @@ mod tests {
             .await;
             let (_map, tracker, dest, events) = dest_for(&server, cfg(3, 1000, 20));
 
-            let _ = dest.send(get(b"a")).await;
+            let _ = send(&dest, get(b"a")).await;
             wait_until(|| tracker.is_tko()).await;
 
             // probe fires after ~20-30ms, reconnects, VERSION succeeds
@@ -367,7 +388,7 @@ mod tests {
                 "probes_sent resets on unmark"
             );
 
-            assert!(dest.send(get(b"b")).await.is_ok());
+            assert!(send(&dest, get(b"b")).await.is_ok());
             assert_eq!(server.accept_count(), 3);
         })
         .await;
@@ -382,7 +403,7 @@ mod tests {
                 scripted_backend_serial(vec![vec![Step::ReadRequests(2), Step::Hang]]).await;
             let (_map, tracker, dest, events) = dest_for(&server, cfg(2, 50, 10_000));
 
-            let r = dest.send(get(b"a")).await;
+            let r = send(&dest, get(b"a")).await;
             assert!(matches!(
                 r,
                 Err(SendError::Request(crate::error::RequestError::Timeout {
@@ -391,7 +412,7 @@ mod tests {
             ));
             assert!(!tracker.is_tko(), "one timeout of two must not mark");
 
-            let _ = dest.send(get(b"b")).await;
+            let _ = send(&dest, get(b"b")).await;
             wait_until(|| tracker.is_tko()).await;
             assert!(tracker.is_soft_tko());
             assert_eq!(tracker.reason(), ResultCode::Timeout);
@@ -417,7 +438,7 @@ mod tests {
                 let dest = Rc::clone(&dest);
                 let request = request.clone();
                 sends.push(tokio::task::spawn_local(async move {
-                    let _ = dest.send(request).await;
+                    let _ = send(&dest, request).await;
                 }));
             }
             for send in sends {
@@ -442,7 +463,7 @@ mod tests {
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
             let (_map, tracker, dest, events) = dest_for(&server, cfg(3, 1000, 10_000));
 
-            let _ = dest.send(get(b"a")).await;
+            let _ = send(&dest, get(b"a")).await;
             wait_until(|| tracker.is_tko()).await;
 
             drop(dest);
@@ -479,11 +500,11 @@ mod tests {
                 BackendMetricsShard::new(),
             );
 
-            let _ = dest_a.send(get(b"a")).await;
+            let _ = send(&dest_a, get(b"a")).await;
             wait_until(|| tracker.is_tko()).await;
             let accepts = server.accept_count();
 
-            let r = dest_b.send(get(b"b")).await;
+            let r = send(&dest_b, get(b"b")).await;
             assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
             assert_eq!(server.accept_count(), accepts, "B must never connect");
             assert_eq!(dest_b.metrics().result_count(ResultCode::Tko), 1);
@@ -528,16 +549,16 @@ mod tests {
                     .load()
             };
 
-            dest.send(get(b"a")).await.unwrap();
+            send(&dest, get(b"a")).await.unwrap();
             assert_eq!(get_cell(ResultCode::Success), 1);
             let latency_after_success = shard.latency_us_sum.load();
             assert!(latency_after_success > 0, "a real send must record latency");
 
-            let _ = dest.send(get(b"b")).await; // killed mid-use
+            let _ = send(&dest, get(b"b")).await; // killed mid-use
             wait_until(|| tracker.is_tko()).await;
             let latency_after_mark = shard.latency_us_sum.load();
 
-            let r = dest.send(get(b"c")).await;
+            let r = send(&dest, get(b"c")).await;
             assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
             assert_eq!(get_cell(ResultCode::Tko), 1);
             assert_eq!(
@@ -565,7 +586,7 @@ mod tests {
             let task = {
                 let dest = Rc::clone(&dest);
                 tokio::task::spawn_local(async move {
-                    let _ = dest.send(get(b"a")).await;
+                    let _ = send(&dest, get(b"a")).await;
                 })
             };
             wait_until(|| metrics.inflight_reqs.load() == 1).await;
@@ -586,7 +607,7 @@ mod tests {
                     .await;
             let (_map, _tracker, dest, _events) = dest_for(&server, cfg(100, 1000, 10_000));
 
-            dest.send(get(b"a")).await.unwrap();
+            send(&dest, get(b"a")).await.unwrap();
             assert_eq!(dest.metrics().inflight_reqs.load(), 0);
         })
         .await;
