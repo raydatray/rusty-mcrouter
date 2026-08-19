@@ -315,14 +315,13 @@ async fn route_one(target: RouteTarget, request: Request) -> Reply {
             routing_state,
         } => {
             let context = routing_state.context();
-            route
-                .route_dyn(&context, request)
-                .await
-                .unwrap_or_else(|_| {
-                    Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
-                        b"backend unavailable",
-                    ))))
-                })
+            let result = route.route_dyn(&context, request).await;
+            context.finish(&result);
+            result.unwrap_or_else(|_| {
+                Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
+                    b"backend unavailable",
+                ))))
+            })
         }
         RouteTarget::Remote { handle } => handle.send_request(request).await,
     }
@@ -332,8 +331,10 @@ async fn route_one(target: RouteTarget, request: Request) -> Reply {
 mod tests {
     use std::sync::Arc;
 
-    use rusty_mcrouter_backend::test_support::{run_local, MockBackend};
-    use rusty_mcrouter_core::{DestinationRoute, Route, RoutingMetricsLayout, RoutingMetricsShard};
+    use rusty_mcrouter_backend::destination;
+    use rusty_mcrouter_backend::test_support::{run_local, MockBackendFactory};
+    use rusty_mcrouter_config::parse;
+    use rusty_mcrouter_core::{build_route, RoutingMetricsLayout, RoutingMetricsShard};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -344,15 +345,29 @@ mod tests {
     /// (SameThread routes inline) but ProxySet demands one.
     async fn session(
         metrics: Arc<FrontendMetricsShard>,
-    ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
+    ) -> (
+        tokio::net::TcpStream,
+        tokio::task::JoinHandle<()>,
+        Arc<RoutingMetricsShard>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (server_stream, _) = listener.accept().await.unwrap();
 
-        let route = DestinationRoute::new(MockBackend::miss()).into_dyn();
-        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
-        let routing_state = RoutingState::new(RoutingMetricsShard::new(layout));
+        let config =
+            parse(r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#)
+                .unwrap();
+        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let routing_metrics = RoutingMetricsShard::new(layout);
+        let routing_state = RoutingState::new(Arc::clone(&routing_metrics));
+        let route = build_route(
+            &config,
+            &MockBackendFactory::new(),
+            &destination::Config::default(),
+            routing_state.layout(),
+        )
+        .unwrap();
         let (tx, _rx) = mpsc::channel::<ProxyMessage>(1);
         let proxies = ProxySet::new(vec![ProxyHandle::new(0, tx)]);
 
@@ -368,7 +383,7 @@ mod tests {
         let task = tokio::task::spawn_local(async move {
             let _ = conn.run().await;
         });
-        (client, task)
+        (client, task, routing_metrics)
     }
 
     async fn read_lines(client: &mut tokio::net::TcpStream, n: usize) -> Vec<String> {
@@ -392,7 +407,7 @@ mod tests {
     async fn frontend_metrics_account_a_pipelined_session() {
         run_local(async {
             let metrics = FrontendMetricsShard::new();
-            let (mut client, task) = session(Arc::clone(&metrics)).await;
+            let (mut client, task, routing_metrics) = session(Arc::clone(&metrics)).await;
 
             client
                 .write_all(b"mg foo v\r\nmn\r\nnot_a_command\r\n")
@@ -419,6 +434,9 @@ mod tests {
                 "the CLIENT_ERROR is a client-visible error reply"
             );
             assert_eq!(metrics.processing.load(), 0);
+            assert_eq!(routing_metrics.pools[0].requests.load(), 1);
+            assert_eq!(routing_metrics.pools[0].completed_requests.load(), 1);
+            assert_eq!(routing_metrics.pools[0].final_errors.load(), 0);
 
             // client disconnect ends the session; the gauge must not leak
             drop(client);
