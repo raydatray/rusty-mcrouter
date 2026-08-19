@@ -14,8 +14,8 @@ use rusty_mcrouter_observability::{
     Observability,
 };
 use rusty_mcrouter_proxy::{
-    proxy_thread_main, FrontendMetricsShard, ListenerConfig, ProxyCommand, ProxyHandle,
-    ProxyRequest, ProxySet, ProxyThreadConfig, ThreadMode,
+    FrontendMetricsShard, ListenerConfig, ProxyCommand, ProxyHandle, ProxyRequest, ProxySet,
+    ProxyThread, ProxyThreadConfig, ThreadMode,
 };
 use tokio::sync::mpsc;
 
@@ -199,19 +199,18 @@ fn main() -> anyhow::Result<()> {
     let (command_txs, command_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
         .map(|_| mpsc::channel::<ProxyCommand>(PROXY_COMMAND_CAPACITY))
         .unzip();
-    let proxies = ProxySet::new(
-        request_txs
-            .iter()
-            .zip(&command_txs)
-            .enumerate()
-            .map(|(id, (request_tx, command_tx))| {
-                ProxyHandle::new(id, request_tx.clone(), command_tx.clone())
-            })
-            .collect(),
-    );
+    let proxy_handles: Vec<_> = request_txs
+        .iter()
+        .zip(&command_txs)
+        .enumerate()
+        .map(|(id, (request_tx, command_tx))| {
+            ProxyHandle::new(id, request_tx.clone(), command_tx.clone())
+        })
+        .collect();
+    let proxies = ProxySet::new(proxy_handles.clone());
 
     let use_reuseport = num_listening_sockets > 1;
-    let mut handles = Vec::with_capacity(args.num_proxies);
+    let mut proxy_threads = Vec::with_capacity(args.num_proxies);
     let mut bound_addr: Option<SocketAddr> = None;
     let mut work_rxs_iter = work_rxs.into_iter();
     let mut request_rxs_iter = request_rxs.into_iter();
@@ -222,7 +221,7 @@ fn main() -> anyhow::Result<()> {
     let mut frontend_metric_shards = Vec::with_capacity(args.num_proxies);
     let mut routing_metric_shards = Vec::with_capacity(args.num_proxies);
 
-    for proxy_id in 0..args.num_proxies {
+    for (proxy_id, proxy_handle) in proxy_handles.into_iter().enumerate() {
         let has_listener = proxy_id < num_listening_sockets;
         let work_rx = work_rxs_iter.next().expect("one work_rx per proxy thread");
         let request_rx = request_rxs_iter
@@ -268,29 +267,11 @@ fn main() -> anyhow::Result<()> {
             sweep_interval,
         };
 
-        let (ready_tx, ready_rx) =
-            std::sync::mpsc::sync_channel::<anyhow::Result<Option<SocketAddr>>>(1);
-
-        let handle = std::thread::Builder::new()
-            .name(format!("proxy-{proxy_id}"))
-            .spawn(move || {
-                if let Err(e) = proxy_thread_main(cfg, ready_tx) {
-                    eprintln!("proxy-{proxy_id} terminated: {e}");
-                    std::process::exit(1);
-                }
-            })?;
-
-        match ready_rx.recv() {
-            Ok(Ok(maybe_addr)) => {
-                if let Some(addr) = maybe_addr {
-                    bound_addr.get_or_insert(addr);
-                }
-            }
-            Ok(Err(e)) => anyhow::bail!("proxy-{proxy_id} startup failed: {e}"),
-            Err(_) => anyhow::bail!("proxy-{proxy_id} died during startup"),
+        let (thread, maybe_addr) = ProxyThread::spawn(proxy_handle, cfg)?;
+        if let Some(addr) = maybe_addr {
+            bound_addr.get_or_insert(addr);
         }
-
-        handles.push(handle);
+        proxy_threads.push(thread);
     }
 
     // drop main's sender copies
@@ -347,8 +328,8 @@ fn main() -> anyhow::Result<()> {
         args.config.display()
     );
 
-    for handle in handles {
-        let _ = handle.join();
+    for thread in proxy_threads {
+        thread.join()?;
     }
 
     Ok(())
