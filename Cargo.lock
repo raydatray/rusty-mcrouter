@@ -1213,6 +1213,7 @@ dependencies = [
  "clap",
  "rusty-mcrouter-backend",
  "rusty-mcrouter-config",
+ "rusty-mcrouter-core",
  "rusty-mcrouter-observability",
  "rusty-mcrouter-proxy",
  "testcontainers",
@@ -1247,6 +1248,7 @@ dependencies = [
  "bytes",
  "rusty-mcrouter-backend",
  "rusty-mcrouter-config",
+ "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-protocol",
  "serde_json",
  "thiserror 2.0.18",
@@ -1258,6 +1260,7 @@ name = "rusty-mcrouter-observability"
 version = "0.1.0"
 dependencies = [
  "rusty-mcrouter-backend",
+ "rusty-mcrouter-core",
  "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-proxy",
  "tokio",

@@ -8,6 +8,7 @@ use rusty_mcrouter_backend::classify::ResultCode;
 use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
 use rusty_mcrouter_backend::metrics::{BackendMetricsShard, CommandKind};
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
+use rusty_mcrouter_core::{FailoverErrorClass, FailoverPolicyKind, RoutingMetricsShard};
 use rusty_mcrouter_observability_primitives::Counter;
 use rusty_mcrouter_proxy::FrontendMetricsShard;
 
@@ -87,6 +88,91 @@ impl MetricsSource for FrontendRequestsSource {
                 "rusty_mcrouter_requests_total",
                 &[("command", cmd.prometheus_label())],
                 total,
+            );
+        }
+    }
+}
+
+pub struct RoutingSource {
+    pub shards: Vec<Arc<RoutingMetricsShard>>,
+}
+
+impl RoutingSource {
+    fn sum(&self, load: impl Fn(&RoutingMetricsShard) -> u64) -> u64 {
+        self.shards.iter().map(|shard| load(shard)).sum()
+    }
+}
+
+impl MetricsSource for RoutingSource {
+    fn encode(&self, out: &mut MetricsText) {
+        out.counter(
+            "rusty_mcrouter_dev_null_requests_total",
+            &[],
+            self.sum(|shard| shard.dev_null_requests.load()),
+        );
+
+        for policy in FailoverPolicyKind::ALL {
+            let labels = &[("policy", policy.prometheus_label())];
+            out.counter(
+                "rusty_mcrouter_failover_total",
+                labels,
+                self.sum(|shard| shard.failover[policy as usize].load()),
+            );
+            out.counter(
+                "rusty_mcrouter_failover_exhausted_total",
+                labels,
+                self.sum(|shard| shard.failover_exhausted[policy as usize].load()),
+            );
+        }
+
+        for class in FailoverErrorClass::ALL {
+            out.counter(
+                "rusty_mcrouter_failover_policy_errors_total",
+                &[("class", class.prometheus_label())],
+                self.sum(|shard| shard.failover_policy_errors[class as usize].load()),
+            );
+        }
+
+        let Some(first) = self.shards.first() else {
+            return;
+        };
+
+        debug_assert!(self
+            .shards
+            .iter()
+            .all(|shard| Arc::ptr_eq(first.layout(), shard.layout())));
+
+        for index in 0..first.layout().pools_len() {
+            let pool = first
+                .layout()
+                .pool_name(index)
+                .expect("index came from layout length");
+            let labels = &[("pool", pool)];
+
+            out.counter(
+                "rusty_mcrouter_pool_requests_total",
+                labels,
+                self.sum(|shard| shard.pools[index].requests.load()),
+            );
+            out.counter(
+                "rusty_mcrouter_pool_duration_us_sum_total",
+                labels,
+                self.sum(|shard| shard.pools[index].duration_us_sum.load()),
+            );
+            out.counter(
+                "rusty_mcrouter_pool_completed_requests_total",
+                labels,
+                self.sum(|shard| shard.pools[index].completed_requests.load()),
+            );
+            out.counter(
+                "rusty_mcrouter_pool_requests_failed_total",
+                labels,
+                self.sum(|shard| shard.pools[index].final_errors.load()),
+            );
+            out.counter(
+                "rusty_mcrouter_pool_total_duration_us_sum_total",
+                labels,
+                self.sum(|shard| shard.pools[index].total_duration_us_sum.load()),
             );
         }
     }
@@ -274,6 +360,54 @@ mod tests {
             shards: vec![shard],
         });
         assert!(text.contains("rusty_mcrouter_requests_failed_total 1\n"));
+    }
+
+    #[test]
+    fn routing_source_sums_shards_and_pool_metrics() {
+        let layout = rusty_mcrouter_core::RoutingMetricsLayout::new([
+            "primary".to_string(),
+            "backup".to_string(),
+        ]);
+        let s1 = RoutingMetricsShard::new(Arc::clone(&layout));
+        let s2 = RoutingMetricsShard::new(layout);
+
+        s1.dev_null_requests.add(2);
+        s2.dev_null_requests.inc();
+        s1.failover[FailoverPolicyKind::InOrder as usize].inc();
+        s2.failover_exhausted[FailoverPolicyKind::InOrder as usize].inc();
+        s2.failover_policy_errors[FailoverErrorClass::Tko as usize].add(3);
+        s1.pools[0].requests.add(4);
+        s2.pools[0].requests.add(5);
+        s2.pools[0].final_errors.inc();
+
+        let text = render(RoutingSource {
+            shards: vec![s1, s2],
+        });
+
+        assert!(text.contains("rusty_mcrouter_dev_null_requests_total 3\n"));
+        assert!(text.contains("rusty_mcrouter_failover_total{policy=\"inorder\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_failover_exhausted_total{policy=\"inorder\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_failover_policy_errors_total{class=\"tko\"} 3\n"));
+        assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"primary\"} 9\n"));
+        assert!(text.contains("rusty_mcrouter_pool_requests_failed_total{pool=\"primary\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"backup\"} 0\n"));
+    }
+
+    #[test]
+    fn routing_source_escapes_configured_pool_names() {
+        let layout =
+            rusty_mcrouter_core::RoutingMetricsLayout::new(
+                ["quoted\"pool\\line\nnext".to_string()],
+            );
+        let shard = RoutingMetricsShard::new(layout);
+
+        let text = render(RoutingSource {
+            shards: vec![shard],
+        });
+
+        assert!(text.contains(
+            "rusty_mcrouter_pool_requests_total{pool=\"quoted\\\"pool\\\\line\\nnext\"} 0\n"
+        ));
     }
 
     #[test]

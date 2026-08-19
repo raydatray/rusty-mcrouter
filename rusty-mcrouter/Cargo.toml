@@ -13,6 +13,7 @@ anyhow.workspace = true
 clap.workspace = true
 rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
 rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend" }
+rusty-mcrouter-core = { path = "../rusty-mcrouter-core" }
 rusty-mcrouter-observability = { path = "../rusty-mcrouter-observability" }
 rusty-mcrouter-proxy = { path = "../rusty-mcrouter-proxy" }
 tokio = { workspace = true, features = ["sync"] }

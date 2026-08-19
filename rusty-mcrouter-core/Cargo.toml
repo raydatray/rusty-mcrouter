@@ -12,6 +12,7 @@ workspace = true
 bytes.workspace = true
 rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
 rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend" }
+rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
