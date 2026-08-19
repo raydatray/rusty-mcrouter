@@ -12,7 +12,7 @@ use crate::{
     backend::{PreparedSend, TkoRejection},
     classify::{code_of, ResultCode},
     client::{Config as ClientConfig, ConnectionEvent, ConnectionHandle, DownReason},
-    destination::{config::Config, key::Key, probe, DestinationMetrics},
+    destination::{probe, Config, DestinationKey, DestinationMetrics},
     error::{ConnectError, LocalError, SendError},
     metrics::BackendMetricsShard,
     tko::{DestToken, TkoEvent, TkoTracker},
@@ -20,7 +20,7 @@ use crate::{
 };
 
 pub struct Destination {
-    key: Key,
+    key: DestinationKey,
     token: DestToken,
     tracker: Arc<TkoTracker>,
     conn: ConnectionHandle,
@@ -33,7 +33,7 @@ pub struct Destination {
 
 impl Destination {
     pub fn new(
-        key: Key,
+        key: DestinationKey,
         cfg: Config,
         tracker: Arc<TkoTracker>,
         metrics: Arc<DestinationMetrics>,
@@ -84,7 +84,7 @@ impl Destination {
         self.last_active.get()
     }
 
-    pub fn key(&self) -> &Key {
+    pub fn key(&self) -> &DestinationKey {
         &self.key
     }
 
@@ -317,7 +317,7 @@ mod tests {
         let addr: Arc<str> = Arc::from(server.addr.to_string());
         let tracker = map.tracker_for(&addr, cfg.failures_until_tko);
         let metrics = DestinationMetricsRegistry::new().metrics_for(&tracker);
-        let key = Key {
+        let key = DestinationKey {
             addr,
             reply_timeout: cfg.reply_timeout,
         };
@@ -499,7 +499,7 @@ mod tests {
 
             let addr_b: Arc<str> = Arc::from(server.addr.to_string());
             let metrics_b = DestinationMetricsRegistry::new().metrics_for(&tracker);
-            let key_b = Key {
+            let key_b = DestinationKey {
                 addr: addr_b,
                 reply_timeout: Some(Duration::from_millis(1000)),
             };
@@ -543,7 +543,7 @@ mod tests {
             let tracker = map.tracker_for(&addr, 3);
             let metrics = DestinationMetricsRegistry::new().metrics_for(&tracker);
             let shard = BackendMetricsShard::new();
-            let key = Key {
+            let key = DestinationKey {
                 addr,
                 reply_timeout: Some(Duration::from_millis(1000)),
             };

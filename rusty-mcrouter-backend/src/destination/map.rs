@@ -9,7 +9,7 @@ use std::{
 use tokio::time::Instant;
 
 use crate::{
-    destination::{config::Config, destination::Destination, key::Key, DestinationMetricsRegistry},
+    destination::{Config, Destination, DestinationKey, DestinationMetricsRegistry},
     metrics::BackendMetricsShard,
     tko::{PoolTkoTracker, TkoTrackerMap},
 };
@@ -18,7 +18,7 @@ pub struct Map {
     tko_map: Arc<TkoTrackerMap>,
     metrics_registry: Arc<DestinationMetricsRegistry>,
     shard_metrics: Arc<BackendMetricsShard>,
-    destinations: RefCell<HashMap<Key, Weak<Destination>>>,
+    destinations: RefCell<HashMap<DestinationKey, Weak<Destination>>>,
 }
 
 impl Map {
@@ -43,7 +43,7 @@ impl Map {
 
     pub fn destination(
         &self,
-        key: Key,
+        key: DestinationKey,
         cfg: &Config,
         pool_tracker: Option<Arc<PoolTkoTracker>>,
     ) -> Rc<Destination> {
@@ -155,8 +155,8 @@ mod tests {
         }
     }
 
-    fn key_for(addr: &str, reply_timeout_ms: u64) -> Key {
-        Key {
+    fn key_for(addr: &str, reply_timeout_ms: u64) -> DestinationKey {
+        DestinationKey {
             addr: Arc::from(addr),
             reply_timeout: Some(Duration::from_millis(reply_timeout_ms)),
         }

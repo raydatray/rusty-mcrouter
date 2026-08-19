@@ -6,7 +6,7 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use thiserror::Error;
 
 use crate::classify::ResultCode;
-use crate::destination::{self, Destination, Key, Map};
+use crate::destination::{self, Destination, DestinationKey, Map};
 use crate::error::SendError;
 use crate::tko::FailOpenThresholds;
 
@@ -125,7 +125,7 @@ impl BackendFactory for DestinationFactory {
                 .tko_map()
                 .pool_tracker_for(pool.pool_name, thresholds)
         });
-        let key = Key {
+        let key = DestinationKey {
             addr: Arc::from(server),
             reply_timeout: cfg.reply_timeout,
         };

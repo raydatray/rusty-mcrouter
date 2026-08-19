@@ -1,6 +1,6 @@
 use std::{rc::Weak, time::Duration};
 
-use crate::destination::destination::Destination;
+use crate::destination::Destination;
 
 const PROBE_EXPONENTIAL_FACTOR: f64 = 1.5;
 const PROBE_JITTER_MIN: f64 = 0.05;
