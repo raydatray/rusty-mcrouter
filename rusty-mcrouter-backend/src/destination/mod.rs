@@ -10,6 +10,6 @@ mod probe;
 
 pub use config::Config;
 pub use destination::Destination;
-pub use key::Key;
+pub use key::DestinationKey;
 pub use map::Map;
 pub use metrics::{DestinationMetrics, DestinationMetricsRegistry};
