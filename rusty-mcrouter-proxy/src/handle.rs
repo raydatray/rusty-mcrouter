@@ -57,6 +57,16 @@ impl ProxyHandle {
             .await
             .context("proxy exited before acknowledging shutdown")
     }
+
+    pub(crate) fn shutdown_blocking(&self) -> anyhow::Result<()> {
+        let (acknowledged, acknowledgement) = oneshot::channel();
+        self.command_tx
+            .blocking_send(ProxyCommand::Shutdown { acknowledged })
+            .context("proxy command channel closed")?;
+        acknowledgement
+            .blocking_recv()
+            .context("proxy exited before acknowledging shutdown")
+    }
 }
 
 fn server_error(message: &'static [u8]) -> Reply {
