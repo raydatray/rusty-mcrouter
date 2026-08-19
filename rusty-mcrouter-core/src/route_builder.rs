@@ -321,7 +321,9 @@ mod tests {
     use rusty_mcrouter_config::parse;
     use rusty_mcrouter_protocol::reply::{ErrorReply, GetReply};
     use rusty_mcrouter_protocol::test_support::get;
-    use rusty_mcrouter_protocol::Reply;
+    use rusty_mcrouter_protocol::{Reply, Request};
+
+    use crate::context::test_routing_state;
 
     fn defaults() -> destination::Config {
         destination::Config::default()
@@ -338,11 +340,17 @@ mod tests {
         }
     }
 
+    async fn execute(route: &Rc<dyn DynRoute>, request: Request) -> crate::routes::Result<Reply> {
+        let state = test_routing_state();
+        let context = state.context();
+        route.route_dyn(&context, request).await
+    }
+
     #[tokio::test]
     async fn builds_null_route_from_bare_string() {
         let cfg = parse(r#"{"route": "NullRoute"}"#).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
-        let reply = route.route_dyn(get(b"foo")).await.unwrap();
+        let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
@@ -350,7 +358,7 @@ mod tests {
     async fn builds_null_route_from_object_form() {
         let cfg = parse(r#"{"route": {"type": "NullRoute"}}"#).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
-        let reply = route.route_dyn(get(b"foo")).await.unwrap();
+        let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
@@ -358,7 +366,7 @@ mod tests {
     async fn builds_error_route_from_object_with_message() {
         let cfg = parse(r#"{"route": {"type": "ErrorRoute", "message": "boom"}}"#).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
-        let reply = route.route_dyn(get(b"foo")).await.unwrap();
+        let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(
             reply,
             Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"boom"))))
@@ -369,7 +377,7 @@ mod tests {
     async fn builds_error_route_from_shorthand_with_message_arg() {
         let cfg = parse(r#"{"route": "ErrorRoute|nope"}"#).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
-        let reply = route.route_dyn(get(b"foo")).await.unwrap();
+        let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(
             reply,
             Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"nope"))))
@@ -381,7 +389,7 @@ mod tests {
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
         let cfg = parse(json).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
-        let reply = route.route_dyn(get(b"foo")).await.unwrap();
+        let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
@@ -390,7 +398,7 @@ mod tests {
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": {"type": "PoolRoute", "pool": "P"}}"#;
         let cfg = parse(json).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
-        let reply = route.route_dyn(get(b"foo")).await.unwrap();
+        let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
@@ -440,7 +448,7 @@ mod tests {
         let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"]}}"#;
         let cfg = parse(json).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
-        let reply = route.route_dyn(get(b"foo")).await.unwrap();
+        let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
@@ -449,7 +457,7 @@ mod tests {
         let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": [{"type": "FailoverRoute", "children": ["PoolRoute|A"]}, "PoolRoute|B"]}}"#;
         let cfg = parse(json).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
-        let reply = route.route_dyn(get(b"foo")).await.unwrap();
+        let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
@@ -461,7 +469,7 @@ mod tests {
             Bytes::from_static(b"down"),
         ))));
         let route = build(&cfg, &factory).unwrap();
-        let reply = route.route_dyn(get(b"foo")).await.unwrap();
+        let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(
             reply,
             Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"down"))))

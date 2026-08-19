@@ -3,6 +3,7 @@ use std::rc::Rc;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::failover::{route_code, FailoverErrors, FailoverPolicy};
+use crate::RouteContext;
 
 use super::{DynRoute, Result, Route};
 
@@ -42,11 +43,11 @@ fn is_free_try(result: &Result<Reply>) -> bool {
 }
 
 impl Route for FailoverRoute {
-    async fn route(&self, req: Request) -> Result<Reply> {
+    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
         let mut tries = 0usize;
 
-        let primary = self.children[0].route_dyn(req.clone()).await;
-        let primary_failed = self.errors.should_failover(&req, &primary);
+        let primary = self.children[0].route_dyn(context, request.clone()).await;
+        let primary_failed = self.errors.should_failover(&request, &primary);
         self.policy.record_outcome(0, primary_failed);
         if !primary_failed {
             return primary;
@@ -56,15 +57,15 @@ impl Route for FailoverRoute {
         }
 
         let mut last = primary;
-        for idx in self.policy.failover_order(&req, self.children.len()) {
+        for idx in self.policy.failover_order(&request, self.children.len()) {
             if tries >= self.max_tries {
                 break;
             }
             let Some(child) = self.children.get(idx) else {
                 continue;
             };
-            let reply = child.route_dyn(req.clone()).await;
-            let failed = self.errors.should_failover(&req, &reply);
+            let reply = child.route_dyn(context, request.clone()).await;
+            let failed = self.errors.should_failover(&request, &reply);
             self.policy.record_outcome(idx, failed);
             if !failed {
                 return reply;
@@ -91,6 +92,8 @@ mod tests {
         ArithmeticReply, ArithmeticResult, ErrorReply, GetReply, StoreReply, StoreResult,
     };
     use rusty_mcrouter_protocol::test_support::{get, store};
+
+    use crate::context::test_routing_state;
 
     fn numeric(value: u64) -> Reply {
         Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
@@ -128,6 +131,12 @@ mod tests {
         .unwrap()
     }
 
+    async fn execute(route: &FailoverRoute, request: Request) -> Result<Reply> {
+        let state = test_routing_state();
+        let context = state.context();
+        route.route(&context, request).await
+    }
+
     #[tokio::test]
     async fn transport_errors_fail_over_to_a_healthy_backup() {
         for err in [
@@ -144,7 +153,7 @@ mod tests {
             let backup = MockBackend::replying(numeric(1));
             let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
-            assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(1));
+            assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(1));
             assert_eq!(primary.received().len(), 1);
             assert_eq!(backup.received().len(), 1);
         }
@@ -156,7 +165,7 @@ mod tests {
         let backup = MockBackend::replying(numeric(1));
         let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
-        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(1));
+        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(1));
         assert_eq!(backup.received().len(), 1);
     }
 
@@ -167,7 +176,7 @@ mod tests {
         let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
         assert_eq!(
-            route.route(get(b"k")).await.unwrap(),
+            execute(&route, get(b"k")).await.unwrap(),
             Reply::Get(GetReply::Miss)
         );
         assert!(backup.received().is_empty());
@@ -180,7 +189,7 @@ mod tests {
         let c = MockBackend::replying(numeric(3));
         let route = in_order(vec![dest(a.clone()), dest(b.clone()), dest(c.clone())]);
 
-        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(2));
+        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(2));
         assert_eq!(a.received().len(), 1);
         assert_eq!(b.received().len(), 1);
         assert!(c.received().is_empty());
@@ -192,14 +201,17 @@ mod tests {
             dest(MockBackend::failing(timeout())),
             dest(MockBackend::replying(server_error(b"x"))),
         ]);
-        assert_eq!(route.route(get(b"k")).await.unwrap(), server_error(b"x"));
+        assert_eq!(
+            execute(&route, get(b"k")).await.unwrap(),
+            server_error(b"x")
+        );
 
         let route = in_order(vec![
             dest(MockBackend::failing(timeout())),
             dest(MockBackend::failing(timeout())),
         ]);
         assert!(matches!(
-            route.route(get(b"k")).await,
+            execute(&route, get(b"k")).await,
             Err(RouteError::Backend(SendError::Request(
                 RequestError::Timeout { .. }
             )))
@@ -210,12 +222,12 @@ mod tests {
     async fn single_child_has_no_backup() {
         let only = MockBackend::replying(numeric(1));
         let route = in_order(vec![dest(only.clone())]);
-        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(1));
+        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(1));
         assert_eq!(only.received().len(), 1);
 
         let route = in_order(vec![dest(MockBackend::failing(timeout()))]);
         assert!(matches!(
-            route.route(get(b"k")).await,
+            execute(&route, get(b"k")).await,
             Err(RouteError::Backend(SendError::Request(
                 RequestError::Timeout { .. }
             )))
@@ -247,7 +259,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            route.route(store(b"k", b"v")).await,
+            execute(&route, store(b"k", b"v")).await,
             Err(RouteError::Backend(SendError::Request(
                 RequestError::Timeout { .. }
             )))
@@ -269,7 +281,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(route.route(get(b"k")).await.is_err());
+        assert!(execute(&route, get(b"k")).await.is_err());
         assert!(
             backup.received().is_empty(),
             "budget of 1 must not reach the backup"
@@ -291,7 +303,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(1));
+        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(1));
     }
 
     /// Hard-TKO-class connect failures are also free (is_tko_or_hard_tko).
@@ -310,6 +322,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(route.route(get(b"k")).await.unwrap(), numeric(3));
+        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(3));
     }
 }

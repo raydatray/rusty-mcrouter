@@ -235,7 +235,7 @@ fn main() -> anyhow::Result<()> {
         let routing_metrics = RoutingMetricsShard::new(Arc::clone(&routing_layout));
         backend_metric_shards.push(Arc::clone(&backend_metrics));
         frontend_metric_shards.push(Arc::clone(&frontend_metrics));
-        routing_metric_shards.push(routing_metrics);
+        routing_metric_shards.push(Arc::clone(&routing_metrics));
 
         let cfg = ProxyThreadConfig {
             proxy_id,
@@ -249,6 +249,7 @@ fn main() -> anyhow::Result<()> {
             metrics_registry: Arc::clone(&metrics_registry),
             backend_metrics,
             frontend_metrics,
+            routing_metrics,
             events: observability.events().sink(),
             defaults: defaults.clone(),
             sweep_interval,

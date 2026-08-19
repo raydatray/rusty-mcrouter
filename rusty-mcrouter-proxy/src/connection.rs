@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, rc::Rc};
 
 use bytes::{Bytes, BytesMut};
 use rusty_mcrouter_backend::metrics::CommandKind;
-use rusty_mcrouter_core::DynRoute;
+use rusty_mcrouter_core::{DynRoute, RoutingState};
 use rusty_mcrouter_protocol::meta::{
     DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
 };
@@ -33,6 +33,7 @@ pub struct Connection {
     // routing context (set at creation time)
     current_id: usize,
     local_route: Rc<dyn DynRoute>,
+    routing_state: Rc<RoutingState>,
     proxies: ProxySet,
     mode: ThreadMode,
     // pipeline state
@@ -74,6 +75,7 @@ impl Connection {
         stream: tokio::net::TcpStream,
         current_id: usize,
         local_route: Rc<dyn DynRoute>,
+        routing_state: Rc<RoutingState>,
         proxies: ProxySet,
         mode: ThreadMode,
         metrics: Arc<FrontendMetricsShard>,
@@ -86,6 +88,7 @@ impl Connection {
             writer,
             current_id,
             local_route,
+            routing_state,
             proxies,
             mode,
             buf: BytesMut::with_capacity(READ_BUF_INITIAL_CAPACITY),
@@ -206,23 +209,24 @@ impl Connection {
     /// - which proxy handles it
     /// - if its the same thread
     /// - the local route
-    fn route_target(&self, req: &Request) -> RouteTarget {
-        let handle = self.proxies.choose(self.mode, self.current_id, req);
-        let same_thread = handle.id() == self.current_id;
-
-        RouteTarget {
-            handle,
-            same_thread,
-            route: Rc::clone(&self.local_route),
+    fn route_target(&self, request: &Request) -> RouteTarget {
+        let handle = self.proxies.choose(self.mode, self.current_id, request);
+        if handle.id() == self.current_id {
+            RouteTarget::Local {
+                route: Rc::clone(&self.local_route),
+                routing_state: Rc::clone(&self.routing_state),
+            }
+        } else {
+            RouteTarget::Remote { handle }
         }
     }
 
-    fn submit_single(&self, seq: usize, req: Request) {
-        let target = self.route_target(&req);
+    fn submit_single(&self, seq: usize, request: Request) {
+        let target = self.route_target(&request);
         let completed_tx = self.completed_tx.clone();
 
         tokio::task::spawn_local(async move {
-            let reply = route_one(target, req).await;
+            let reply = route_one(target, request).await;
 
             let _ = completed_tx.send((seq, reply)).await;
         });
@@ -295,27 +299,33 @@ impl Slot {
     }
 }
 
-struct RouteTarget {
-    handle: ProxyHandle,
-    same_thread: bool,
-    route: Rc<dyn DynRoute>,
+enum RouteTarget {
+    Local {
+        route: Rc<dyn DynRoute>,
+        routing_state: Rc<RoutingState>,
+    },
+    Remote {
+        handle: ProxyHandle,
+    },
 }
 
-async fn route_one(target: RouteTarget, req: Request) -> Reply {
-    let RouteTarget {
-        handle,
-        same_thread,
-        route,
-    } = target;
-
-    if same_thread {
-        route.route_dyn(req).await.unwrap_or_else(|_| {
-            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
-                b"backend unavailable",
-            ))))
-        })
-    } else {
-        handle.send_request(req).await
+async fn route_one(target: RouteTarget, request: Request) -> Reply {
+    match target {
+        RouteTarget::Local {
+            route,
+            routing_state,
+        } => {
+            let context = routing_state.context();
+            route
+                .route_dyn(&context, request)
+                .await
+                .unwrap_or_else(|_| {
+                    Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
+                        b"backend unavailable",
+                    ))))
+                })
+        }
+        RouteTarget::Remote { handle } => handle.send_request(request).await,
     }
 }
 
@@ -325,7 +335,7 @@ mod tests {
 
     use rusty_mcrouter_backend::metrics::CommandKind;
     use rusty_mcrouter_backend::test_support::{run_local, MockBackend};
-    use rusty_mcrouter_core::{DestinationRoute, Route};
+    use rusty_mcrouter_core::{DestinationRoute, Route, RoutingMetricsLayout, RoutingMetricsShard};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -343,6 +353,8 @@ mod tests {
         let (server_stream, _) = listener.accept().await.unwrap();
 
         let route = DestinationRoute::new(MockBackend::miss()).into_dyn();
+        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+        let routing_state = RoutingState::new(RoutingMetricsShard::new(layout));
         let (tx, _rx) = mpsc::channel::<ProxyMessage>(1);
         let proxies = ProxySet::new(vec![ProxyHandle::new(0, tx)]);
 
@@ -350,6 +362,7 @@ mod tests {
             server_stream,
             0,
             route,
+            routing_state,
             proxies,
             ThreadMode::SameThread,
             metrics,

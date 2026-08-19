@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use bytes::Bytes;
 use rusty_mcrouter_backend::error::SendError;
-use rusty_mcrouter_core::{DynRoute, RouteError};
+use rusty_mcrouter_core::{DynRoute, RouteError, RoutingState};
 use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::Reply;
 use tokio::sync::mpsc;
@@ -14,6 +14,7 @@ pub struct Proxy {
     #[allow(dead_code)]
     pub id: usize,
     pub route: Rc<dyn DynRoute>,
+    pub routing_state: Rc<RoutingState>,
     pub rx: mpsc::Receiver<ProxyMessage>,
 }
 
@@ -22,25 +23,37 @@ impl Proxy {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 ProxyMessage::Request(req) => {
-                    Self::spawn_request(Rc::clone(&self.route), req);
+                    Self::spawn_request(
+                        Rc::clone(&self.route),
+                        Rc::clone(&self.routing_state),
+                        req,
+                    );
                 }
                 ProxyMessage::Shutdown => break,
             }
         }
     }
 
-    pub fn spawn_request(route: Rc<dyn DynRoute>, req: ProxyRequest) {
+    pub fn spawn_request(
+        route: Rc<dyn DynRoute>,
+        routing_state: Rc<RoutingState>,
+        req: ProxyRequest,
+    ) {
         tokio::task::spawn_local(async move {
-            let reply = route.route_dyn(req.request).await.unwrap_or_else(|err| {
-                let msg = match &err {
-                    // mcrouter's TkoReply wording (verified DestinationRoute.h:177-179)
-                    RouteError::Backend(SendError::Tko { reason }) => {
-                        Bytes::from(format!("Server unavailable. Reason: {reason:?}"))
-                    }
-                    _ => Bytes::from_static(b"backend unavailable"),
-                };
-                Reply::Error(ErrorReply::Server(Some(msg)))
-            });
+            let context = routing_state.context();
+            let reply = route
+                .route_dyn(&context, req.request)
+                .await
+                .unwrap_or_else(|err| {
+                    let msg = match &err {
+                        // mcrouter's TkoReply wording (verified DestinationRoute.h:177-179)
+                        RouteError::Backend(SendError::Tko { reason }) => {
+                            Bytes::from(format!("Server unavailable. Reason: {reason:?}"))
+                        }
+                        _ => Bytes::from_static(b"backend unavailable"),
+                    };
+                    Reply::Error(ErrorReply::Server(Some(msg)))
+                });
 
             let _ = req.reply_tx.send(reply);
         });
@@ -53,13 +66,15 @@ mod tests {
     use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_backend::error::RequestError;
     use rusty_mcrouter_backend::test_support::MockBackend;
-    use rusty_mcrouter_core::{DestinationRoute, Route};
+    use rusty_mcrouter_core::{DestinationRoute, Route, RoutingMetricsLayout, RoutingMetricsShard};
     use rusty_mcrouter_protocol::test_support::get;
     use tokio::sync::oneshot;
     use tokio::task::LocalSet;
 
     async fn boundary_reply(err: SendError) -> Reply {
         let route = DestinationRoute::new(MockBackend::failing(err)).into_dyn();
+        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+        let routing_state = RoutingState::new(RoutingMetricsShard::new(layout));
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = ProxyRequest {
@@ -69,7 +84,7 @@ mod tests {
 
         LocalSet::new()
             .run_until(async move {
-                Proxy::spawn_request(route, req);
+                Proxy::spawn_request(route, routing_state, req);
                 reply_rx.await.unwrap()
             })
             .await

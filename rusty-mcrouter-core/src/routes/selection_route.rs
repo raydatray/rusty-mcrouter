@@ -3,6 +3,7 @@ use std::rc::Rc;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::selectors::Selector;
+use crate::RouteContext;
 
 use super::{DynRoute, Result, Route, RouteError};
 
@@ -18,8 +19,8 @@ impl SelectionRoute {
 }
 
 impl Route for SelectionRoute {
-    async fn route(&self, req: Request) -> Result<Reply> {
-        let idx = self.selector.select(routing_key(&req));
+    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+        let idx = self.selector.select(routing_key(&request));
 
         // defensive bounds check: Ch3/Crc32 are bound to `n` and cannot exceed it,
         // but the trait-object seam can't prove that, so a buggy selector must
@@ -32,7 +33,7 @@ impl Route for SelectionRoute {
                 len: self.children.len(),
             })?;
 
-        child.route_dyn(req).await
+        child.route_dyn(context, request).await
     }
 }
 

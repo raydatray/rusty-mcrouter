@@ -17,6 +17,8 @@ use rusty_mcrouter_backend::error::SendError;
 use rusty_mcrouter_protocol::{Reply, Request};
 use thiserror::Error;
 
+use crate::RouteContext;
+
 #[derive(Debug, Error)]
 pub enum RouteError {
     #[error("backend error: {0}")]
@@ -29,7 +31,11 @@ pub enum RouteError {
 pub type Result<T> = std::result::Result<T, RouteError>;
 
 pub trait Route: 'static {
-    fn route(&self, req: Request) -> impl Future<Output = Result<Reply>>;
+    fn route(
+        &self,
+        context: &RouteContext<'_>,
+        request: Request,
+    ) -> impl Future<Output = Result<Reply>>;
 
     fn into_dyn(self) -> Rc<dyn DynRoute>
     where
@@ -49,11 +55,11 @@ pub trait Route: 'static {
 pub type RouteFuture<'a> = Pin<Box<dyn Future<Output = Result<Reply>> + 'a>>;
 
 pub trait DynRoute: 'static {
-    fn route_dyn<'a>(&'a self, req: Request) -> RouteFuture<'a>;
+    fn route_dyn<'a>(&'a self, context: &'a RouteContext<'_>, request: Request) -> RouteFuture<'a>;
 }
 
 impl<R: Route> DynRoute for R {
-    fn route_dyn<'a>(&'a self, req: Request) -> RouteFuture<'a> {
-        Box::pin(<R as Route>::route(self, req))
+    fn route_dyn<'a>(&'a self, context: &'a RouteContext<'_>, request: Request) -> RouteFuture<'a> {
+        Box::pin(<R as Route>::route(self, context, request))
     }
 }
