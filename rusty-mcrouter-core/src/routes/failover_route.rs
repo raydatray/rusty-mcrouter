@@ -3,17 +3,18 @@ use std::rc::Rc;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::failover::{route_code, FailoverErrors, FailoverPolicy};
-use crate::RouteContext;
+use crate::{
+    FailoverErrorClass, FailoverPolicyKind, RouteContext, RoutingEvent, RoutingEventRecord,
+};
 
-use super::{DynRoute, Result, Route};
+use super::{DynRoute, Result, Route, RouteError};
 
 pub struct FailoverRoute {
     children: Vec<Rc<dyn DynRoute>>,
     errors: FailoverErrors,
     policy: Box<dyn FailoverPolicy>,
-    /// Total attempts INCLUDING the primary. Lives here (not in the policy)
-    /// so the route can grant free tries for TKO fast-fails.
-    max_tries: usize,
+    /// Non-TKO error budget. Candidate-list limits belong to the policy.
+    max_error_tries: usize,
 }
 
 impl FailoverRoute {
@@ -21,7 +22,7 @@ impl FailoverRoute {
         children: Vec<Rc<dyn DynRoute>>,
         errors: FailoverErrors,
         policy: Box<dyn FailoverPolicy>,
-        max_tries: usize,
+        max_error_tries: usize,
     ) -> Option<Self> {
         if children.is_empty() {
             return None;
@@ -30,7 +31,7 @@ impl FailoverRoute {
             children,
             errors,
             policy,
-            max_tries: max_tries.max(1),
+            max_error_tries: max_error_tries.max(1),
         })
     }
 }
@@ -42,34 +43,100 @@ fn is_free_try(result: &Result<Reply>) -> bool {
     route_code(result).is_some_and(|c| c.is_tko_or_hard_tko())
 }
 
+fn route_result_is_error(result: &Result<Reply>) -> bool {
+    match route_code(result) {
+        Some(code) => code.is_error(),
+        None => result.is_err(),
+    }
+}
+
+fn record_policy_error(context: &RouteContext<'_>, result: &Result<Reply>) {
+    let Some(code) = route_code(result) else {
+        return;
+    };
+    let class = if code.is_tko_or_hard_tko() {
+        FailoverErrorClass::Tko
+    } else if code.is_error() {
+        FailoverErrorClass::Result
+    } else {
+        return;
+    };
+    context.metrics().failover_policy_errors[class as usize].inc();
+}
+
+fn record_exhausted(context: &RouteContext<'_>, policy: FailoverPolicyKind, request: &Request) {
+    context.metrics().failover_exhausted[policy as usize].inc();
+    context.emit(RoutingEventRecord {
+        event: RoutingEvent::FailoverTargetsExhausted,
+        policy,
+        command: request.kind(),
+    });
+}
+
 impl Route for FailoverRoute {
     async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+        let policy = self.policy.kind();
         let mut tries = 0usize;
 
         let primary = self.children[0].route_dyn(context, request.clone()).await;
+        let primary_is_error = route_result_is_error(&primary);
         let primary_failed = self.errors.should_failover(&request, &primary);
-        self.policy.record_outcome(0, primary_failed);
+        self.policy.record_outcome(0, primary_is_error);
         if !primary_failed {
             return primary;
         }
+
+        record_policy_error(context, &primary);
+
         if !is_free_try(&primary) {
             tries += 1;
         }
 
+        let mut order = self
+            .policy
+            .failover_order(&request, self.children.len())
+            .into_iter()
+            .peekable();
+
+        if order.peek().is_none() {
+            if primary_is_error {
+                record_exhausted(context, policy, &request);
+            }
+            return primary;
+        }
+
+        context.metrics().failover[policy as usize].inc();
+
         let mut last = primary;
-        for idx in self.policy.failover_order(&request, self.children.len()) {
-            if tries >= self.max_tries {
+        while let Some(index) = order.next() {
+            if tries >= self.max_error_tries {
                 break;
             }
-            let Some(child) = self.children.get(idx) else {
-                continue;
-            };
+            let child = self
+                .children
+                .get(index)
+                .ok_or(RouteError::SelectorOutOfRange {
+                    idx: index,
+                    len: self.children.len(),
+                })?;
             let reply = child.route_dyn(context, request.clone()).await;
+            let is_error = route_result_is_error(&reply);
+            self.policy.record_outcome(index, is_error);
+
+            if order.peek().is_none() {
+                if is_error {
+                    record_exhausted(context, policy, &request);
+                }
+                return reply;
+            }
+
             let failed = self.errors.should_failover(&request, &reply);
-            self.policy.record_outcome(idx, failed);
             if !failed {
                 return reply;
             }
+
+            record_policy_error(context, &reply);
+
             if !is_free_try(&reply) {
                 tries += 1;
             }
@@ -81,6 +148,8 @@ impl Route for FailoverRoute {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::failover::InOrderPolicy;
     use crate::routes::{DestinationRoute, RouteError};
@@ -94,6 +163,7 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::{get, store};
 
     use crate::context::test_routing_state;
+    use crate::{RoutingEventSink, RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
 
     fn numeric(value: u64) -> Reply {
         Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
@@ -135,6 +205,179 @@ mod tests {
         let state = test_routing_state();
         let context = state.context();
         route.route(&context, request).await
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn instrumented_state() -> (
+        Rc<RoutingState>,
+        Arc<RoutingMetricsShard>,
+        Arc<Mutex<Vec<RoutingEventRecord>>>,
+    ) {
+        let metrics = RoutingMetricsShard::new(RoutingMetricsLayout::new(Vec::<String>::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let events = Arc::clone(&events);
+            RoutingEventSink::new(move |event| events.lock().unwrap().push(event))
+        };
+        (
+            RoutingState::with_event_sink(Arc::clone(&metrics), sink),
+            metrics,
+            events,
+        )
+    }
+
+    #[tokio::test]
+    async fn primary_success_records_no_failover_metrics() {
+        let route = in_order(vec![
+            dest(MockBackend::replying(numeric(1))),
+            dest(MockBackend::replying(numeric(2))),
+        ]);
+        let (state, metrics, events) = instrumented_state();
+        let context = state.context();
+
+        assert_eq!(
+            route.route(&context, get(b"key")).await.unwrap(),
+            numeric(1)
+        );
+        assert_eq!(
+            metrics.failover[FailoverPolicyKind::InOrder as usize].load(),
+            0
+        );
+        assert_eq!(
+            metrics.failover_policy_errors[FailoverErrorClass::Result as usize].load(),
+            0
+        );
+        assert_eq!(
+            metrics.failover_exhausted[FailoverPolicyKind::InOrder as usize].load(),
+            0
+        );
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn exhausted_targets_update_metrics_and_emit_once() {
+        let route = in_order(vec![
+            dest(MockBackend::failing(timeout())),
+            dest(MockBackend::failing(timeout())),
+        ]);
+        let (state, metrics, events) = instrumented_state();
+        let context = state.context();
+
+        assert!(route.route(&context, get(b"key")).await.is_err());
+        assert_eq!(
+            metrics.failover[FailoverPolicyKind::InOrder as usize].load(),
+            1
+        );
+        assert_eq!(
+            metrics.failover_exhausted[FailoverPolicyKind::InOrder as usize].load(),
+            1
+        );
+        assert_eq!(
+            metrics.failover_policy_errors[FailoverErrorClass::Result as usize].load(),
+            1
+        );
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, RoutingEvent::FailoverTargetsExhausted);
+        assert_eq!(events[0].policy, FailoverPolicyKind::InOrder);
+        assert_eq!(events[0].command, rusty_mcrouter_protocol::RequestKind::Get);
+    }
+
+    #[tokio::test]
+    async fn primary_and_middle_errors_are_policy_errors_but_terminal_is_not() {
+        let route = in_order(vec![
+            dest(MockBackend::failing(timeout())),
+            dest(MockBackend::failing(timeout())),
+            dest(MockBackend::failing(timeout())),
+        ]);
+        let (state, metrics, events) = instrumented_state();
+        let context = state.context();
+
+        assert!(route.route(&context, get(b"key")).await.is_err());
+        assert_eq!(
+            metrics.failover_policy_errors[FailoverErrorClass::Result as usize].load(),
+            2
+        );
+        assert_eq!(
+            metrics.failover_exhausted[FailoverPolicyKind::InOrder as usize].load(),
+            1
+        );
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn single_target_exhaustion_counts_the_primary_policy_error() {
+        let route = in_order(vec![dest(MockBackend::failing(timeout()))]);
+        let (state, metrics, events) = instrumented_state();
+        let context = state.context();
+
+        assert!(route.route(&context, get(b"key")).await.is_err());
+        assert_eq!(
+            metrics.failover[FailoverPolicyKind::InOrder as usize].load(),
+            0
+        );
+        assert_eq!(
+            metrics.failover_exhausted[FailoverPolicyKind::InOrder as usize].load(),
+            1
+        );
+        assert_eq!(
+            metrics.failover_policy_errors[FailoverErrorClass::Result as usize].load(),
+            1
+        );
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tko_and_hard_tko_policy_errors_use_tko_class() {
+        for error in [tko(), SendError::Connect(ConnectError::Timeout)] {
+            let route = in_order(vec![
+                dest(MockBackend::failing(error)),
+                dest(MockBackend::replying(numeric(1))),
+            ]);
+            let (state, metrics, _events) = instrumented_state();
+            let context = state.context();
+
+            assert_eq!(
+                route.route(&context, get(b"key")).await.unwrap(),
+                numeric(1)
+            );
+            assert_eq!(
+                metrics.failover_policy_errors[FailoverErrorClass::Tko as usize].load(),
+                1
+            );
+            assert_eq!(
+                metrics.failover_exhausted[FailoverPolicyKind::InOrder as usize].load(),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn error_budget_stop_is_not_target_exhaustion() {
+        let route = FailoverRoute::new(
+            vec![
+                dest(MockBackend::failing(timeout())),
+                dest(MockBackend::replying(numeric(1))),
+            ],
+            FailoverErrors::default(),
+            Box::new(InOrderPolicy),
+            1,
+        )
+        .unwrap();
+        let (state, metrics, events) = instrumented_state();
+        let context = state.context();
+
+        assert!(route.route(&context, get(b"key")).await.is_err());
+        assert_eq!(
+            metrics.failover[FailoverPolicyKind::InOrder as usize].load(),
+            1
+        );
+        assert_eq!(
+            metrics.failover_exhausted[FailoverPolicyKind::InOrder as usize].load(),
+            0
+        );
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
