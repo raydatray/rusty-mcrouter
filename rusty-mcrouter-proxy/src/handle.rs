@@ -1,19 +1,29 @@
+use anyhow::Context;
 use bytes::Bytes;
 use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::message::{ProxyMessage, ProxyRequest};
+use crate::message::{ProxyCommand, ProxyRequest};
 
 #[derive(Clone)]
 pub struct ProxyHandle {
     id: usize,
-    tx: mpsc::Sender<ProxyMessage>,
+    request_tx: mpsc::Sender<ProxyRequest>,
+    command_tx: mpsc::Sender<ProxyCommand>,
 }
 
 impl ProxyHandle {
-    pub fn new(id: usize, tx: mpsc::Sender<ProxyMessage>) -> Self {
-        Self { id, tx }
+    pub fn new(
+        id: usize,
+        request_tx: mpsc::Sender<ProxyRequest>,
+        command_tx: mpsc::Sender<ProxyCommand>,
+    ) -> Self {
+        Self {
+            id,
+            request_tx,
+            command_tx,
+        }
     }
 
     pub fn id(&self) -> usize {
@@ -24,8 +34,8 @@ impl ProxyHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         if self
-            .tx
-            .send(ProxyMessage::Request(ProxyRequest { request, reply_tx }))
+            .request_tx
+            .send(ProxyRequest { request, reply_tx })
             .await
             .is_err()
         {
@@ -37,10 +47,15 @@ impl ProxyHandle {
             .unwrap_or_else(|_| server_error(b"proxy dropped request"))
     }
 
-    // todo - graceful shutdown: unused until the binary handles signals
-    #[allow(dead_code)]
-    pub async fn shutdown(&self) {
-        let _ = self.tx.send(ProxyMessage::Shutdown).await;
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
+        let (acknowledged, acknowledgement) = oneshot::channel();
+        self.command_tx
+            .send(ProxyCommand::Shutdown { acknowledged })
+            .await
+            .context("proxy command channel closed")?;
+        acknowledgement
+            .await
+            .context("proxy exited before acknowledging shutdown")
     }
 }
 

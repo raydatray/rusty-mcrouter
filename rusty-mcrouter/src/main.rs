@@ -14,8 +14,8 @@ use rusty_mcrouter_observability::{
     Observability,
 };
 use rusty_mcrouter_proxy::{
-    proxy_thread_main, FrontendMetricsShard, ListenerConfig, ProxyHandle, ProxyMessage, ProxySet,
-    ProxyThreadConfig, ThreadMode,
+    proxy_thread_main, FrontendMetricsShard, ListenerConfig, ProxyCommand, ProxyHandle,
+    ProxyRequest, ProxySet, ProxyThreadConfig, ThreadMode,
 };
 use tokio::sync::mpsc;
 
@@ -27,7 +27,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 const WORK_CHANNEL_CAPACITY: usize = 1024;
-const PROXY_CHANNEL_CAPACITY: usize = 1024;
+const PROXY_REQUEST_CAPACITY: usize = 1024;
+const PROXY_COMMAND_CAPACITY: usize = 16;
 
 #[derive(Parser)]
 struct Args {
@@ -192,14 +193,20 @@ fn main() -> anyhow::Result<()> {
         .map(|_| mpsc::channel::<std::net::TcpStream>(WORK_CHANNEL_CAPACITY))
         .unzip();
 
-    let (proxy_txs, proxy_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
-        .map(|_| mpsc::channel::<ProxyMessage>(PROXY_CHANNEL_CAPACITY))
+    let (request_txs, request_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
+        .map(|_| mpsc::channel::<ProxyRequest>(PROXY_REQUEST_CAPACITY))
+        .unzip();
+    let (command_txs, command_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
+        .map(|_| mpsc::channel::<ProxyCommand>(PROXY_COMMAND_CAPACITY))
         .unzip();
     let proxies = ProxySet::new(
-        proxy_txs
+        request_txs
             .iter()
+            .zip(&command_txs)
             .enumerate()
-            .map(|(id, tx)| ProxyHandle::new(id, tx.clone()))
+            .map(|(id, (request_tx, command_tx))| {
+                ProxyHandle::new(id, request_tx.clone(), command_tx.clone())
+            })
             .collect(),
     );
 
@@ -207,7 +214,8 @@ fn main() -> anyhow::Result<()> {
     let mut handles = Vec::with_capacity(args.num_proxies);
     let mut bound_addr: Option<SocketAddr> = None;
     let mut work_rxs_iter = work_rxs.into_iter();
-    let mut proxy_rxs_iter = proxy_rxs.into_iter();
+    let mut request_rxs_iter = request_rxs.into_iter();
+    let mut command_rxs_iter = command_rxs.into_iter();
     // per-thread counter shards, created here so the scrape sources hold
     // the same Arcs the threads write
     let mut backend_metric_shards = Vec::with_capacity(args.num_proxies);
@@ -217,9 +225,12 @@ fn main() -> anyhow::Result<()> {
     for proxy_id in 0..args.num_proxies {
         let has_listener = proxy_id < num_listening_sockets;
         let work_rx = work_rxs_iter.next().expect("one work_rx per proxy thread");
-        let proxy_rx = proxy_rxs_iter
+        let request_rx = request_rxs_iter
             .next()
-            .expect("one proxy_rx per proxy thread");
+            .expect("one request_rx per proxy thread");
+        let command_rx = command_rxs_iter
+            .next()
+            .expect("one command_rx per proxy thread");
         let listener_config = if has_listener {
             Some(ListenerConfig {
                 listen_addr,
@@ -241,7 +252,8 @@ fn main() -> anyhow::Result<()> {
             proxy_id,
             config: Arc::clone(&config),
             work_rx,
-            proxy_rx,
+            request_rx,
+            command_rx,
             proxies: proxies.clone(),
             thread_mode: ThreadMode::SameThread,
             listener_config,
@@ -285,7 +297,8 @@ fn main() -> anyhow::Result<()> {
     // - each thread keeps its own clones (work_txs inside listener_config, proxy senders inside the ProxySet)
     // - the queues stay open until the threads terminate
     drop(work_txs);
-    drop(proxy_txs);
+    drop(request_txs);
+    drop(command_txs);
     drop(proxies);
 
     observability.register(Box::new(BackendScalarsSource {
