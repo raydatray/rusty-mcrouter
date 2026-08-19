@@ -20,5 +20,6 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend", features = ["testing"] }
+rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol", features = ["testing"] }
 testcontainers.workspace = true
 tokio = { workspace = true, features = ["full"] }
