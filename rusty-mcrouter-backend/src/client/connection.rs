@@ -11,8 +11,8 @@ use tokio::{
 
 use crate::{
     client::{
-        config::Config,
-        types::{Command, ConnectionCommand, ConnectionEvent, DownReason, Inflight, Payload},
+        types::{Command, ConnectionCommand, Inflight, Payload},
+        BackendConnectionConfig, ConnectionEvent, DownReason,
     },
     error::{ConnectError, LocalError, ProtocolError, RequestError, SendError},
     metrics::BackendMetricsShard,
@@ -20,7 +20,7 @@ use crate::{
 
 pub(crate) struct Connection {
     addr: Arc<str>,
-    cfg: Config,
+    cfg: BackendConnectionConfig,
     rx: mpsc::Receiver<ConnectionCommand>,
     events: Box<dyn Fn(ConnectionEvent)>,
     shard_metrics: Arc<BackendMetricsShard>,
@@ -41,7 +41,7 @@ enum PipelineExit {
 impl Connection {
     pub(crate) fn new(
         addr: Arc<str>,
-        cfg: Config,
+        cfg: BackendConnectionConfig,
         rx: mpsc::Receiver<ConnectionCommand>,
         events: Box<dyn Fn(ConnectionEvent)>,
         shard_metrics: Arc<BackendMetricsShard>,
@@ -422,7 +422,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
-    use crate::client::config::Config;
+    use crate::client::BackendConnectionConfig;
 
     type ReplyRx = oneshot::Receiver<Result<Reply, SendError>>;
 
@@ -430,7 +430,7 @@ mod tests {
         let (_tx, rx) = mpsc::channel(1);
         Connection::new(
             Arc::from("127.0.0.1:0"),
-            Config::default(),
+            BackendConnectionConfig::default(),
             rx,
             Box::new(|_| {}),
             BackendMetricsShard::new(),

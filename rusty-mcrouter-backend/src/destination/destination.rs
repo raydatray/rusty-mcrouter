@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use crate::{
     backend::{PreparedSend, TkoRejection},
     classify::{code_of, ResultCode},
-    client::{Config as ClientConfig, ConnectionEvent, ConnectionHandle, DownReason},
+    client::{BackendConnectionConfig, ConnectionEvent, ConnectionHandle, DownReason},
     destination::{probe, DestinationConfig, DestinationKey, DestinationMetrics},
     error::{ConnectError, LocalError, SendError},
     metrics::BackendMetricsShard,
@@ -49,12 +49,12 @@ impl Destination {
                 }) as Box<dyn Fn(ConnectionEvent)>
             };
 
-            let client_cfg = ClientConfig {
+            let connection_cfg = BackendConnectionConfig {
                 connect_timeout: cfg.connect_timeout,
                 connect_timeout_retries: cfg.connect_timeout_retries,
                 write_timeout: cfg.reply_timeout,
                 reply_timeout: cfg.reply_timeout,
-                ..ClientConfig::default()
+                ..BackendConnectionConfig::default()
             };
 
             let addr = Arc::clone(&key.addr);
@@ -62,7 +62,12 @@ impl Destination {
                 key,
                 token: DestToken::allocate(),
                 tracker,
-                conn: ConnectionHandle::spawn(addr, client_cfg, events, Arc::clone(&shard_metrics)),
+                conn: ConnectionHandle::spawn(
+                    addr,
+                    connection_cfg,
+                    events,
+                    Arc::clone(&shard_metrics),
+                ),
                 cfg,
                 probe: RefCell::new(None),
                 metrics,
