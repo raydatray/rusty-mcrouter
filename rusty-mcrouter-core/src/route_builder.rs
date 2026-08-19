@@ -117,9 +117,12 @@ impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
                 for child in children {
                     built.push(self.build_handle(child)?);
                 }
+                if built.is_empty() {
+                    return Err(BuildError::EmptyFailover);
+                }
                 let errors = build_failover_errors(failover_errors);
-                let (policy, max_tries) = build_failover_policy(failover_policy, built.len());
-                FailoverRoute::new(built, errors, policy, max_tries)
+                let (policy, max_error_tries) = build_failover_policy(failover_policy, built.len());
+                FailoverRoute::new(built, errors, policy, max_error_tries)
                     .map(Route::into_dyn)
                     .ok_or(BuildError::EmptyFailover)
             }
@@ -301,15 +304,16 @@ fn build_failover_errors(cfg: &FailoverErrorsConfig) -> FailoverErrors {
     }
 }
 
-/// Returns the policy plus the route's try budget (attempts INCLUDING the
-/// primary). InOrder has no configured budget: every child may be tried,
-/// matching mcrouter's default of children.size().
+/// Returns the policy plus its non-TKO error budget. Neither currently
+/// configured policy limits errors separately: least-failures max_tries caps
+/// its candidate sequence inside the policy.
 fn build_failover_policy(cfg: &FailoverPolicyConfig, n: usize) -> (Box<dyn FailoverPolicy>, usize) {
     match cfg {
-        FailoverPolicyConfig::InOrder => (Box::new(InOrderPolicy), n),
-        FailoverPolicyConfig::LeastFailures { max_tries } => {
-            (Box::new(LeastFailuresPolicy::new(n)), *max_tries)
-        }
+        FailoverPolicyConfig::InOrder => (Box::new(InOrderPolicy), usize::MAX),
+        FailoverPolicyConfig::LeastFailures { max_tries } => (
+            Box::new(LeastFailuresPolicy::new(n, *max_tries)),
+            usize::MAX,
+        ),
     }
 }
 
@@ -439,6 +443,16 @@ mod tests {
     #[test]
     fn errors_on_empty_failover_children() {
         let cfg = parse(r#"{"route": {"type": "FailoverRoute", "children": []}}"#).unwrap();
+        let err = expect_err(&cfg, &MockBackendFactory::new());
+        assert!(matches!(err, BuildError::EmptyFailover));
+    }
+
+    #[test]
+    fn empty_least_failures_returns_build_error_instead_of_panicking() {
+        let cfg = parse(
+            r#"{"route": {"type": "FailoverRoute", "children": [], "failover_policy": {"type": "LeastFailuresPolicy", "max_tries": 1}}}"#,
+        )
+        .unwrap();
         let err = expect_err(&cfg, &MockBackendFactory::new());
         assert!(matches!(err, BuildError::EmptyFailover));
     }
