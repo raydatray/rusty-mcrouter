@@ -84,6 +84,14 @@ impl EventConsumer {
         event
     }
 
+    pub fn try_recv(&mut self) -> Option<Event> {
+        let event = self.rx.try_recv().ok();
+        if event.is_some() {
+            self.warn_if_shedding_events();
+        }
+        event
+    }
+
     pub async fn run(mut self) {
         while let Some(event) = self.recv().await {
             logging::write(&event);

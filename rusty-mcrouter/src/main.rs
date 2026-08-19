@@ -1,3 +1,5 @@
+mod control;
+
 use clap::Parser;
 use rusty_mcrouter_backend::{
     destination::{self, DestinationMetricsRegistry},
@@ -18,6 +20,8 @@ use rusty_mcrouter_proxy::{
     ProxyThread, ProxyThreadConfig, ThreadMode,
 };
 use tokio::sync::mpsc;
+
+use crate::control::ControlThread;
 
 use std::{
     io::Write,
@@ -312,7 +316,8 @@ fn main() -> anyhow::Result<()> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     }));
-    let metrics_bound = observability.spawn(metrics_addr)?;
+    let (metrics_bound, observability_parts) = observability.into_parts(metrics_addr)?;
+    let control_thread = ControlThread::spawn(observability_parts)?;
 
     let addr =
         bound_addr.ok_or_else(|| anyhow::anyhow!("no proxy thread reported a bound address"))?;
@@ -332,6 +337,7 @@ fn main() -> anyhow::Result<()> {
     for thread in proxy_threads {
         thread.join()?;
     }
+    control_thread.shutdown()?;
 
     Ok(())
 }
