@@ -8,4 +8,4 @@ pub mod test_support;
 
 pub use key::Key;
 pub use reply::Reply;
-pub use request::Request;
+pub use request::{Request, RequestKind};

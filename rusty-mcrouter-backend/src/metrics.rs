@@ -1,54 +1,9 @@
 use std::sync::Arc;
 
 use rusty_mcrouter_observability_primitives::{Counter, Gauge};
-use rusty_mcrouter_protocol::Request;
+use rusty_mcrouter_protocol::RequestKind;
 
 use crate::classify::{ResultCode, RESULT_CODE_COUNT};
-
-#[derive(Copy, Clone, Eq, Debug, PartialEq)]
-#[repr(u8)]
-pub enum CommandKind {
-    Get = 0,
-    Store,
-    Delete,
-    Arithmetic,
-    Debug,
-    Version,
-}
-
-pub const COMMAND_KIND_COUNT: usize = 6;
-
-impl CommandKind {
-    pub fn of(request: &Request) -> Self {
-        match request {
-            Request::Get(_) => CommandKind::Get,
-            Request::Store(_) => CommandKind::Store,
-            Request::Delete(_) => CommandKind::Delete,
-            Request::Arithmetic(_) => CommandKind::Arithmetic,
-            Request::Debug(_) => CommandKind::Debug,
-        }
-    }
-
-    pub const ALL: [CommandKind; COMMAND_KIND_COUNT] = [
-        CommandKind::Get,
-        CommandKind::Store,
-        CommandKind::Delete,
-        CommandKind::Arithmetic,
-        CommandKind::Debug,
-        CommandKind::Version,
-    ];
-
-    pub fn prometheus_label(self) -> &'static str {
-        match self {
-            CommandKind::Get => "mg",
-            CommandKind::Store => "ms",
-            CommandKind::Delete => "md",
-            CommandKind::Arithmetic => "ma",
-            CommandKind::Debug => "me",
-            CommandKind::Version => "version",
-        }
-    }
-}
 
 #[derive(Default)]
 #[repr(align(64))]
@@ -56,7 +11,7 @@ impl CommandKind {
 // thread's shards share one cache line
 pub struct BackendMetricsShard {
     // monotonic counters
-    pub requests: [[Counter; RESULT_CODE_COUNT]; COMMAND_KIND_COUNT],
+    pub requests: [[Counter; RESULT_CODE_COUNT]; RequestKind::COUNT],
     pub latency_us_sum: Counter,
     pub connections_opened: Counter,
     pub connections_closed: Counter,
@@ -78,13 +33,13 @@ impl BackendMetricsShard {
         Arc::new(Self::default())
     }
 
-    pub fn record_send(&self, cmd: CommandKind, code: ResultCode, latency_us: u64) {
-        self.requests[cmd as usize][code as usize].inc();
+    pub fn record_send(&self, kind: RequestKind, code: ResultCode, latency_us: u64) {
+        self.requests[kind as usize][code as usize].inc();
         self.latency_us_sum.add(latency_us);
     }
 
-    pub fn record_result(&self, cmd: CommandKind, code: ResultCode) {
-        self.requests[cmd as usize][code as usize].inc();
+    pub fn record_result(&self, kind: RequestKind, code: ResultCode) {
+        self.requests[kind as usize][code as usize].inc();
     }
 }
 
@@ -92,12 +47,12 @@ impl BackendMetricsShard {
 mod tests {
     use super::*;
 
-    /// COMMAND_KIND_COUNT indexes the counter array; every discriminant
-    /// must fit. (same pattern as classify.rs's RESULT_CODE_COUNT test)
+    /// RequestKind::COUNT indexes the counter array; every discriminant must
+    /// fit. (same pattern as classify.rs's RESULT_CODE_COUNT test)
     #[test]
-    fn command_discriminants_fit_the_array() {
-        for cmd in CommandKind::ALL {
-            assert!((cmd as usize) < COMMAND_KIND_COUNT, "for {cmd:?}");
+    fn request_kind_discriminants_fit_the_array() {
+        for kind in RequestKind::ALL {
+            assert!((kind as usize) < RequestKind::COUNT, "for {kind:?}");
         }
     }
 
@@ -106,26 +61,26 @@ mod tests {
     #[test]
     fn every_command_result_cell_is_distinct() {
         let metrics = BackendMetricsShard::new();
-        for cmd in 0..COMMAND_KIND_COUNT {
+        for kind in 0..RequestKind::COUNT {
             for code in 0..RESULT_CODE_COUNT {
-                let cell = &metrics.requests[cmd][code];
+                let cell = &metrics.requests[kind][code];
                 assert_eq!(cell.load(), 0);
                 cell.inc();
             }
         }
         let total: u64 = metrics.requests.iter().flatten().map(Counter::load).sum();
-        assert_eq!(total, (COMMAND_KIND_COUNT * RESULT_CODE_COUNT) as u64);
+        assert_eq!(total, (RequestKind::COUNT * RESULT_CODE_COUNT) as u64);
     }
 
     #[test]
     fn record_send_accumulates_latency() {
         let metrics = BackendMetricsShard::new();
-        metrics.record_send(CommandKind::Get, ResultCode::Success, 150);
-        metrics.record_send(CommandKind::Get, ResultCode::Success, 250);
-        metrics.record_send(CommandKind::Get, ResultCode::Timeout, 1000);
+        metrics.record_send(RequestKind::Get, ResultCode::Success, 150);
+        metrics.record_send(RequestKind::Get, ResultCode::Success, 250);
+        metrics.record_send(RequestKind::Get, ResultCode::Timeout, 1000);
         assert_eq!(metrics.latency_us_sum.load(), 1400);
         assert_eq!(
-            metrics.requests[CommandKind::Get as usize][ResultCode::Success as usize].load(),
+            metrics.requests[RequestKind::Get as usize][ResultCode::Success as usize].load(),
             2
         );
     }
