@@ -1,8 +1,9 @@
 //! Test doubles and socket/event/time harnesses for this crate and
 //! downstream (enable the `testing` feature). Protocol *fixtures* live in
 //! `rusty_mcrouter_protocol::test_support`; this module only adds what the
-//! net layer needs on top: scripted TCP peers, a LocalSet runner for the
-//! spawn_local-based client actor, and a connection-event collector.
+//! backend layer needs on top: scripted TCP peers, a LocalSet runner for the
+//! spawn_local-based backend connection actor, and a connection-event
+//! collector.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -17,13 +18,15 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+pub use crate::connection::{ConnectionEvent, DownReason};
+
 use crate::backend::{
     Backend, BackendFactory, BackendFactoryError, PoolHealth, PreparedSend, TkoRejection,
 };
-use crate::client::ConnectionEvent;
 use crate::error::SendError;
 
-/// Runs a future inside a fresh `LocalSet`. The client actor is spawned via
+/// Runs a future inside a fresh `LocalSet`. The backend connection actor is
+/// spawned via
 /// `spawn_local`, which panics in a bare `#[tokio::test]`; every actor test
 /// wraps its body in this.
 pub async fn run_local<F: Future>(fut: F) -> F::Output {
@@ -257,7 +260,6 @@ fn count_terminators(bytes: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::DownReason;
 
     #[tokio::test]
     async fn serial_server_accepts_one_connection_per_script() {

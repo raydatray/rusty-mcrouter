@@ -10,8 +10,8 @@ use tokio::{
 };
 
 use crate::{
-    client::{
-        connection::Connection,
+    connection::{
+        actor::Connection,
         types::{Command, ConnectionCommand, Payload},
         BackendConnectionConfig, ConnectionEvent,
     },
@@ -86,7 +86,7 @@ mod tests {
     use rusty_mcrouter_protocol::Reply;
 
     use super::*;
-    use crate::client::DownReason;
+    use crate::connection::DownReason;
     use crate::error::{ConnectError, RequestError};
     use crate::test_support::{
         event_log, run_local, scripted_backend_serial, ConnectionEventLog, ScriptedServer, Step,
