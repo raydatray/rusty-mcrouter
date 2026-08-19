@@ -301,12 +301,15 @@ fn parse_failover_policy(map: &mut Map<String, Value>) -> Result<FailoverPolicyC
                 Some(Value::Number(n)) => n
                     .as_u64()
                     .and_then(|v| usize::try_from(v).ok())
-                    .ok_or_else(|| "`max_tries` must be a non-negative integer".to_string())?,
+                    .ok_or_else(|| "`max_tries` must be a positive integer".to_string())?,
                 Some(other) => {
                     return Err(format!("`max_tries` must be an integer, got {}", other))
                 }
                 None => return Err("LeastFailuresPolicy requires `max_tries`".to_string()),
             };
+            if max_tries == 0 {
+                return Err("`max_tries` must be a positive integer".to_string());
+            }
             Ok(FailoverPolicyConfig::LeastFailures { max_tries })
         }
         other => Err(format!("unknown failover_policy type `{}`", other)),
@@ -672,6 +675,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("max_tries"), "got: {err}");
+    }
+
+    #[test]
+    fn failover_policy_least_failures_rejects_zero_max_tries() {
+        let err = serde_json::from_str::<RouteHandleConfig>(
+            r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_policy": { "type": "LeastFailuresPolicy", "max_tries": 0 } }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("positive"), "got: {err}");
     }
 
     #[test]
