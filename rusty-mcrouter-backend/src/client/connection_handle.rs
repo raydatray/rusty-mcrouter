@@ -11,9 +11,9 @@ use tokio::{
 
 use crate::{
     client::{
-        config::Config,
         connection::Connection,
-        types::{Command, ConnectionCommand, ConnectionEvent, Payload},
+        types::{Command, ConnectionCommand, Payload},
+        BackendConnectionConfig, ConnectionEvent,
     },
     error::SendError,
     metrics::BackendMetricsShard,
@@ -28,7 +28,7 @@ pub struct ConnectionHandle {
 impl ConnectionHandle {
     pub fn spawn(
         addr: Arc<str>,
-        cfg: Config,
+        cfg: BackendConnectionConfig,
         events: Box<dyn Fn(ConnectionEvent)>,
         shard_metrics: Arc<BackendMetricsShard>,
     ) -> ConnectionHandle {
@@ -86,7 +86,7 @@ mod tests {
     use rusty_mcrouter_protocol::Reply;
 
     use super::*;
-    use crate::client::types::DownReason;
+    use crate::client::DownReason;
     use crate::error::{ConnectError, RequestError};
     use crate::test_support::{
         event_log, run_local, scripted_backend_serial, ConnectionEventLog, ScriptedServer, Step,
@@ -94,7 +94,7 @@ mod tests {
 
     fn spawn_to(
         server: &ScriptedServer,
-        cfg: Config,
+        cfg: BackendConnectionConfig,
     ) -> (
         ConnectionHandle,
         ConnectionEventLog,
@@ -135,7 +135,7 @@ mod tests {
                 Step::Write(b"EN\r\nEN\r\nEN\r\n"),
             ]])
             .await;
-            let (handle, _log, metrics) = spawn_to(&server, Config::default());
+            let (handle, _log, metrics) = spawn_to(&server, BackendConnectionConfig::default());
 
             // join! polls all three sends before the actor task ever runs,
             // so they deterministically coalesce into one write batch
@@ -167,9 +167,9 @@ mod tests {
         run_local(async {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Hang]]).await;
-            let cfg = Config {
+            let cfg = BackendConnectionConfig {
                 reply_timeout: None, // the slot can only die with the actor
-                ..Config::default()
+                ..BackendConnectionConfig::default()
             };
             let (handle, _log, metrics) = spawn_to(&server, cfg);
 
@@ -199,7 +199,7 @@ mod tests {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]])
                     .await;
-            let (handle, _log, _metrics) = spawn_to(&server, Config::default());
+            let (handle, _log, _metrics) = spawn_to(&server, BackendConnectionConfig::default());
 
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(server.accept_count(), 0, "spawn must perform no I/O");
@@ -224,7 +224,7 @@ mod tests {
                 vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
             ])
             .await;
-            let (handle, log, _counters) = spawn_to(&server, Config::default());
+            let (handle, log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             handle.send(get(b"a")).await.unwrap();
             // wait until the actor OBSERVES the idle EOF; racing into the
@@ -253,7 +253,7 @@ mod tests {
         run_local(async {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
-            let (handle, log, _counters) = spawn_to(&server, Config::default());
+            let (handle, log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             let result = handle.send(get(b"a")).await;
             assert!(
@@ -286,9 +286,9 @@ mod tests {
                 Step::Write(b"VA 1\r\nC\r\n"),
             ]])
             .await;
-            let cfg = Config {
+            let cfg = BackendConnectionConfig {
                 reply_timeout: Some(Duration::from_millis(100)),
-                ..Config::default()
+                ..BackendConnectionConfig::default()
             };
             let (handle, _log, _counters) = spawn_to(&server, cfg);
 
@@ -331,10 +331,10 @@ mod tests {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 listener.local_addr().unwrap()
             };
-            let cfg = Config {
+            let cfg = BackendConnectionConfig {
                 connect_timeout: Some(Duration::from_secs(5)),
                 connect_timeout_retries: 3, // must NOT be consumed by refusal
-                ..Config::default()
+                ..BackendConnectionConfig::default()
             };
             let (sink, log) = event_log();
             let metrics = BackendMetricsShard::new();
@@ -375,10 +375,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn connect_timeout_consumes_retries_then_fails() {
         run_local(async {
-            let cfg = Config {
+            let cfg = BackendConnectionConfig {
                 connect_timeout: Some(Duration::from_millis(100)),
                 connect_timeout_retries: 2,
-                ..Config::default()
+                ..BackendConnectionConfig::default()
             };
             let (sink, log) = event_log();
             let metrics = BackendMetricsShard::new();
@@ -426,7 +426,7 @@ mod tests {
                 vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
             ])
             .await;
-            let (handle, log, _counters) = spawn_to(&server, Config::default());
+            let (handle, log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             let poisoned = handle.send(get(b"a")).await;
             assert!(
@@ -458,7 +458,7 @@ mod tests {
                 vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
             ])
             .await;
-            let (handle, _log, _counters) = spawn_to(&server, Config::default());
+            let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             handle.send(get(b"a")).await.unwrap();
             drop(handle);
@@ -479,7 +479,7 @@ mod tests {
                 Step::Write(b"EN\r\nEN\r\n"),
             ]])
             .await;
-            let (handle, _log, _counters) = spawn_to(&server, Config::default());
+            let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             let (a, b) = tokio::join!(handle.send(get(b"a")), handle.send(get(b"b")));
             assert_eq!(a.unwrap(), Reply::Get(GetReply::Miss));
@@ -498,7 +498,7 @@ mod tests {
                 Step::Write(b"VA 1\r\n3\r\n"),
             ]])
             .await;
-            let (handle, _log, _counters) = spawn_to(&server, Config::default());
+            let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             let (r1, r2, r3) = tokio::join!(
                 handle.send(get(b"k")),
@@ -520,7 +520,7 @@ mod tests {
                 Step::WriteChunked(b"VA 3\r\nbar\r\n"),
             ]])
             .await;
-            let (handle, _log, _counters) = spawn_to(&server, Config::default());
+            let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             assert_eq!(
                 hit_data(handle.send(get(b"foo")).await.unwrap()).as_ref(),
@@ -538,7 +538,7 @@ mod tests {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]])
                     .await;
-            let (handle, _log, _counters) = spawn_to(&server, Config::default());
+            let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             // routing prefix strips to an empty backend key -> encode error
             let bad = rusty_mcrouter_protocol::test_support::request(b"mg /region/cluster/ v\r\n");
@@ -567,7 +567,7 @@ mod tests {
                 Step::Write(b"VERSION 1.6.39\r\n"),
             ]])
             .await;
-            let (handle, _log, _counters) = spawn_to(&server, Config::default());
+            let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             assert_eq!(
                 handle.send_probe().await.unwrap(),
@@ -585,7 +585,7 @@ mod tests {
                 Step::Write(b"VERSION 1.6.39\r\nEN\r\n"),
             ]])
             .await;
-            let (handle, _log, _counters) = spawn_to(&server, Config::default());
+            let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             let (version, get_reply) = tokio::join!(
                 biased;
@@ -609,10 +609,10 @@ mod tests {
         run_local(async {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Hang]]).await;
-            let cfg = Config {
+            let cfg = BackendConnectionConfig {
                 max_pending: 1,
                 reply_timeout: Some(Duration::from_millis(50)),
-                ..Config::default()
+                ..BackendConnectionConfig::default()
             };
             let (handle, _log, _counters) = spawn_to(&server, cfg);
 
@@ -648,7 +648,7 @@ mod tests {
                 vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
             ])
             .await;
-            let (handle, log, _counters) = spawn_to(&server, Config::default());
+            let (handle, log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             handle.send(get(b"a")).await.unwrap();
             handle.close_idle();
@@ -677,7 +677,7 @@ mod tests {
                 Step::WriteChunked(b"VA 3\r\nbar\r\n"), // ~11ms of reply
             ]])
             .await;
-            let (handle, log, _counters) = spawn_to(&server, Config::default());
+            let (handle, log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             let (reply, ()) = tokio::join!(handle.send(get(b"k")), async {
                 tokio::time::sleep(Duration::from_millis(3)).await;
