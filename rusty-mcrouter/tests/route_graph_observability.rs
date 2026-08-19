@@ -11,12 +11,9 @@ use rusty_mcrouter_core::{
 };
 use rusty_mcrouter_observability::metrics::MetricsRegistry;
 use rusty_mcrouter_observability::sources::RoutingSource;
-use rusty_mcrouter_protocol::reply::GetReply;
+use rusty_mcrouter_protocol::reply::{ErrorReply, GetReply};
 use rusty_mcrouter_protocol::test_support::get;
 use rusty_mcrouter_protocol::Reply;
-use rusty_mcrouter_proxy::{Proxy, ProxyRequest};
-use tokio::sync::oneshot;
-use tokio::task::LocalSet;
 
 #[derive(Clone)]
 struct Factory {
@@ -74,20 +71,10 @@ fn build(
 }
 
 async fn route(route: std::rc::Rc<dyn DynRoute>, state: std::rc::Rc<RoutingState>) -> Reply {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    LocalSet::new()
-        .run_until(async move {
-            Proxy::spawn_request(
-                route,
-                state,
-                ProxyRequest {
-                    request: get(b"key"),
-                    reply_tx,
-                },
-            );
-            reply_rx.await.unwrap()
-        })
-        .await
+    let context = state.context();
+    let result = route.route_dyn(&context, get(b"key")).await;
+    context.finish(&result);
+    result.unwrap_or_else(|_| Reply::Error(ErrorReply::Server(None)))
 }
 
 fn scrape(metrics: Arc<RoutingMetricsShard>) -> String {

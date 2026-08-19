@@ -6,9 +6,8 @@ use tokio::{runtime::Builder, task::LocalSet};
 
 use crate::{
     config::{ListenerConfig, ProxyThreadConfig},
-    proxy::Proxy,
+    runtime::ProxyRuntime,
     server::Server,
-    worker::ConnectionWorker,
     WorkerEvent, WorkerEventRecord,
 };
 
@@ -31,7 +30,8 @@ pub fn proxy_thread_main(
             proxy_id,
             config,
             work_rx,
-            proxy_rx,
+            request_rx,
+            command_rx,
             proxies,
             thread_mode,
             listener_config,
@@ -85,7 +85,7 @@ pub fn proxy_thread_main(
         // building over dead servers succeeds, they just start life failing
         // (and TKO via the shared tracker map).
         let dest_map = destination::Map::new(tko_map, backend_metrics, metrics_registry);
-        let _sweep = dest_map.spawn_idle_sweep(sweep_interval);
+        let sweep_task = dest_map.spawn_idle_sweep(sweep_interval);
         let factory = DestinationFactory::new(Rc::clone(&dest_map));
         let routing_state = RoutingState::with_event_sink(routing_metrics, routing_events);
         let route = match build_route(&config, &factory, &defaults, routing_state.layout()) {
@@ -103,44 +103,30 @@ pub fn proxy_thread_main(
             event: WorkerEvent::Started,
         });
 
-        // proxy actor:
-        // -  drains this thread's message queue (requests routed here by
-        // peer threads)
-        // - same-thread requests bypass it inside the connection task
-        let proxy = Proxy {
-            id: proxy_id,
-            route: Rc::clone(&route),
-            routing_state: Rc::clone(&routing_state),
-            rx: proxy_rx,
-        };
-        tokio::task::spawn_local(proxy.run());
+        let listener_task = listener.map(|(server, listener_txs)| {
+            tokio::task::spawn_local(async move {
+                server
+                    .accept_and_dispatch(listener_txs)
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+        });
 
-        // connection worker
-        // - drains handed-off sockets and serves each connection.
-        let worker = ConnectionWorker::new(
+        let runtime = ProxyRuntime::new(
             proxy_id,
             route,
+            routing_state,
             proxies,
             thread_mode,
             frontend_metrics,
-            routing_state,
+            request_rx,
+            command_rx,
             work_rx,
+            listener_task,
+            sweep_task,
+            dest_map,
         );
-
-        let result = match listener {
-            Some((server, listener_txs)) => {
-                tokio::select! {
-                    result = server.accept_and_dispatch(listener_txs) => result.map_err(Into::into),
-                    _ = worker.run() => {
-                        Err(anyhow::anyhow!("worker channel closed unexpectedly"))
-                    }
-                }
-            }
-            None => {
-                worker.run().await;
-                Ok(())
-            }
-        };
+        let result = runtime.run().await;
 
         events.emit(WorkerEventRecord {
             proxy_id,

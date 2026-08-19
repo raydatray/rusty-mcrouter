@@ -15,7 +15,8 @@ use tokio::{
 };
 
 use crate::{
-    config::ThreadMode, proxy_set::ProxySet, FrontendError, FrontendMetricsShard, ProxyHandle,
+    config::ThreadMode, proxy_set::ProxySet, routing::complete_route, FrontendError,
+    FrontendMetricsShard, ProxyHandle,
 };
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
@@ -316,12 +317,7 @@ async fn route_one(target: RouteTarget, request: Request) -> Reply {
         } => {
             let context = routing_state.context();
             let result = route.route_dyn(&context, request).await;
-            context.finish(&result);
-            result.unwrap_or_else(|_| {
-                Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
-                    b"backend unavailable",
-                ))))
-            })
+            complete_route(context, result)
         }
         RouteTarget::Remote { handle } => handle.send_request(request).await,
     }
@@ -338,7 +334,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::message::ProxyMessage;
+    use crate::message::{ProxyCommand, ProxyRequest};
 
     /// a real Connection over a localhost socket pair, with a SameThread
     /// route into a mock backend. the proxy handle channel is never used
@@ -368,8 +364,9 @@ mod tests {
             routing_state.layout(),
         )
         .unwrap();
-        let (tx, _rx) = mpsc::channel::<ProxyMessage>(1);
-        let proxies = ProxySet::new(vec![ProxyHandle::new(0, tx)]);
+        let (request_tx, _request_rx) = mpsc::channel::<ProxyRequest>(1);
+        let (command_tx, _command_rx) = mpsc::channel::<ProxyCommand>(1);
+        let proxies = ProxySet::new(vec![ProxyHandle::new(0, request_tx, command_tx)]);
 
         let conn = Connection::new(
             server_stream,

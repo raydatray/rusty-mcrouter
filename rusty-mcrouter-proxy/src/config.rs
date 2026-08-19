@@ -5,13 +5,18 @@ use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::{RoutingEventSink, RoutingMetricsShard};
 use tokio::sync::mpsc;
 
-use crate::{message::ProxyMessage, proxy_set::ProxySet, FrontendMetricsShard, WorkerEventSink};
+use crate::{
+    message::{ProxyCommand, ProxyRequest},
+    proxy_set::ProxySet,
+    FrontendMetricsShard, WorkerEventSink,
+};
 
 pub struct ProxyThreadConfig {
     pub proxy_id: usize,
     pub config: Arc<ConfigDocument>,
     pub work_rx: mpsc::Receiver<std::net::TcpStream>,
-    pub proxy_rx: mpsc::Receiver<ProxyMessage>,
+    pub request_rx: mpsc::Receiver<ProxyRequest>,
+    pub command_rx: mpsc::Receiver<ProxyCommand>,
     pub proxies: ProxySet,
     pub thread_mode: ThreadMode,
     pub listener_config: Option<ListenerConfig>,

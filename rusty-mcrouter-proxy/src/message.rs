@@ -1,11 +1,8 @@
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::oneshot;
 
-pub enum ProxyMessage {
-    Request(ProxyRequest),
-    // todo - graceful shutdown: only ProxyHandle::shutdown constructs this
-    #[allow(dead_code)]
-    Shutdown,
+pub enum ProxyCommand {
+    Shutdown { acknowledged: oneshot::Sender<()> },
 }
 
 pub struct ProxyRequest {
