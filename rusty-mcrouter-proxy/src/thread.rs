@@ -13,65 +13,6 @@ use crate::{
 
 type ReadyEvent = anyhow::Result<Option<SocketAddr>>;
 
-pub struct ProxyThread {
-    handle: crate::ProxyHandle,
-    join: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
-}
-
-impl ProxyThread {
-    pub fn spawn(
-        handle: crate::ProxyHandle,
-        config: ProxyThreadConfig,
-    ) -> anyhow::Result<(Self, Option<SocketAddr>)> {
-        let proxy_id = config.proxy_id;
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-        let join = std::thread::Builder::new()
-            .name(format!("proxy-{proxy_id}"))
-            .spawn(move || {
-                let result = proxy_thread_main(config, ready_tx);
-                if let Err(error) = &result {
-                    eprintln!("proxy-{proxy_id} terminated: {error}");
-                    std::process::exit(1);
-                }
-                result
-            })?;
-
-        let bound_addr = match ready_rx.recv() {
-            Ok(result) => result?,
-            Err(_) => anyhow::bail!("proxy-{proxy_id} died during startup"),
-        };
-
-        Ok((
-            Self {
-                handle,
-                join: Some(join),
-            },
-            bound_addr,
-        ))
-    }
-
-    pub fn handle(&self) -> &crate::ProxyHandle {
-        &self.handle
-    }
-
-    pub fn join(mut self) -> anyhow::Result<()> {
-        self.join
-            .take()
-            .expect("proxy thread exists")
-            .join()
-            .map_err(|_| anyhow::anyhow!("proxy thread panicked"))?
-    }
-
-    pub fn shutdown(mut self) -> anyhow::Result<()> {
-        self.handle.shutdown_blocking()?;
-        self.join
-            .take()
-            .expect("proxy thread exists")
-            .join()
-            .map_err(|_| anyhow::anyhow!("proxy thread panicked"))?
-    }
-}
-
 pub fn proxy_thread_main(
     cfg: ProxyThreadConfig,
     ready_tx: SyncSender<ReadyEvent>,

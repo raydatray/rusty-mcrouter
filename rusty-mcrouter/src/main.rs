@@ -1,4 +1,5 @@
 mod control;
+mod proxy;
 
 use clap::Parser;
 use rusty_mcrouter_backend::{
@@ -17,11 +18,12 @@ use rusty_mcrouter_observability::{
 };
 use rusty_mcrouter_proxy::{
     FrontendMetricsShard, ListenerConfig, ProxyCommand, ProxyHandle, ProxyRequest, ProxySet,
-    ProxyThread, ProxyThreadConfig, ThreadMode,
+    ProxyThreadConfig, ThreadMode,
 };
 use tokio::sync::mpsc;
 
-use crate::control::ControlThread;
+use crate::control::{ControlThread, ProcessEvent};
+use crate::proxy::ProxyThread;
 
 use std::{
     io::Write,
@@ -143,11 +145,6 @@ fn destination_defaults(o: &RouterOptions) -> destination::Config {
 }
 
 fn main() -> anyhow::Result<()> {
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("FATAL: panic in proxy thread: {info}");
-        std::process::exit(1);
-    }));
-
     let args = Args::parse();
     let num_listening_sockets = args.num_listening_sockets.unwrap_or(1);
     if args.num_proxies == 0 {
@@ -214,6 +211,7 @@ fn main() -> anyhow::Result<()> {
     let proxies = ProxySet::new(proxy_handles.clone());
 
     let use_reuseport = num_listening_sockets > 1;
+    let (process_event_tx, process_event_rx) = std::sync::mpsc::channel();
     let mut proxy_threads = Vec::with_capacity(args.num_proxies);
     let mut bound_addr: Option<SocketAddr> = None;
     let mut work_rxs_iter = work_rxs.into_iter();
@@ -271,7 +269,14 @@ fn main() -> anyhow::Result<()> {
             sweep_interval,
         };
 
-        let (thread, maybe_addr) = ProxyThread::spawn(proxy_handle, cfg)?;
+        let (thread, maybe_addr) =
+            match ProxyThread::spawn(proxy_handle, cfg, process_event_tx.clone()) {
+                Ok(spawned) => spawned,
+                Err(error) => {
+                    shutdown_proxy_threads(&mut proxy_threads);
+                    return Err(error);
+                }
+            };
         if let Some(addr) = maybe_addr {
             bound_addr.get_or_insert(addr);
         }
@@ -316,8 +321,21 @@ fn main() -> anyhow::Result<()> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     }));
-    let (metrics_bound, observability_parts) = observability.into_parts(metrics_addr)?;
-    let control_thread = ControlThread::spawn(observability_parts)?;
+    let (metrics_bound, observability_parts) = match observability.into_parts(metrics_addr) {
+        Ok(parts) => parts,
+        Err(error) => {
+            shutdown_proxy_threads(&mut proxy_threads);
+            return Err(error.into());
+        }
+    };
+    let control_thread = match ControlThread::spawn(observability_parts, process_event_tx.clone()) {
+        Ok(thread) => thread,
+        Err(error) => {
+            shutdown_proxy_threads(&mut proxy_threads);
+            return Err(error);
+        }
+    };
+    drop(process_event_tx);
 
     let addr =
         bound_addr.ok_or_else(|| anyhow::anyhow!("no proxy thread reported a bound address"))?;
@@ -325,19 +343,46 @@ fn main() -> anyhow::Result<()> {
     if let Some(metrics) = metrics_bound {
         println!("METRICS {metrics}");
     }
-    std::io::stdout().flush().ok();
-    eprintln!(
-        "rusty-mcrouter listening on {} with {} proxy threads ({} listening sockets) -> {}",
-        addr,
-        args.num_proxies,
-        num_listening_sockets,
-        args.config.display()
+    std::io::stdout().flush()?;
+    tracing::info!(
+        listen = %addr,
+        proxy_threads = args.num_proxies,
+        listening_sockets = num_listening_sockets,
+        config = %args.config.display(),
+        "rusty-mcrouter ready"
     );
 
-    for thread in proxy_threads {
-        thread.join()?;
+    let mut first_error = match process_event_rx.recv()? {
+        ProcessEvent::ShutdownRequested => None,
+        ProcessEvent::ProxyExited { id } => Some(anyhow::anyhow!("proxy-{id} exited unexpectedly")),
+        ProcessEvent::ControlExited => Some(anyhow::anyhow!("control thread exited unexpectedly")),
+    };
+
+    if let Some(error) = shutdown_proxy_threads(&mut proxy_threads) {
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
     }
-    control_thread.shutdown()?;
+    if let Err(error) = control_thread.shutdown() {
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
 
     Ok(())
+}
+
+fn shutdown_proxy_threads(proxy_threads: &mut Vec<ProxyThread>) -> Option<anyhow::Error> {
+    let mut first_error = None;
+    for thread in proxy_threads.drain(..) {
+        if let Err(error) = thread.shutdown() {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    first_error
 }

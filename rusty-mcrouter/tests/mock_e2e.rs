@@ -278,6 +278,25 @@ async fn null_route_sums_two_proxy_shards() {
     assert_series(&body, "rusty_mcrouter_dev_null_requests_total", &[], 2);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_c_stops_proxy_and_control_threads_cleanly() {
+    let mut stack = start_router(r#"{ "route": "NullRoute" }"#, 60_003).await;
+    let pid = stack._router.id().expect("router process is running");
+    let status = Command::new("kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .await
+        .unwrap();
+    assert!(status.success());
+
+    let status = tokio::time::timeout(Duration::from_secs(5), stack._router.wait())
+        .await
+        .expect("router did not stop after Ctrl-C")
+        .unwrap();
+    assert!(status.success(), "router exited with {status}");
+}
+
 /// a dead backend marks hard on first contact (connect refused) and the
 /// scrape shows it: tko gauge up, destination down, tko-result counted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

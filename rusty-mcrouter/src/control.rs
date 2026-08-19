@@ -5,6 +5,37 @@ use rusty_mcrouter_observability::http::MetricsHttp;
 use rusty_mcrouter_observability::{logging, ObservabilityParts};
 use tokio::sync::{mpsc, oneshot};
 
+pub enum ProcessEvent {
+    ShutdownRequested,
+    ProxyExited { id: usize },
+    ControlExited,
+}
+
+pub(crate) struct ExitNotifier {
+    process_events: std::sync::mpsc::Sender<ProcessEvent>,
+    event: Option<ProcessEvent>,
+}
+
+impl ExitNotifier {
+    pub(crate) fn new(
+        process_events: std::sync::mpsc::Sender<ProcessEvent>,
+        event: ProcessEvent,
+    ) -> Self {
+        Self {
+            process_events,
+            event: Some(event),
+        }
+    }
+}
+
+impl Drop for ExitNotifier {
+    fn drop(&mut self) {
+        if let Some(event) = self.event.take() {
+            let _ = self.process_events.send(event);
+        }
+    }
+}
+
 const CONTROL_COMMAND_CAPACITY: usize = 16;
 
 enum ControlCommand {
@@ -34,13 +65,20 @@ pub struct ControlThread {
 }
 
 impl ControlThread {
-    pub fn spawn(parts: ObservabilityParts) -> anyhow::Result<Self> {
+    pub fn spawn(
+        parts: ObservabilityParts,
+        process_events: std::sync::mpsc::Sender<ProcessEvent>,
+    ) -> anyhow::Result<Self> {
         let (command_tx, command_rx) = mpsc::channel(CONTROL_COMMAND_CAPACITY);
         let handle = ControlHandle { command_tx };
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let runtime_events = process_events.clone();
         let join = std::thread::Builder::new()
             .name("control".into())
-            .spawn(move || control_thread_main(parts, command_rx, ready_tx))?;
+            .spawn(move || {
+                let _exit = ExitNotifier::new(process_events, ProcessEvent::ControlExited);
+                control_thread_main(parts, command_rx, ready_tx, runtime_events)
+            })?;
 
         match ready_rx.recv() {
             Ok(result) => result?,
@@ -54,12 +92,22 @@ impl ControlThread {
     }
 
     pub fn shutdown(mut self) -> anyhow::Result<()> {
-        self.handle.shutdown_blocking()?;
-        self.join
+        let shutdown = if self
+            .join
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            Ok(())
+        } else {
+            self.handle.shutdown_blocking()
+        };
+        let joined = self
+            .join
             .take()
             .expect("control thread exists")
             .join()
-            .map_err(|_| anyhow::anyhow!("control thread panicked"))?
+            .map_err(|_| anyhow::anyhow!("control thread panicked"))?;
+        shutdown.and(joined)
     }
 }
 
@@ -67,6 +115,7 @@ struct ControlRuntime {
     command_rx: mpsc::Receiver<ControlCommand>,
     events: rusty_mcrouter_observability::bus::EventConsumer,
     metrics: Option<MetricsHttp>,
+    process_events: std::sync::mpsc::Sender<ProcessEvent>,
 }
 
 impl ControlRuntime {
@@ -94,6 +143,11 @@ impl ControlRuntime {
                 result = step_metrics(&mut self.metrics), if self.metrics.is_some() => {
                     result?;
                 }
+
+                result = tokio::signal::ctrl_c() => {
+                    result.context("listen for Ctrl-C")?;
+                    let _ = self.process_events.send(ProcessEvent::ShutdownRequested);
+                }
             }
         }
     }
@@ -116,6 +170,7 @@ fn control_thread_main(
     parts: ObservabilityParts,
     command_rx: mpsc::Receiver<ControlCommand>,
     ready_tx: SyncSender<anyhow::Result<()>>,
+    process_events: std::sync::mpsc::Sender<ProcessEvent>,
 ) -> anyhow::Result<()> {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -153,6 +208,7 @@ fn control_thread_main(
             command_rx,
             events: parts.consumer,
             metrics,
+            process_events,
         }
         .run(),
     )
@@ -169,7 +225,11 @@ mod tests {
         let observability = Observability::new(8);
         let events = observability.events().clone();
         let (_, parts) = observability.into_parts(None).unwrap();
-        ControlThread::spawn(parts).unwrap().shutdown().unwrap();
+        let (process_tx, _process_rx) = std::sync::mpsc::channel();
+        ControlThread::spawn(parts, process_tx)
+            .unwrap()
+            .shutdown()
+            .unwrap();
         drop(events);
     }
 }
