@@ -5,30 +5,46 @@ use std::sync::Arc;
 use rusty_mcrouter_protocol::{Reply, Request};
 use thiserror::Error;
 
+use crate::classify::ResultCode;
 use crate::destination::{self, Destination, Key, Map};
 use crate::error::SendError;
 use crate::tko::FailOpenThresholds;
 
-/// A backend that sends a request and awaits a reply.
-///
-/// Generic, not `dyn`: `DestinationRoute<B>` picks the concrete backend at the
-/// call site, so there is no boxed future on the hot path. Non-`Send`, mirroring
-/// `Route` (the graph is single-threaded `Rc` on a `LocalSet`). Production impl
-/// is `Rc<Destination>` (TKO fast-fail + the reconnecting connection actor);
-/// tests use `MockBackend`.
 pub trait Backend: 'static {
     fn prepare_send(
         &self,
-        req: Request,
-    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, SendError>;
+        request: Request,
+    ) -> Result<PreparedSend<impl Future<Output = Result<Reply, SendError>> + '_>, TkoRejection>;
 }
 
-impl Backend for Rc<Destination> {
-    fn prepare_send(
-        &self,
-        req: Request,
-    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, SendError> {
-        Destination::prepare_send(self, req)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TkoRejection {
+    pub reason: ResultCode,
+}
+
+impl From<TkoRejection> for SendError {
+    fn from(rejection: TkoRejection) -> Self {
+        Self::Tko {
+            reason: rejection.reason,
+        }
+    }
+}
+
+#[must_use = "a prepared send must be sent. it should never be discarded"]
+pub struct PreparedSend<F> {
+    future: F,
+}
+
+impl<F> PreparedSend<F>
+where
+    F: Future<Output = Result<Reply, SendError>>,
+{
+    pub fn new(future: F) -> Self {
+        Self { future }
+    }
+
+    pub async fn send(self) -> Result<Reply, SendError> {
+        self.future.await
     }
 }
 
@@ -143,8 +159,8 @@ mod tests {
     /// the production impl end to end.
     async fn through_trait<B: Backend>(backend: &B, req: Request) -> Result<Reply, SendError> {
         match backend.prepare_send(req) {
-            Ok(prepared) => prepared.await,
-            Err(error) => Err(error),
+            Ok(prepared) => prepared.send().await,
+            Err(rejection) => Err(rejection.into()),
         }
     }
 

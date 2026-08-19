@@ -17,7 +17,9 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::backend::{Backend, BackendFactory, BackendFactoryError, PoolHealth};
+use crate::backend::{
+    Backend, BackendFactory, BackendFactoryError, PoolHealth, PreparedSend, TkoRejection,
+};
 use crate::client::ConnectionEvent;
 use crate::error::SendError;
 
@@ -94,14 +96,17 @@ impl Backend for MockBackend {
     fn prepare_send(
         &self,
         req: Request,
-    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, SendError> {
+    ) -> Result<PreparedSend<impl Future<Output = Result<Reply, SendError>> + '_>, TkoRejection>
+    {
         self.inner.received.lock().unwrap().push(req);
         let result = match &self.inner.response {
             MockResponse::Reply(reply) => Ok(reply.clone()),
-            MockResponse::Error(err @ SendError::Tko { .. }) => return Err(err.clone()),
+            MockResponse::Error(SendError::Tko { reason }) => {
+                return Err(TkoRejection { reason: *reason })
+            }
             MockResponse::Error(err) => Err(err.clone()),
         };
-        Ok(async move { result })
+        Ok(PreparedSend::new(async move { result }))
     }
 }
 

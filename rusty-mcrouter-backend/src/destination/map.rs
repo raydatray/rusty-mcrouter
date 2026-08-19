@@ -122,11 +122,12 @@ mod tests {
     use crate::error::{RequestError, SendError};
     use crate::test_support::{run_local, scripted_backend_serial, Step};
     use crate::tko::{DestToken, FailOpenThresholds};
+    use crate::Backend;
 
     async fn send(dest: &Rc<Destination>, request: Request) -> Result<Reply, SendError> {
         match dest.prepare_send(request) {
-            Ok(prepared) => prepared.await,
-            Err(error) => Err(error),
+            Ok(prepared) => prepared.send().await,
+            Err(rejection) => Err(rejection.into()),
         }
     }
 

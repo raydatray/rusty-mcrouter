@@ -30,13 +30,13 @@ impl<B: Backend> Route for DestinationRoute<B> {
     async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
         let started = Instant::now();
         let result = match self.backend.prepare_send(request) {
-            Err(error) => Err(error),
+            Err(rejection) => Err(rejection.into()),
             Ok(prepared) => {
                 if let Some(pool_index) = self.pool_index {
                     context.select_pool(pool_index);
                 }
 
-                let result = prepared.await;
+                let result = prepared.send().await;
 
                 if let Some(pool_index) = self.pool_index {
                     context.metrics().pools[pool_index]
@@ -66,6 +66,7 @@ mod tests {
     use bytes::Bytes;
     use rusty_mcrouter_backend::error::{ProtocolError, RequestError, SendError};
     use rusty_mcrouter_backend::test_support::MockBackend;
+    use rusty_mcrouter_backend::{PreparedSend, TkoRejection};
     use rusty_mcrouter_protocol::reply::{ErrorReply, GetHit, GetReply, StoreReply, StoreResult};
     use rusty_mcrouter_protocol::test_support::{get, store};
 
@@ -79,13 +80,13 @@ mod tests {
             &self,
             _request: Request,
         ) -> std::result::Result<
-            impl Future<Output = std::result::Result<Reply, SendError>> + '_,
-            SendError,
+            PreparedSend<impl Future<Output = std::result::Result<Reply, SendError>> + '_>,
+            TkoRejection,
         > {
-            Ok(async {
+            Ok(PreparedSend::new(async {
                 tokio::time::sleep(Duration::from_millis(2)).await;
                 Ok(Reply::Get(GetReply::Miss))
-            })
+            }))
         }
     }
 
