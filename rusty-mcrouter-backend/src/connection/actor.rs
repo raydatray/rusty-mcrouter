@@ -10,7 +10,7 @@ use tokio::{
 };
 
 use crate::{
-    client::{
+    connection::{
         types::{Command, ConnectionCommand, Inflight, Payload},
         BackendConnectionConfig, ConnectionEvent, DownReason,
     },
@@ -422,7 +422,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
-    use crate::client::BackendConnectionConfig;
+    use crate::connection::BackendConnectionConfig;
 
     type ReplyRx = oneshot::Receiver<Result<Reply, SendError>>;
 

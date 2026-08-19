@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use crate::{
     backend::{PreparedSend, TkoRejection},
     classify::{code_of, ResultCode},
-    client::{BackendConnectionConfig, ConnectionEvent, ConnectionHandle, DownReason},
+    connection::{BackendConnectionConfig, ConnectionEvent, ConnectionHandle, DownReason},
     destination::{probe, DestinationConfig, DestinationKey, DestinationMetrics},
     error::{ConnectError, LocalError, SendError},
     metrics::BackendMetricsShard,

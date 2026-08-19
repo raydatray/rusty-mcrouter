@@ -1,6 +1,6 @@
 mod backend;
 pub mod classify;
-pub mod client;
+mod connection;
 pub mod destination;
 pub mod error;
 pub mod metrics;
