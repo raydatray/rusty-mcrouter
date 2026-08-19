@@ -4,12 +4,13 @@ use rusty_mcrouter_protocol::reply::{
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use super::{Result, Route};
+use crate::RouteContext;
 
 pub struct NullRoute;
 
 impl Route for NullRoute {
-    async fn route(&self, req: Request) -> Result<Reply> {
-        Ok(match req {
+    async fn route(&self, _context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+        Ok(match request {
             Request::Get(_) => Reply::Get(GetReply::Miss),
             // Success with synthesized result fields so a reply plan that
             // requested c/s still encodes; cas 0 mirrors memcached's
@@ -32,15 +33,23 @@ mod tests {
     use super::*;
     use rusty_mcrouter_protocol::test_support::{delete, get, request, store};
 
+    use crate::context::test_routing_state;
+
+    async fn execute(request: Request) -> Result<Reply> {
+        let state = test_routing_state();
+        let context = state.context();
+        NullRoute.route(&context, request).await
+    }
+
     #[tokio::test]
     async fn returns_miss_for_get() {
-        let reply = NullRoute.route(get(b"foo")).await.unwrap();
+        let reply = execute(get(b"foo")).await.unwrap();
         assert_eq!(reply, Reply::Get(GetReply::Miss));
     }
 
     #[tokio::test]
     async fn returns_synthesized_success_for_store() {
-        let reply = NullRoute.route(store(b"k", b"value")).await.unwrap();
+        let reply = execute(store(b"k", b"value")).await.unwrap();
         assert_eq!(
             reply,
             Reply::Store(StoreReply::Success(StoreResult {
@@ -52,13 +61,13 @@ mod tests {
 
     #[tokio::test]
     async fn returns_success_for_delete() {
-        let reply = NullRoute.route(delete(b"k")).await.unwrap();
+        let reply = execute(delete(b"k")).await.unwrap();
         assert_eq!(reply, Reply::Delete(DeleteReply::Success));
     }
 
     #[tokio::test]
     async fn returns_not_found_for_arithmetic() {
-        let reply = NullRoute.route(request(b"ma k v\r\n")).await.unwrap();
+        let reply = execute(request(b"ma k v\r\n")).await.unwrap();
         assert_eq!(
             reply,
             Reply::Arithmetic(ArithmeticReply::NotFound(ArithmeticResult::default()))
@@ -67,7 +76,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_miss_for_debug() {
-        let reply = NullRoute.route(request(b"me k\r\n")).await.unwrap();
+        let reply = execute(request(b"me k\r\n")).await.unwrap();
         assert_eq!(reply, Reply::Debug(DebugReply::Miss));
     }
 }

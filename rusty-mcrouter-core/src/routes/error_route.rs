@@ -3,6 +3,7 @@ use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use super::{Result, Route};
+use crate::RouteContext;
 
 pub struct ErrorRoute {
     message: Option<Bytes>,
@@ -17,7 +18,7 @@ impl ErrorRoute {
 }
 
 impl Route for ErrorRoute {
-    async fn route(&self, _req: Request) -> Result<Reply> {
+    async fn route(&self, _context: &RouteContext<'_>, _request: Request) -> Result<Reply> {
         Ok(match &self.message {
             Some(m) => Reply::Error(ErrorReply::Server(Some(m.clone()))),
             None => Reply::Error(ErrorReply::Error),
@@ -30,10 +31,18 @@ mod tests {
     use super::*;
     use rusty_mcrouter_protocol::test_support::{get, store};
 
+    use crate::context::test_routing_state;
+
+    async fn execute(route: &ErrorRoute, request: Request) -> Result<Reply> {
+        let state = test_routing_state();
+        let context = state.context();
+        route.route(&context, request).await
+    }
+
     #[tokio::test]
     async fn with_message_returns_server_error_with_message() {
         let r = ErrorRoute::new(Some("boom".to_string()));
-        let reply = r.route(get(b"k")).await.unwrap();
+        let reply = execute(&r, get(b"k")).await.unwrap();
         assert_eq!(
             reply,
             Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"boom"))))
@@ -43,15 +52,15 @@ mod tests {
     #[tokio::test]
     async fn without_message_returns_bare_error() {
         let r = ErrorRoute::new(None);
-        let reply = r.route(get(b"k")).await.unwrap();
+        let reply = execute(&r, get(b"k")).await.unwrap();
         assert_eq!(reply, Reply::Error(ErrorReply::Error));
     }
 
     #[tokio::test]
     async fn ignores_request_payload() {
         let r = ErrorRoute::new(Some("nope".to_string()));
-        let reply_get = r.route(get(b"k")).await.unwrap();
-        let reply_store = r.route(store(b"k", b"v")).await.unwrap();
+        let reply_get = execute(&r, get(b"k")).await.unwrap();
+        let reply_store = execute(&r, store(b"k", b"v")).await.unwrap();
         assert_eq!(reply_get, reply_store);
     }
 }

@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, rc::Rc, sync::mpsc::SyncSender};
 
 use rusty_mcrouter_backend::{destination, DestinationFactory};
-use rusty_mcrouter_core::build_route;
+use rusty_mcrouter_core::{build_route, RoutingState};
 use tokio::{runtime::Builder, task::LocalSet};
 
 use crate::{
@@ -39,6 +39,7 @@ pub fn proxy_thread_main(
             metrics_registry,
             backend_metrics,
             frontend_metrics,
+            routing_metrics,
             events,
             defaults,
             sweep_interval,
@@ -85,6 +86,7 @@ pub fn proxy_thread_main(
         let dest_map = destination::Map::new(tko_map, backend_metrics, metrics_registry);
         let _sweep = dest_map.spawn_idle_sweep(sweep_interval);
         let factory = DestinationFactory::new(Rc::clone(&dest_map));
+        let routing_state = RoutingState::new(routing_metrics);
         let route = match build_route(&config, &factory, &defaults) {
             Ok(r) => r,
             Err(e) => {
@@ -107,6 +109,7 @@ pub fn proxy_thread_main(
         let proxy = Proxy {
             id: proxy_id,
             route: Rc::clone(&route),
+            routing_state: Rc::clone(&routing_state),
             rx: proxy_rx,
         };
         tokio::task::spawn_local(proxy.run());
@@ -119,6 +122,7 @@ pub fn proxy_thread_main(
             proxies,
             thread_mode,
             frontend_metrics,
+            routing_state,
             work_rx,
         );
 

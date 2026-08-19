@@ -1,6 +1,6 @@
 use std::{rc::Rc, sync::Arc};
 
-use rusty_mcrouter_core::DynRoute;
+use rusty_mcrouter_core::{DynRoute, RoutingState};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -17,6 +17,7 @@ pub struct ConnectionWorker {
     proxies: ProxySet,
     mode: ThreadMode,
     metrics: Arc<FrontendMetricsShard>,
+    routing_state: Rc<RoutingState>,
     work_rx: mpsc::Receiver<std::net::TcpStream>,
 }
 
@@ -27,6 +28,7 @@ impl ConnectionWorker {
         proxies: ProxySet,
         mode: ThreadMode,
         metrics: Arc<FrontendMetricsShard>,
+        routing_state: Rc<RoutingState>,
         work_rx: mpsc::Receiver<std::net::TcpStream>,
     ) -> Self {
         Self {
@@ -35,6 +37,7 @@ impl ConnectionWorker {
             proxies,
             mode,
             metrics,
+            routing_state,
             work_rx,
         }
     }
@@ -53,6 +56,7 @@ impl ConnectionWorker {
                 tokio_stream,
                 self.current_id,
                 Rc::clone(&self.local_route),
+                Rc::clone(&self.routing_state),
                 self.proxies.clone(),
                 self.mode,
                 Arc::clone(&self.metrics),

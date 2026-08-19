@@ -4,6 +4,7 @@ use rusty_mcrouter_backend::Backend;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::selectors::Selector;
+use crate::RouteContext;
 
 use super::{
     destination_route::DestinationRoute, selection_route::SelectionRoute, DynRoute, Result, Route,
@@ -37,7 +38,7 @@ impl PoolRoute {
 }
 
 impl Route for PoolRoute {
-    async fn route(&self, req: Request) -> Result<Reply> {
-        self.inner.route(req).await
+    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+        self.inner.route(context, request).await
     }
 }
