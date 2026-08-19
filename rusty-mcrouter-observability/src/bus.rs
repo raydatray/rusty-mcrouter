@@ -51,6 +51,8 @@ const DROP_WARN_INTERVAL: Duration = Duration::from_secs(1);
 pub struct EventConsumer {
     rx: tokio::sync::mpsc::Receiver<Event>,
     dropped: Arc<Counter>,
+    last_seen: u64,
+    last_warned: Instant,
 }
 
 pub fn channel(capacity: usize) -> (EventSender, EventConsumer) {
@@ -64,32 +66,41 @@ pub fn channel(capacity: usize) -> (EventSender, EventConsumer) {
             tx,
             dropped: Arc::clone(&dropped),
         },
-        EventConsumer { rx, dropped },
+        EventConsumer {
+            rx,
+            dropped,
+            last_seen: 0,
+            last_warned: Instant::now() - DROP_WARN_INTERVAL,
+        },
     )
 }
 
 impl EventConsumer {
-    pub async fn run(mut self) {
-        let mut last_seen = 0u64;
-        let mut last_warned = Instant::now() - DROP_WARN_INTERVAL;
+    pub async fn recv(&mut self) -> Option<Event> {
+        let event = self.rx.recv().await;
+        if event.is_some() {
+            self.warn_if_shedding_events();
+        }
+        event
+    }
 
-        while let Some(event) = self.rx.recv().await {
+    pub async fn run(mut self) {
+        while let Some(event) = self.recv().await {
             logging::write(&event);
-            self.warn_if_shedding_events(&mut last_seen, &mut last_warned);
         }
     }
 
-    fn warn_if_shedding_events(&self, last_seen: &mut u64, last_warned: &mut Instant) {
+    fn warn_if_shedding_events(&mut self) {
         let dropped = self.dropped.load();
-        if dropped > *last_seen && last_warned.elapsed() >= DROP_WARN_INTERVAL {
+        if dropped > self.last_seen && self.last_warned.elapsed() >= DROP_WARN_INTERVAL {
             tracing::warn!(
                 target: "rusty-mcrouter-observability::bus",
                 dropped_total = dropped,
-                new = dropped - *last_seen,
+                new = dropped - self.last_seen,
                 "event bus shed events; log stream incomplete"
             );
-            *last_seen = dropped;
-            *last_warned = Instant::now();
+            self.last_seen = dropped;
+            self.last_warned = Instant::now();
         }
     }
 }

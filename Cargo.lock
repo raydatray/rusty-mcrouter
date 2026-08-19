@@ -1260,6 +1260,11 @@ dependencies = [
 name = "rusty-mcrouter-observability"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rusty-mcrouter-backend",
  "rusty-mcrouter-core",
  "rusty-mcrouter-observability-primitives",

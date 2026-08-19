@@ -284,6 +284,7 @@ impl MetricsSource for DestinationSource {
 
 pub struct SelfSource {
     pub dropped: Arc<Counter>,
+    pub http_rejected: Arc<Counter>,
     pub num_proxies: usize,
     /// computed once at startup - no clock reads at scrape time
     pub start_unix_secs: u64,
@@ -295,6 +296,11 @@ impl MetricsSource for SelfSource {
             "rusty_mcrouter_events_dropped_total",
             &[],
             self.dropped.load(),
+        );
+        out.counter(
+            "rusty_mcrouter_metrics_http_rejected_total",
+            &[],
+            self.http_rejected.load(),
         );
         out.gauge("rusty_mcrouter_proxies", &[], self.num_proxies as i64);
         out.gauge(
@@ -472,6 +478,7 @@ mod tests {
                 dropped.add(2);
                 dropped
             },
+            http_rejected: Arc::new(Counter::default()),
             num_proxies: 4,
             start_unix_secs: 1_700_000_000,
         });
@@ -479,6 +486,7 @@ mod tests {
             text,
             format!(
                 "rusty_mcrouter_events_dropped_total 2\n\
+                 rusty_mcrouter_metrics_http_rejected_total 0\n\
                  rusty_mcrouter_proxies 4\n\
                  rusty_mcrouter_start_time_seconds 1700000000\n\
                  rusty_mcrouter_build_info{{version=\"{}\"}} 1\n",
