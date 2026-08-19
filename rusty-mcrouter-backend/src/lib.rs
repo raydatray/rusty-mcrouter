@@ -12,5 +12,6 @@ pub mod mock_memcached;
 pub mod test_support;
 
 pub use crate::backend::{
-    Backend, BackendFactory, BackendFactoryError, DestinationFactory, PoolHealth,
+    Backend, BackendFactory, BackendFactoryError, DestinationFactory, PoolHealth, PreparedSend,
+    TkoRejection,
 };

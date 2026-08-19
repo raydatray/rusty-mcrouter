@@ -9,12 +9,14 @@ use rusty_mcrouter_protocol::{Reply, Request, RequestKind};
 use tokio::time::Instant;
 
 use crate::{
+    backend::{PreparedSend, TkoRejection},
     classify::{code_of, ResultCode},
     client::{Config as ClientConfig, ConnectionEvent, ConnectionHandle, DownReason},
     destination::{config::Config, key::Key, probe, DestinationMetrics},
     error::{ConnectError, LocalError, SendError},
     metrics::BackendMetricsShard,
     tko::{DestToken, TkoEvent, TkoTracker},
+    Backend,
 };
 
 pub struct Destination {
@@ -92,24 +94,6 @@ impl Destination {
 
     pub(crate) fn close_idle_connection(&self) {
         self.conn.close_idle()
-    }
-
-    pub(crate) fn prepare_send(
-        self: &Rc<Self>,
-        request: Request,
-    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, SendError> {
-        self.last_active.set(Instant::now());
-        let kind = request.kind();
-
-        if !self.cfg.disable_tko_tracking && self.tracker.is_tko() {
-            self.metrics.record_result(ResultCode::Tko);
-            self.shard_metrics.record_result(kind, ResultCode::Tko);
-            return Err(SendError::Tko {
-                reason: self.tracker.reason(),
-            });
-        }
-
-        Ok(async move { self.send_prepared(request, kind).await })
     }
 
     async fn send_prepared(
@@ -214,6 +198,33 @@ impl Destination {
     }
 }
 
+impl Backend for Rc<Destination> {
+    fn prepare_send(
+        &self,
+        request: Request,
+    ) -> Result<PreparedSend<impl Future<Output = Result<Reply, SendError>> + '_>, TkoRejection>
+    {
+        self.last_active.set(Instant::now());
+        let kind = request.kind();
+
+        if !self.cfg.disable_tko_tracking && self.tracker.is_tko() {
+            self.metrics.record_result(ResultCode::Tko);
+            self.shard_metrics.record_result(kind, ResultCode::Tko);
+            // theres a small race window here
+            // destination may be un/marked TKO immediately after check,
+            // diagnostic reason may also change, but thats ok, TKO admission
+            // is eventually consistent
+            return Err(TkoRejection {
+                reason: self.tracker.reason(),
+            });
+        }
+
+        Ok(PreparedSend::new(async move {
+            self.send_prepared(request, kind).await
+        }))
+    }
+}
+
 impl Drop for Destination {
     fn drop(&mut self) {
         // the ordering matters, first clear TKO ownership (since we need the
@@ -260,8 +271,8 @@ mod tests {
 
     async fn send(dest: &Rc<Destination>, request: Request) -> Result<Reply, SendError> {
         match dest.prepare_send(request) {
-            Ok(prepared) => prepared.await,
-            Err(error) => Err(error),
+            Ok(prepared) => prepared.send().await,
+            Err(rejection) => Err(rejection.into()),
         }
     }
 
@@ -352,7 +363,7 @@ mod tests {
                 assert!(matches!(r, Err(SendError::Tko { .. })), "got {r:?}");
             }
             let prepared = dest.prepare_send(get(b"observed"));
-            assert!(matches!(prepared, Err(SendError::Tko { .. })));
+            assert!(matches!(prepared, Err(TkoRejection { .. })));
             assert_eq!(server.accept_count(), accepts, "fast-fail must do zero I/O");
             assert_eq!(dest.metrics().result_count(ResultCode::Tko), 6);
         })
