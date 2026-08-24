@@ -99,6 +99,8 @@ impl DestinationMetricsRegistry {
 
 #[cfg(test)]
 mod tests {
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
+
     use super::*;
     use crate::tko::TkoTrackerMap;
 
@@ -114,7 +116,7 @@ mod tests {
     #[test]
     fn same_addr_shares_one_block() {
         let registry = DestinationMetricsRegistry::new();
-        let tko_map = TkoTrackerMap::new();
+        let tko_map = TkoTrackerMap::with_sink(noop_sink());
         let a = addr("10.0.0.1:11211");
         let tracker = tracker_for(&tko_map, &a);
 
@@ -131,7 +133,7 @@ mod tests {
     #[test]
     fn different_addrs_get_distinct_blocks() {
         let registry = DestinationMetricsRegistry::new();
-        let tko_map = TkoTrackerMap::new();
+        let tko_map = TkoTrackerMap::with_sink(noop_sink());
         let a1 = addr("10.0.0.1:11211");
         let a2 = addr("10.0.0.2:11211");
         let m1 = registry.metrics_for(&tracker_for(&tko_map, &a1));
@@ -144,7 +146,7 @@ mod tests {
     #[test]
     fn dead_blocks_leave_the_snapshot() {
         let registry = DestinationMetricsRegistry::new();
-        let tko_map = TkoTrackerMap::new();
+        let tko_map = TkoTrackerMap::with_sink(noop_sink());
         let a1 = addr("10.0.0.1:11211");
         let a2 = addr("10.0.0.2:11211");
 
@@ -166,7 +168,7 @@ mod tests {
     #[test]
     fn readded_addr_starts_fresh() {
         let registry = DestinationMetricsRegistry::new();
-        let tko_map = TkoTrackerMap::new();
+        let tko_map = TkoTrackerMap::with_sink(noop_sink());
         let a = addr("10.0.0.1:11211");
         let tracker = tracker_for(&tko_map, &a);
 
@@ -183,7 +185,7 @@ mod tests {
     #[test]
     fn cross_thread_sharing() {
         let registry = DestinationMetricsRegistry::new();
-        let tko_map = TkoTrackerMap::new();
+        let tko_map = TkoTrackerMap::with_sink(noop_sink());
         let a = addr("10.0.0.1:11211");
         let tracker = tracker_for(&tko_map, &a);
 

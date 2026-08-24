@@ -15,4 +15,4 @@ pub struct RoutingEventRecord {
     pub command: RequestKind,
 }
 
-pub type RoutingEventSink = EventSink<RoutingEventRecord>;
+pub type RoutingEventSink = Box<dyn EventSink<RoutingEventRecord>>;

@@ -192,7 +192,7 @@ mod tests {
             DestinationMetricsRegistry::new(),
         );
         let layout = RoutingMetricsLayout::new(Vec::<String>::new());
-        let state = RoutingState::new(RoutingMetricsShard::new(layout));
+        let state = RoutingState::new(RoutingMetricsShard::new(layout), noop_sink());
         let runtime = ProxyRuntime::new(
             0,
             NullRoute.into_dyn(),

@@ -6,6 +6,7 @@ use rusty_mcrouter_core::{
     DynRoute, ErrorRoute, NullRoute, Route, RouteContext, RouteError, RoutingMetricsLayout,
     RoutingMetricsShard, RoutingState,
 };
+use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 use rusty_mcrouter_protocol::test_support::get;
 use rusty_mcrouter_protocol::{Reply, Request};
 
@@ -38,7 +39,7 @@ fn main() {
         let deep_route = forwarding_chain(Rc::clone(&read_context_route));
         let request = get(b"routing-context-smoke");
         let layout = RoutingMetricsLayout::new(Vec::<String>::new());
-        let routing_state = RoutingState::new(RoutingMetricsShard::new(layout));
+        let routing_state = RoutingState::new(RoutingMetricsShard::new(layout), noop_sink());
         let context = routing_state.context();
 
         run_direct(&ignored_context_route, &context, &request, WARMUP).await;

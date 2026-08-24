@@ -155,7 +155,9 @@ mod tests {
     use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_backend::error::{ConnectError, LocalError, RequestError, SendError};
     use rusty_mcrouter_backend::test_support::MockBackend;
-    use rusty_mcrouter_observability_primitives::test_support::{recording_sink, EventLog};
+    use rusty_mcrouter_observability_primitives::test_support::{
+        noop_sink, recording_sink, EventLog,
+    };
     use rusty_mcrouter_protocol::test_support::{
         get, get_hit, get_miss, server_error, store, store_success,
     };
@@ -207,7 +209,7 @@ mod tests {
         let metrics = RoutingMetricsShard::new(RoutingMetricsLayout::new(Vec::<String>::new()));
         let (sink, events) = recording_sink();
         (
-            RoutingState::with_event_sink(Arc::clone(&metrics), sink),
+            RoutingState::new(Arc::clone(&metrics), sink),
             metrics,
             events,
         )
@@ -375,7 +377,7 @@ mod tests {
         ]);
         let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
 
         let result = route.route(&context, get(b"key")).await;
@@ -398,7 +400,7 @@ mod tests {
         ]);
         let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
 
         let result = route.route(&context, get(b"key")).await;
@@ -419,7 +421,7 @@ mod tests {
         ]);
         let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
 
         let result = route.route(&context, get(b"key")).await;
@@ -441,7 +443,7 @@ mod tests {
         ]);
         let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
 
         let result = route.route(&context, get(b"key")).await;

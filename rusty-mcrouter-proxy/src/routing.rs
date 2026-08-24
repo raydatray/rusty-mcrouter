@@ -49,12 +49,13 @@ mod tests {
     use rusty_mcrouter_core::{
         build_route, DestinationRoute, Route, RoutingMetricsLayout, RoutingMetricsShard,
     };
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, server_error};
 
     async fn boundary_reply(error: SendError) -> Reply {
         let route = DestinationRoute::new(MockBackend::failing(error)).into_dyn();
         let layout = RoutingMetricsLayout::new(Vec::<String>::new());
-        let state = RoutingState::new(RoutingMetricsShard::new(layout));
+        let state = RoutingState::new(RoutingMetricsShard::new(layout), noop_sink());
         route_request(route, state, get(b"foo")).await
     }
 
@@ -80,7 +81,7 @@ mod tests {
                 .unwrap();
         let layout = RoutingMetricsLayout::new(["pool".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = build_route(
             &config,
             &MockBackendFactory::new(),
