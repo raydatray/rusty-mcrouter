@@ -12,4 +12,4 @@ pub enum WorkerEvent {
     Stopped,
 }
 
-pub type WorkerEventSink = EventSink<WorkerEventRecord>;
+pub type WorkerEventSink = Box<dyn EventSink<WorkerEventRecord>>;

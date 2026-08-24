@@ -329,6 +329,7 @@ mod tests {
     use rusty_mcrouter_backend::test_support::{run_local, MockBackendFactory};
     use rusty_mcrouter_config::parse;
     use rusty_mcrouter_core::{build_route, RoutingMetricsLayout, RoutingMetricsShard};
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -354,7 +355,7 @@ mod tests {
                 .unwrap();
         let layout = RoutingMetricsLayout::new(["pool".to_string()]);
         let routing_metrics = RoutingMetricsShard::new(layout);
-        let routing_state = RoutingState::new(Arc::clone(&routing_metrics));
+        let routing_state = RoutingState::new(Arc::clone(&routing_metrics), noop_sink());
         let route = build_route(
             &config,
             &MockBackendFactory::new(),

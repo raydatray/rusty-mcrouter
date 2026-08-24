@@ -21,6 +21,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend", features = ["testing"] }
+rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives", features = ["testing"] }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol", features = ["testing"] }
 testcontainers.workspace = true
 tokio = { workspace = true, features = ["full"] }

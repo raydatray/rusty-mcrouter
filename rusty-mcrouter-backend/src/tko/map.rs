@@ -4,8 +4,7 @@ use std::{
 };
 
 use crate::tko::{
-    default_sink, FailOpenThresholds, GlobalTkoMetrics, PoolTkoTracker, TkoEventRecord,
-    TkoEventSink, TkoTracker,
+    FailOpenThresholds, GlobalTkoMetrics, PoolTkoTracker, TkoEventRecord, TkoEventSink, TkoTracker,
 };
 
 pub struct TkoTrackerMap {
@@ -16,11 +15,6 @@ pub struct TkoTrackerMap {
 }
 
 impl TkoTrackerMap {
-    pub fn new() -> Arc<TkoTrackerMap> {
-        Self::with_sink(default_sink())
-    }
-
-    // tests inject a collecting sink -  production swaps in tracing/metrics later
     pub fn with_sink(sink: TkoEventSink) -> Arc<TkoTrackerMap> {
         Arc::new(TkoTrackerMap {
             trackers: Mutex::new(HashMap::new()),

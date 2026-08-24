@@ -1215,6 +1215,7 @@ dependencies = [
  "rusty-mcrouter-config",
  "rusty-mcrouter-core",
  "rusty-mcrouter-observability",
+ "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-protocol",
  "rusty-mcrouter-proxy",
  "testcontainers",

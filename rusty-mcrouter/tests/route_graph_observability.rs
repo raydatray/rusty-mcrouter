@@ -11,6 +11,7 @@ use rusty_mcrouter_core::{
 };
 use rusty_mcrouter_observability::metrics::MetricsRegistry;
 use rusty_mcrouter_observability::sources::RoutingSource;
+use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 use rusty_mcrouter_protocol::test_support::{bare_server_error, expect_error, get, get_miss};
 use rusty_mcrouter_protocol::Reply;
 
@@ -58,7 +59,7 @@ fn build(
 ) {
     let layout = RoutingMetricsLayout::new(config.pools.keys().cloned());
     let metrics = RoutingMetricsShard::new(layout);
-    let state = RoutingState::new(Arc::clone(&metrics));
+    let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
     let route = build_route(
         config,
         factory,

@@ -4,27 +4,49 @@ use crate::EventSink;
 
 pub type EventLog<T> = Arc<Mutex<Vec<T>>>;
 
-pub fn noop_sink<T: Send + 'static>() -> EventSink<T> {
-    EventSink::new(drop)
+pub fn noop_sink<T: Send + 'static>() -> Box<dyn EventSink<T>> {
+    Box::new(NoopEventSink)
 }
 
-pub fn recording_sink<T: Send + 'static>() -> (EventSink<T>, EventLog<T>) {
+pub fn recording_sink<T: Send + 'static>() -> (Box<dyn EventSink<T>>, EventLog<T>) {
     recording_sink_with(std::convert::identity)
 }
 
 pub fn recording_sink_with<T, U>(
     map: impl Fn(T) -> U + Send + Sync + 'static,
-) -> (EventSink<T>, EventLog<U>)
+) -> (Box<dyn EventSink<T>>, EventLog<U>)
 where
     T: Send + 'static,
     U: Send + 'static,
 {
     let events = Arc::new(Mutex::new(Vec::new()));
-    let sink_events = Arc::clone(&events);
-    let sink = EventSink::new(move |event| {
-        sink_events.lock().unwrap().push(map(event));
-    });
-    (sink, events)
+    let sink = RecordingEventSink {
+        events: Arc::clone(&events),
+        map,
+    };
+    (Box::new(sink), events)
+}
+
+struct NoopEventSink;
+
+impl<T: Send + 'static> EventSink<T> for NoopEventSink {
+    fn emit(&self, _: T) {}
+}
+
+struct RecordingEventSink<U, F> {
+    events: EventLog<U>,
+    map: F,
+}
+
+impl<T, U, F> EventSink<T> for RecordingEventSink<U, F>
+where
+    T: Send + 'static,
+    U: Send + 'static,
+    F: Fn(T) -> U + Send + Sync + 'static,
+{
+    fn emit(&self, event: T) {
+        self.events.lock().unwrap().push((self.map)(event));
+    }
 }
 
 #[cfg(test)]

@@ -66,6 +66,7 @@ mod tests {
     use rusty_mcrouter_backend::error::{ProtocolError, RequestError, SendError};
     use rusty_mcrouter_backend::test_support::MockBackend;
     use rusty_mcrouter_backend::{PreparedSend, TkoRejection};
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{
         bare_server_error, expect_get_value, get, get_hit, get_miss, server_error, store,
         store_success,
@@ -101,7 +102,7 @@ mod tests {
     async fn attributed_send_records_attempt_and_final_metrics() {
         let layout = RoutingMetricsLayout::new(["pool".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = DestinationRoute::for_pool(MockBackend::miss(), 0);
         let context = state.context();
 
@@ -117,7 +118,7 @@ mod tests {
     async fn sendable_attempt_records_elapsed_duration() {
         let layout = RoutingMetricsLayout::new(["pool".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = DestinationRoute::for_pool(DelayedBackend, 0);
         let context = state.context();
 
@@ -132,7 +133,7 @@ mod tests {
     async fn attributed_error_counts_as_final_error() {
         let layout = RoutingMetricsLayout::new(["pool".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = DestinationRoute::for_pool(MockBackend::replying(bare_server_error()), 0);
         let context = state.context();
 
@@ -148,7 +149,7 @@ mod tests {
     async fn tko_attempt_records_no_duration_or_final_attribution() {
         let layout = RoutingMetricsLayout::new(["pool".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = DestinationRoute::for_pool(
             MockBackend::failing(SendError::Tko {
                 reason: rusty_mcrouter_backend::classify::ResultCode::Timeout,

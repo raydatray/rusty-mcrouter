@@ -26,8 +26,4 @@ pub struct TkoEventRecord {
     pub global_hard_tkos: i64,
 }
 
-pub type TkoEventSink = EventSink<TkoEventRecord>;
-
-pub fn default_sink() -> TkoEventSink {
-    TkoEventSink::new(|rec| eprintln!("tko: {:?} server = {}", rec.event, rec.server))
-}
+pub type TkoEventSink = Box<dyn EventSink<TkoEventRecord>>;

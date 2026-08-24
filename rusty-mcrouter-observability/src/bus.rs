@@ -19,15 +19,21 @@ impl Clone for EventSender {
     }
 }
 
-impl EventSender {
-    pub fn sink<T>(&self) -> EventSink<T>
-    where
-        T: Send + 'static,
-        Event: From<T>,
-    {
-        let sender = self.clone();
+impl<T> EventSink<T> for EventSender
+where
+    T: Send + Into<Event> + 'static,
+{
+    fn emit(&self, event: T) {
+        EventSender::emit(self, event.into());
+    }
+}
 
-        EventSink::new(move |event: T| sender.emit(event.into()))
+impl EventSender {
+    pub fn sink<T>(&self) -> Box<dyn EventSink<T>>
+    where
+        T: Send + Into<Event> + 'static,
+    {
+        Box::new(self.clone())
     }
 
     pub fn emit(&self, event: Event) {

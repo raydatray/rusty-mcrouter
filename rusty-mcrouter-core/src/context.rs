@@ -56,14 +56,7 @@ impl RouteContext<'_> {
 }
 
 impl RoutingState {
-    pub fn new(metrics: Arc<RoutingMetricsShard>) -> Rc<Self> {
-        Self::with_event_sink(metrics, RoutingEventSink::new(|_| {}))
-    }
-
-    pub fn with_event_sink(
-        metrics: Arc<RoutingMetricsShard>,
-        events: RoutingEventSink,
-    ) -> Rc<Self> {
+    pub fn new(metrics: Arc<RoutingMetricsShard>, events: RoutingEventSink) -> Rc<Self> {
         Rc::new(Self { metrics, events })
     }
 
@@ -83,13 +76,17 @@ impl RoutingState {
 #[cfg(test)]
 pub(crate) fn test_routing_state() -> Rc<RoutingState> {
     let layout = RoutingMetricsLayout::new(Vec::<String>::new());
-    RoutingState::new(RoutingMetricsShard::new(layout))
+    RoutingState::new(
+        RoutingMetricsShard::new(layout),
+        rusty_mcrouter_observability_primitives::test_support::noop_sink(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
 
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss};
     use rusty_mcrouter_protocol::{Reply, Request};
 
@@ -124,7 +121,10 @@ mod tests {
     fn state() -> (Rc<RoutingState>, Arc<RoutingMetricsShard>) {
         let layout = RoutingMetricsLayout::new(Vec::<String>::new());
         let metrics = RoutingMetricsShard::new(layout);
-        (RoutingState::new(Arc::clone(&metrics)), metrics)
+        (
+            RoutingState::new(Arc::clone(&metrics), noop_sink()),
+            metrics,
+        )
     }
 
     async fn execute(
@@ -187,7 +187,7 @@ mod tests {
     fn first_sendable_pool_wins_within_one_context() {
         let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
         context.select_pool(0);
         context.select_pool(1);
@@ -202,7 +202,7 @@ mod tests {
     fn concurrent_contexts_keep_selected_pools_isolated() {
         let layout = RoutingMetricsLayout::new(["first".to_string(), "second".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let first = state.context();
         let second = state.context();
         first.select_pool(0);
@@ -219,7 +219,7 @@ mod tests {
     fn request_without_selected_pool_has_no_final_pool_metrics() {
         let layout = RoutingMetricsLayout::new(["pool".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
 
         state.context().finish(&Ok(get_miss()));
 

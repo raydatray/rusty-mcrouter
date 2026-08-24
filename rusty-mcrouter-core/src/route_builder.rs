@@ -340,9 +340,12 @@ fn build_failover_policy(cfg: &FailoverPolicyConfig, n: usize) -> (Box<dyn Failo
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use rusty_mcrouter_backend::test_support::MockBackendFactory;
     use rusty_mcrouter_config::parse;
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
     use rusty_mcrouter_protocol::{Reply, Request};
 
@@ -355,7 +358,7 @@ mod tests {
     struct BuiltRoute {
         route: Rc<dyn DynRoute>,
         #[allow(dead_code)]
-        metrics: std::sync::Arc<RoutingMetricsShard>,
+        metrics: Arc<RoutingMetricsShard>,
         state: Rc<RoutingState>,
     }
 
@@ -363,7 +366,7 @@ mod tests {
         let layout = RoutingMetricsLayout::new(cfg.pools.keys().cloned());
         let route = build_route(cfg, factory, &defaults(), &layout)?;
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(std::sync::Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         Ok(BuiltRoute {
             route,
             metrics,

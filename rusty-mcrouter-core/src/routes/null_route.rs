@@ -32,6 +32,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{
         arithmetic, debug, debug_miss, delete, delete_success, expect_store_success, get, get_miss,
         reply, store,
@@ -81,7 +82,7 @@ mod tests {
     async fn counts_each_invocation() {
         let layout = RoutingMetricsLayout::new(Vec::<String>::new());
         let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics));
+        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
 
         let first = state.context();
         NullRoute.route(&first, get(b"a")).await.unwrap();
