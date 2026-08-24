@@ -102,10 +102,7 @@ fn routing_prefix_len(key: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn key(bytes: &'static [u8]) -> Key {
-        Key::new(Bytes::from_static(bytes)).unwrap()
-    }
+    use crate::test_support::key;
 
     #[test]
     fn plain_key_has_no_optional_parts() {

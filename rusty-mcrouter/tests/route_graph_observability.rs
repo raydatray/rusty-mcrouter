@@ -11,8 +11,7 @@ use rusty_mcrouter_core::{
 };
 use rusty_mcrouter_observability::metrics::MetricsRegistry;
 use rusty_mcrouter_observability::sources::RoutingSource;
-use rusty_mcrouter_protocol::reply::{ErrorReply, GetReply};
-use rusty_mcrouter_protocol::test_support::get;
+use rusty_mcrouter_protocol::test_support::{bare_server_error, expect_error, get, get_miss};
 use rusty_mcrouter_protocol::Reply;
 
 #[derive(Clone)]
@@ -74,7 +73,7 @@ async fn route(route: std::rc::Rc<dyn DynRoute>, state: std::rc::Rc<RoutingState
     let context = state.context();
     let result = route.route_dyn(&context, get(b"key")).await;
     context.finish(&result);
-    result.unwrap_or_else(|_| Reply::Error(ErrorReply::Server(None)))
+    result.unwrap_or_else(|_| bare_server_error())
 }
 
 fn scrape(metrics: Arc<RoutingMetricsShard>) -> String {
@@ -101,7 +100,7 @@ async fn healthy_route_exports_attempt_and_final_pool_metrics() {
     let factory = Factory::new([("primary:1", MockBackend::miss())]);
     let (metrics, state, route_graph) = build(&config, &factory);
 
-    assert_eq!(route(route_graph, state).await, Reply::Get(GetReply::Miss));
+    assert_eq!(route(route_graph, state).await, get_miss());
 
     let text = scrape(metrics);
     assert_sample(
@@ -143,7 +142,7 @@ async fn failover_exports_both_attempts_and_attributes_final_to_first_sendable_p
     ]);
     let (metrics, state, route_graph) = build(&config, &factory);
 
-    assert_eq!(route(route_graph, state).await, Reply::Get(GetReply::Miss));
+    assert_eq!(route(route_graph, state).await, get_miss());
 
     let text = scrape(metrics);
     assert_sample(
@@ -195,7 +194,7 @@ async fn single_child_failure_exports_exhaustion_without_failover_entry() {
     )]);
     let (metrics, state, route_graph) = build(&config, &factory);
 
-    assert!(matches!(route(route_graph, state).await, Reply::Error(_)));
+    expect_error(route(route_graph, state).await);
 
     let text = scrape(metrics);
     assert_sample(&text, "rusty_mcrouter_failover_total{policy=\"inorder\"} 0");

@@ -135,8 +135,7 @@ impl BackendFactory for DestinationFactory {
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_protocol::reply::GetReply;
-    use rusty_mcrouter_protocol::test_support::get;
+    use rusty_mcrouter_protocol::test_support::{get, get_miss};
 
     use super::*;
     use crate::classify::ResultCode;
@@ -241,7 +240,7 @@ mod tests {
                 .unwrap();
 
             let reply = through_trait(&backend, get(b"key")).await.unwrap();
-            assert_eq!(reply, Reply::Get(GetReply::Miss));
+            assert_eq!(reply, get_miss());
         })
         .await;
     }

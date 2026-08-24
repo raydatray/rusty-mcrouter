@@ -32,7 +32,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use rusty_mcrouter_protocol::test_support::{delete, get, request, store};
+    use rusty_mcrouter_protocol::test_support::{
+        arithmetic, debug, debug_miss, delete, delete_success, expect_store_success, get, get_miss,
+        reply, store,
+    };
 
     use crate::context::test_routing_state;
     use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
@@ -46,40 +49,32 @@ mod tests {
     #[tokio::test]
     async fn returns_miss_for_get() {
         let reply = execute(get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get(GetReply::Miss));
+        assert_eq!(reply, get_miss());
     }
 
     #[tokio::test]
     async fn returns_synthesized_success_for_store() {
-        let reply = execute(store(b"k", b"value")).await.unwrap();
-        assert_eq!(
-            reply,
-            Reply::Store(StoreReply::Success(StoreResult {
-                cas: Some(0),
-                size: Some(5),
-            }))
-        );
+        let result = expect_store_success(execute(store(b"k", b"value")).await.unwrap());
+        assert_eq!(result.cas, Some(0));
+        assert_eq!(result.size, Some(5));
     }
 
     #[tokio::test]
     async fn returns_success_for_delete() {
         let reply = execute(delete(b"k")).await.unwrap();
-        assert_eq!(reply, Reply::Delete(DeleteReply::Success));
+        assert_eq!(reply, delete_success());
     }
 
     #[tokio::test]
     async fn returns_not_found_for_arithmetic() {
-        let reply = execute(request(b"ma k v\r\n")).await.unwrap();
-        assert_eq!(
-            reply,
-            Reply::Arithmetic(ArithmeticReply::NotFound(ArithmeticResult::default()))
-        );
+        let actual = execute(arithmetic(b"k")).await.unwrap();
+        assert_eq!(actual, reply(b"ma k\r\n", b"NF\r\n"));
     }
 
     #[tokio::test]
     async fn returns_miss_for_debug() {
-        let reply = execute(request(b"me k\r\n")).await.unwrap();
-        assert_eq!(reply, Reply::Debug(DebugReply::Miss));
+        let reply = execute(debug(b"k")).await.unwrap();
+        assert_eq!(reply, debug_miss());
     }
 
     #[tokio::test]

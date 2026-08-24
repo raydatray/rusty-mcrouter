@@ -209,91 +209,57 @@ pub fn reply_line_too_long(error: wire::LineTooLong) -> MetaReplyEncodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::plan;
-    use crate::{
-        meta::{DecodedMetaCommand, MetaReplyDecoder, MetaRequestDecoder, MetaRequestEncoder},
-        reply::{
-            ArithmeticResult, DebugField, DebugHit, DebugReply, GetHit, RecacheState, StoreResult,
-        },
+    use crate::reply::{DebugField, DebugHit, DebugReply, GetHit};
+    use crate::test_support::{
+        backend_request, get_miss, plan, reply, response, store_success, version,
     };
-
-    fn encode(reply: &Reply, plan: &MetaReplyPlan) -> Result<BytesMut, MetaReplyEncodeError> {
-        let mut out = BytesMut::new();
-        MetaReplyEncoder::new().encode(reply, plan, &mut out)?;
-        Ok(out)
-    }
 
     #[test]
     fn encodes_header_hit_in_frontend_order() {
-        let plan = plan(b"mg key Otag s t c f h l k\r\n");
-        let reply = Reply::Get(GetReply::Hit(GetHit {
-            value: None,
-            client_flags: Some(7),
-            cas: Some(42),
-            size: Some(3),
-            ttl: Some(-1),
-            hit_before: Some(true),
-            last_access_seconds: Some(9),
-            recache: RecacheState::Won,
-            stale: true,
-        }));
+        let command = b"mg key Otag s t c f h l k\r\n";
 
         assert_eq!(
-            encode(&reply, &plan).unwrap(),
-            BytesMut::from(&b"HD Otag s3 t-1 c42 f7 h1 l9 kkey X W\r\n"[..])
+            response(command, b"HD s3 t-1 c42 f7 h1 l9 X W\r\n"),
+            b"HD Otag s3 t-1 c42 f7 h1 l9 kkey X W\r\n".as_slice()
         );
     }
 
     #[test]
     fn encodes_value_hit_and_body() {
-        let plan = plan(b"mg key v c\r\n");
-        let reply = Reply::Get(GetReply::Hit(GetHit {
-            value: Some(Bytes::from_static(b"foo")),
-            cas: Some(42),
-            ..GetHit::default()
-        }));
+        let command = b"mg key v c\r\n";
 
         assert_eq!(
-            encode(&reply, &plan).unwrap(),
-            BytesMut::from(&b"VA 3 c42\r\nfoo\r\n"[..])
+            response(command, b"VA 3 c42\r\nfoo\r\n"),
+            b"VA 3 c42\r\nfoo\r\n".as_slice()
         );
     }
 
     #[test]
     fn encodes_store_reply_in_frontend_order() {
-        let plan = plan(b"ms key 3 Otag s c k\r\nfoo\r\n");
-        let reply = Reply::Store(StoreReply::Success(StoreResult {
-            cas: Some(42),
-            size: Some(3),
-        }));
+        let command = b"ms key 3 Otag s c k\r\nfoo\r\n";
 
         assert_eq!(
-            encode(&reply, &plan).unwrap(),
-            BytesMut::from(&b"HD Otag s3 c42 kkey\r\n"[..])
+            response(command, b"HD c42 s3\r\n"),
+            b"HD Otag s3 c42 kkey\r\n".as_slice()
         );
     }
 
     #[test]
     fn suppresses_only_successful_quiet_store_reply() {
-        let plan = plan(b"ms key 3 q Otag\r\nfoo\r\n");
-        let success = Reply::Store(StoreReply::Success(StoreResult::default()));
-        assert_eq!(encode(&success, &plan).unwrap(), BytesMut::new());
+        let command = b"ms key 3 q Otag\r\nfoo\r\n";
+        assert_eq!(response(command, b"HD\r\n"), b"".as_slice());
 
-        let failure = Reply::Store(StoreReply::NotStored(StoreResult::default()));
-        assert_eq!(
-            encode(&failure, &plan).unwrap(),
-            BytesMut::from(&b"NS Otag\r\n"[..])
-        );
+        assert_eq!(response(command, b"NS\r\n"), b"NS Otag\r\n".as_slice());
     }
 
     #[test]
     fn rejects_store_reply_missing_projected_fields_atomically() {
         let plan = plan(b"ms key 3 c s\r\nfoo\r\n");
-        let reply = Reply::Store(StoreReply::Success(StoreResult::default()));
+        let backend_reply = store_success();
         let mut out = BytesMut::from(&b"existing"[..]);
 
         assert_eq!(
-            MetaReplyEncoder::new().encode(&reply, &plan, &mut out),
+            MetaReplyEncoder::new().encode(&backend_reply, &plan, &mut out),
             Err(MetaReplyEncodeError::MissingField("CAS"))
         );
         assert_eq!(out, b"existing".as_slice());
@@ -301,94 +267,65 @@ mod tests {
 
     #[test]
     fn encodes_all_delete_outcomes_with_local_tokens() {
-        let plan = plan(b"md key Otag k\r\n");
-        for (reply, expected) in [
-            (DeleteReply::Success, b"HD Otag kkey\r\n".as_slice()),
-            (DeleteReply::NotStored, b"NS Otag kkey\r\n".as_slice()),
-            (DeleteReply::Exists, b"EX Otag kkey\r\n".as_slice()),
-            (DeleteReply::NotFound, b"NF Otag kkey\r\n".as_slice()),
+        let command = b"md key Otag k\r\n";
+        for (backend, expected) in [
+            (b"HD\r\n".as_slice(), b"HD Otag kkey\r\n".as_slice()),
+            (b"NS\r\n".as_slice(), b"NS Otag kkey\r\n".as_slice()),
+            (b"EX\r\n".as_slice(), b"EX Otag kkey\r\n".as_slice()),
+            (b"NF\r\n".as_slice(), b"NF Otag kkey\r\n".as_slice()),
         ] {
-            assert_eq!(
-                encode(&Reply::Delete(reply), &plan).unwrap(),
-                BytesMut::from(expected)
-            );
+            assert_eq!(response(command, backend), expected);
         }
     }
 
     #[test]
     fn suppresses_only_successful_quiet_delete_reply() {
-        let plan = plan(b"md key q Otag\r\n");
-        assert_eq!(
-            encode(&Reply::Delete(DeleteReply::Success), &plan).unwrap(),
-            BytesMut::new()
-        );
-        assert_eq!(
-            encode(&Reply::Delete(DeleteReply::NotFound), &plan).unwrap(),
-            BytesMut::from(&b"NF Otag\r\n"[..])
-        );
+        let command = b"md key q Otag\r\n";
+        assert_eq!(response(command, b"HD\r\n"), b"".as_slice());
+        assert_eq!(response(command, b"NF\r\n"), b"NF Otag\r\n".as_slice());
     }
 
     #[test]
     fn encodes_arithmetic_header_and_value_success() {
-        let header_plan = plan(b"ma key Otag t c k\r\n");
-        let header = Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
-            value: None,
-            cas: Some(42),
-            ttl: Some(-1),
-        }));
+        let header_command = b"ma key Otag t c k\r\n";
         assert_eq!(
-            encode(&header, &header_plan).unwrap(),
-            BytesMut::from(&b"HD Otag t-1 c42 kkey\r\n"[..])
+            response(header_command, b"HD c42 t-1\r\n"),
+            b"HD Otag t-1 c42 kkey\r\n".as_slice()
         );
 
-        let value_plan = plan(b"ma key v c\r\n");
-        let value = Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
-            value: Some(u64::MAX),
-            cas: Some(43),
-            ttl: None,
-        }));
+        let value_command = b"ma key v c\r\n";
         assert_eq!(
-            encode(&value, &value_plan).unwrap(),
-            BytesMut::from(&b"VA 20 c43\r\n18446744073709551615\r\n"[..])
+            response(value_command, b"VA 20 c43\r\n18446744073709551615\r\n",),
+            b"VA 20 c43\r\n18446744073709551615\r\n".as_slice()
         );
     }
 
     #[test]
     fn arithmetic_failures_restore_local_and_available_tokens() {
-        let plan = plan(b"ma key Otag t c k\r\n");
-        let reply = Reply::Arithmetic(ArithmeticReply::Exists(ArithmeticResult {
-            value: None,
-            cas: Some(41),
-            ttl: None,
-        }));
+        let command = b"ma key Otag t c k\r\n";
 
         assert_eq!(
-            encode(&reply, &plan).unwrap(),
-            BytesMut::from(&b"EX Otag c41 kkey\r\n"[..])
+            response(command, b"EX c41\r\n"),
+            b"EX Otag c41 kkey\r\n".as_slice()
         );
     }
 
     #[test]
     fn suppresses_only_successful_quiet_arithmetic_reply() {
-        let plan = plan(b"ma key q Otag\r\n");
-        let success = Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult::default()));
-        assert_eq!(encode(&success, &plan).unwrap(), BytesMut::new());
+        let command = b"ma key q Otag\r\n";
+        assert_eq!(response(command, b"HD\r\n"), b"".as_slice());
 
-        let failure = Reply::Arithmetic(ArithmeticReply::NotFound(ArithmeticResult::default()));
-        assert_eq!(
-            encode(&failure, &plan).unwrap(),
-            BytesMut::from(&b"NF Otag\r\n"[..])
-        );
+        assert_eq!(response(command, b"NF\r\n"), b"NF Otag\r\n".as_slice());
     }
 
     #[test]
     fn rejects_arithmetic_success_missing_projected_fields_atomically() {
         let plan = plan(b"ma key c t\r\n");
-        let reply = Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult::default()));
+        let backend_reply = reply(b"ma fixture\r\n", b"HD\r\n");
         let mut out = BytesMut::from(&b"existing"[..]);
 
         assert_eq!(
-            MetaReplyEncoder::new().encode(&reply, &plan, &mut out),
+            MetaReplyEncoder::new().encode(&backend_reply, &plan, &mut out),
             Err(MetaReplyEncodeError::MissingField("CAS"))
         );
         assert_eq!(out, b"existing".as_slice());
@@ -397,10 +334,11 @@ mod tests {
     #[test]
     fn suppresses_quiet_get_miss_without_touching_output() {
         let plan = plan(b"mg key q Otag\r\n");
+        let reply = get_miss();
         let mut out = BytesMut::from(&b"existing"[..]);
 
         assert_eq!(
-            MetaReplyEncoder::new().encode(&Reply::Get(GetReply::Miss), &plan, &mut out),
+            MetaReplyEncoder::new().encode(&reply, &plan, &mut out),
             Ok(())
         );
         assert_eq!(out, b"existing".as_slice());
@@ -408,49 +346,36 @@ mod tests {
 
     #[test]
     fn get_miss_restores_only_local_tokens() {
-        let plan = plan(b"mg key c Otag s k\r\n");
-
         assert_eq!(
-            encode(&Reply::Get(GetReply::Miss), &plan).unwrap(),
-            BytesMut::from(&b"EN Otag kkey\r\n"[..])
+            response(b"mg key c Otag s k\r\n", b"EN\r\n"),
+            b"EN Otag kkey\r\n".as_slice()
         );
     }
 
     #[test]
     fn returns_base64_external_key_with_marker() {
-        let plan = plan(b"mg a2V5 b k\r\n");
-
         assert_eq!(
-            encode(&Reply::Get(GetReply::Miss), &plan).unwrap(),
-            BytesMut::from(&b"EN ka2V5 b\r\n"[..])
+            response(b"mg a2V5 b k\r\n", b"EN\r\n"),
+            b"EN ka2V5 b\r\n".as_slice()
         );
     }
 
     #[test]
     fn encodes_standard_errors_without_frontend_tokens() {
-        let plan = plan(b"mg key Otag k\r\n");
-
         assert_eq!(
-            encode(
-                &Reply::Error(ErrorReply::Client(Some(Bytes::from_static(b"bad command")))),
-                &plan,
-            )
-            .unwrap(),
-            BytesMut::from(&b"CLIENT_ERROR bad command\r\n"[..])
+            response(b"mg key Otag k\r\n", b"CLIENT_ERROR bad command\r\n"),
+            b"CLIENT_ERROR bad command\r\n".as_slice()
         );
     }
 
     #[test]
     fn rejects_backend_version_reply_atomically() {
         let plan = plan(b"mg key\r\n");
+        let reply = version(b"1.6.39");
         let mut out = BytesMut::from(&b"existing"[..]);
 
         assert_eq!(
-            MetaReplyEncoder::new().encode(
-                &Reply::Version(Bytes::from_static(b"1.6.39")),
-                &plan,
-                &mut out,
-            ),
+            MetaReplyEncoder::new().encode(&reply, &plan, &mut out),
             Err(MetaReplyEncodeError::InvalidData(
                 "version reply is backend only"
             ))
@@ -461,11 +386,11 @@ mod tests {
     #[test]
     fn rejects_missing_projected_fields_atomically() {
         let plan = plan(b"mg key c\r\n");
-        let reply = Reply::Get(GetReply::Hit(GetHit::default()));
+        let backend_reply = reply(b"mg fixture\r\n", b"HD\r\n");
         let mut out = BytesMut::from(&b"existing"[..]);
 
         assert_eq!(
-            MetaReplyEncoder::new().encode(&reply, &plan, &mut out),
+            MetaReplyEncoder::new().encode(&backend_reply, &plan, &mut out),
             Err(MetaReplyEncodeError::MissingField("CAS"))
         );
         assert_eq!(out, b"existing".as_slice());
@@ -490,38 +415,19 @@ mod tests {
 
     #[test]
     fn encodes_debug_hit_and_miss() {
-        let plan = plan(b"me key\r\n");
-        let hit = Reply::Debug(DebugReply::Hit(DebugHit {
-            fields: vec![
-                DebugField {
-                    name: Bytes::from_static(b"exp"),
-                    value: Bytes::from_static(b"60"),
-                },
-                DebugField {
-                    name: Bytes::from_static(b"fetch"),
-                    value: Bytes::from_static(b"yes"),
-                },
-            ],
-        }));
+        let command = b"me key\r\n";
         assert_eq!(
-            encode(&hit, &plan).unwrap(),
-            BytesMut::from(&b"ME key exp=60 fetch=yes\r\n"[..])
+            response(command, b"ME key exp=60 fetch=yes\r\n"),
+            b"ME key exp=60 fetch=yes\r\n".as_slice()
         );
-        assert_eq!(
-            encode(&Reply::Debug(DebugReply::Miss), &plan).unwrap(),
-            BytesMut::from(&b"EN\r\n"[..])
-        );
+        assert_eq!(response(command, b"EN\r\n"), b"EN\r\n".as_slice());
     }
 
     #[test]
     fn encodes_base64_debug_key_without_marker() {
-        let plan = plan(b"me a2V5 b\r\n");
-        let reply = Reply::Debug(DebugReply::Hit(DebugHit { fields: vec![] }));
+        let command = b"me a2V5 b\r\n";
 
-        assert_eq!(
-            encode(&reply, &plan).unwrap(),
-            BytesMut::from(&b"ME a2V5\r\n"[..])
-        );
+        assert_eq!(response(command, b"ME a2V5\r\n"), b"ME a2V5\r\n".as_slice());
     }
 
     #[test]
@@ -546,200 +452,59 @@ mod tests {
     fn encodes_noop() {
         let mut out = BytesMut::new();
         MetaReplyEncoder::new().encode_noop(&mut out);
-
         assert_eq!(out, b"MN\r\n".as_slice());
     }
 
     #[test]
     fn completes_get_vertical_slice() {
-        let mut request_decoder = MetaRequestDecoder::new();
-        let mut frontend_input = BytesMut::from(&b"mg /region/cluster/key Otag c v\r\n"[..]);
-        let DecodedMetaCommand::Request {
-            request,
-            reply_plan,
-        } = request_decoder
-            .decode(&mut frontend_input)
-            .unwrap()
-            .unwrap()
-        else {
-            panic!("expected request");
-        };
-
-        let mut backend_output = BytesMut::new();
-        let expectation = MetaRequestEncoder::new()
-            .encode(&request, &mut backend_output)
-            .unwrap();
-        assert_eq!(backend_output, b"mg key v c\r\n".as_slice());
-
-        let reply_decoder = MetaReplyDecoder::new();
-        let mut backend_input = BytesMut::from(&b"VA 3 c42\r\nfoo\r\n"[..]);
-        let reply = reply_decoder
-            .decode(&expectation, &mut backend_input)
-            .unwrap()
-            .unwrap();
-
-        let mut frontend_output = BytesMut::new();
+        let command = b"mg /region/cluster/key Otag c v\r\n";
+        assert_eq!(backend_request(command), b"mg key v c\r\n".as_slice());
         assert_eq!(
-            MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(())
+            response(command, b"VA 3 c42\r\nfoo\r\n"),
+            b"VA 3 Otag c42\r\nfoo\r\n".as_slice()
         );
-        assert_eq!(frontend_output, b"VA 3 Otag c42\r\nfoo\r\n".as_slice());
     }
 
     #[test]
     fn completes_store_vertical_slice() {
-        let mut request_decoder = MetaRequestDecoder::new();
-        let mut frontend_input =
-            BytesMut::from(&b"ms /region/cluster/key 3 Otag s c k\r\nfoo\r\n"[..]);
-        let DecodedMetaCommand::Request {
-            request,
-            reply_plan,
-        } = request_decoder
-            .decode(&mut frontend_input)
-            .unwrap()
-            .unwrap()
-        else {
-            panic!("expected request");
-        };
-
-        let mut backend_output = BytesMut::new();
-        let expectation = MetaRequestEncoder::new()
-            .encode(&request, &mut backend_output)
-            .unwrap();
-        assert_eq!(backend_output, b"ms key 3 c s\r\nfoo\r\n".as_slice());
-
-        let reply_decoder = MetaReplyDecoder::new();
-        let mut backend_input = BytesMut::from(&b"HD c42 s3\r\n"[..]);
-        let reply = reply_decoder
-            .decode(&expectation, &mut backend_input)
-            .unwrap()
-            .unwrap();
-
-        let mut frontend_output = BytesMut::new();
+        let command = b"ms /region/cluster/key 3 Otag s c k\r\nfoo\r\n";
         assert_eq!(
-            MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(())
+            backend_request(command),
+            b"ms key 3 c s\r\nfoo\r\n".as_slice()
         );
         assert_eq!(
-            frontend_output,
+            response(command, b"HD c42 s3\r\n"),
             b"HD Otag s3 c42 k/region/cluster/key\r\n".as_slice()
-        );
+        )
     }
 
     #[test]
     fn completes_delete_vertical_slice() {
-        let mut request_decoder = MetaRequestDecoder::new();
-        let mut frontend_input = BytesMut::from(&b"md /region/cluster/key Otag k C42\r\n"[..]);
-        let DecodedMetaCommand::Request {
-            request,
-            reply_plan,
-        } = request_decoder
-            .decode(&mut frontend_input)
-            .unwrap()
-            .unwrap()
-        else {
-            panic!("expected request");
-        };
-
-        let mut backend_output = BytesMut::new();
-        let expectation = MetaRequestEncoder::new()
-            .encode(&request, &mut backend_output)
-            .unwrap();
-        assert_eq!(backend_output, b"md key C42\r\n".as_slice());
-
-        let reply_decoder = MetaReplyDecoder::new();
-        let mut backend_input = BytesMut::from(&b"HD\r\n"[..]);
-        let reply = reply_decoder
-            .decode(&expectation, &mut backend_input)
-            .unwrap()
-            .unwrap();
-
-        let mut frontend_output = BytesMut::new();
+        let command = b"md /region/cluster/key Otag k C42\r\n";
+        assert_eq!(backend_request(command), b"md key C42\r\n".as_slice());
         assert_eq!(
-            MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(())
-        );
-        assert_eq!(
-            frontend_output,
+            response(command, b"HD\r\n"),
             b"HD Otag k/region/cluster/key\r\n".as_slice()
-        );
+        )
     }
 
     #[test]
     fn completes_arithmetic_vertical_slice() {
-        let mut request_decoder = MetaRequestDecoder::new();
-        let mut frontend_input = BytesMut::from(&b"ma /region/cluster/key Otag t c v k D2\r\n"[..]);
-        let DecodedMetaCommand::Request {
-            request,
-            reply_plan,
-        } = request_decoder
-            .decode(&mut frontend_input)
-            .unwrap()
-            .unwrap()
-        else {
-            panic!("expected request");
-        };
-
-        let mut backend_output = BytesMut::new();
-        let expectation = MetaRequestEncoder::new()
-            .encode(&request, &mut backend_output)
-            .unwrap();
-        assert_eq!(backend_output, b"ma key v c D2 t\r\n".as_slice());
-
-        let reply_decoder = MetaReplyDecoder::new();
-        let mut backend_input = BytesMut::from(&b"VA 2 c42 t60\r\n43\r\n"[..]);
-        let reply = reply_decoder
-            .decode(&expectation, &mut backend_input)
-            .unwrap()
-            .unwrap();
-
-        let mut frontend_output = BytesMut::new();
+        let command = b"ma /region/cluster/key Otag t c v k D2\r\n";
+        assert_eq!(backend_request(command), b"ma key v c D2 t\r\n".as_slice());
         assert_eq!(
-            MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(())
-        );
-        assert_eq!(
-            frontend_output,
+            response(command, b"VA 2 c42 t60\r\n43\r\n"),
             b"VA 2 Otag t60 c42 k/region/cluster/key\r\n43\r\n".as_slice()
-        );
+        )
     }
 
     #[test]
     fn completes_debug_vertical_slice() {
-        let mut request_decoder = MetaRequestDecoder::new();
-        let mut frontend_input = BytesMut::from(&b"me /region/cluster/key Pproxy\r\n"[..]);
-        let DecodedMetaCommand::Request {
-            request,
-            reply_plan,
-        } = request_decoder
-            .decode(&mut frontend_input)
-            .unwrap()
-            .unwrap()
-        else {
-            panic!("expected request");
-        };
-
-        let mut backend_output = BytesMut::new();
-        let expectation = MetaRequestEncoder::new()
-            .encode(&request, &mut backend_output)
-            .unwrap();
-        assert_eq!(backend_output, b"me key\r\n".as_slice());
-
-        let reply_decoder = MetaReplyDecoder::new();
-        let mut backend_input = BytesMut::from(&b"ME key exp=60 fetch=yes\r\n"[..]);
-        let reply = reply_decoder
-            .decode(&expectation, &mut backend_input)
-            .unwrap()
-            .unwrap();
-
-        let mut frontend_output = BytesMut::new();
+        let command = b"me /region/cluster/key Pproxy\r\n";
+        assert_eq!(backend_request(command), b"me key\r\n".as_slice());
         assert_eq!(
-            MetaReplyEncoder::new().encode(&reply, &reply_plan, &mut frontend_output),
-            Ok(())
-        );
-        assert_eq!(
-            frontend_output,
+            response(command, b"ME key exp=60 fetch=yes\r\n"),
             b"ME /region/cluster/key exp=60 fetch=yes\r\n".as_slice()
-        );
+        )
     }
 }

@@ -107,82 +107,41 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::test_support::request;
+    use crate::test_support::{
+        backend_request, encode_request, expect_get_request, expect_store_request, key, request,
+        store,
+    };
     use crate::{
         meta::{request_decoder::MAX_VALUE_BYTES, GetSuccessShape},
-        request::{
-            GetRequest, GetTemporalInstruction, GetTemporalInstructions, StoreMode, StoreRequest,
-        },
+        request::GetTemporalInstruction,
     };
-
-    fn encode(request: &Request) -> Result<BytesMut, MetaRequestEncodeError> {
-        let mut out = BytesMut::new();
-        let _expectation = MetaRequestEncoder::new().encode(request, &mut out)?;
-        Ok(out)
-    }
-
-    fn get(key: Key) -> GetRequest {
-        GetRequest {
-            key,
-            return_value: false,
-            return_client_flags: false,
-            return_cas: false,
-            return_size: false,
-            return_hit_state: false,
-            return_last_access: false,
-            check_cas: None,
-            override_cas: None,
-            no_lru_bump: false,
-            temporal: GetTemporalInstructions::default(),
-        }
-    }
-
-    fn store(key: Key, value: Bytes) -> StoreRequest {
-        StoreRequest {
-            key,
-            value,
-            return_cas: false,
-            return_size: false,
-            mode: StoreMode::Set,
-            client_flags: None,
-            ttl: None,
-            compare_cas: None,
-            override_cas: None,
-            invalidate: false,
-            vivify_ttl: None,
-        }
-    }
 
     #[test]
     fn encodes_basic_get() {
-        assert_eq!(
-            encode(&request(b"mg key\r\n")).unwrap(),
-            b"mg key\r\n".as_slice()
-        );
+        assert_eq!(backend_request(b"mg key\r\n"), b"mg key\r\n".as_slice());
     }
 
     #[test]
     fn encodes_basic_store() {
-        let request = request(b"ms key 3\r\nfoo\r\n");
-        assert_eq!(encode(&request).unwrap(), b"ms key 3\r\nfoo\r\n".as_slice());
+        assert_eq!(
+            backend_request(b"ms key 3\r\nfoo\r\n"),
+            b"ms key 3\r\nfoo\r\n".as_slice()
+        );
     }
 
     #[test]
     fn encodes_basic_delete() {
-        let request = request(b"md key\r\n");
-        assert_eq!(encode(&request).unwrap(), b"md key\r\n".as_slice());
+        assert_eq!(backend_request(b"md key\r\n"), b"md key\r\n".as_slice());
     }
 
     #[test]
     fn encodes_basic_arithmetic() {
-        let request = request(b"ma key\r\n");
-        assert_eq!(encode(&request).unwrap(), b"ma key\r\n".as_slice());
+        assert_eq!(backend_request(b"ma key\r\n"), b"ma key\r\n".as_slice());
     }
 
     #[test]
     fn encodes_basic_debug() {
-        let request = request(b"me key\r\n");
-        assert_eq!(encode(&request).unwrap(), b"me key\r\n".as_slice());
+        assert_eq!(backend_request(b"me key\r\n"), b"me key\r\n".as_slice());
     }
 
     #[test]
@@ -198,13 +157,13 @@ mod tests {
     #[test]
     fn returns_debug_reply_expectation_with_backend_key() {
         let request = request(b"me /region/cluster/key\r\n");
-        let mut out = BytesMut::new();
+        let (out, expectation) = encode_request(&request);
 
         assert_eq!(
-            MetaRequestEncoder::new().encode(&request, &mut out),
-            Ok(MetaReplyExpectation::Debug {
+            expectation,
+            MetaReplyExpectation::Debug {
                 key: Bytes::from_static(b"key"),
-            })
+            }
         );
         assert_eq!(out, b"me key\r\n".as_slice());
     }
@@ -212,51 +171,46 @@ mod tests {
     #[test]
     fn base64_encodes_binary_debug_key() {
         let request = request(b"me AAE= b\r\n");
-        let mut out = BytesMut::new();
+        let (out, expectation) = encode_request(&request);
 
         assert_eq!(
-            MetaRequestEncoder::new().encode(&request, &mut out),
-            Ok(MetaReplyExpectation::Debug {
+            expectation,
+            MetaReplyExpectation::Debug {
                 key: Bytes::from_static(b"\0\x01"),
-            })
+            }
         );
         assert_eq!(out, b"me AAE= b\r\n".as_slice());
     }
 
     #[test]
     fn returns_arithmetic_reply_expectation() {
-        let encoder = MetaRequestEncoder::new();
-        let mut out = BytesMut::new();
         let header = request(b"ma key\r\n");
         assert_eq!(
-            encoder.encode(&header, &mut out),
-            Ok(MetaReplyExpectation::Arithmetic {
+            encode_request(&header).1,
+            MetaReplyExpectation::Arithmetic {
                 value: false,
                 cas: false,
                 ttl: false,
-            })
+            }
         );
 
-        out.clear();
         let value = request(b"ma key v\r\n");
         assert_eq!(
-            encoder.encode(&value, &mut out),
-            Ok(MetaReplyExpectation::Arithmetic {
+            encode_request(&value).1,
+            MetaReplyExpectation::Arithmetic {
                 value: true,
                 cas: false,
                 ttl: false,
-            })
+            }
         );
     }
 
     #[test]
     fn strips_arithmetic_frontend_metadata_and_routing_prefix() {
-        let request = request(
-            b"ma /region/cluster/key Otag N30 J5 D2 T60 MD q t c v k C42 E43 Pproxy Lpath/\r\n",
-        );
-
         assert_eq!(
-            encode(&request).unwrap(),
+            backend_request(
+                b"ma /region/cluster/key Otag N30 J5 D2 T60 MD q t c v k C42 E43 Pproxy Lpath/\r\n",
+            ),
             b"ma key v c C42 E43 J5 D2 MD N30 T60 t\r\n".as_slice()
         );
     }
@@ -264,87 +218,76 @@ mod tests {
     #[test]
     fn canonicalizes_arithmetic_modes_and_defaults() {
         assert_eq!(
-            encode(&request(b"ma key MI D1\r\n")).unwrap(),
+            backend_request(b"ma key MI D1\r\n"),
             b"ma key\r\n".as_slice()
         );
+        assert_eq!(backend_request(b"ma key M+\r\n"), b"ma key\r\n".as_slice());
         assert_eq!(
-            encode(&request(b"ma key M+\r\n")).unwrap(),
-            b"ma key\r\n".as_slice()
-        );
-        assert_eq!(
-            encode(&request(b"ma key M-\r\n")).unwrap(),
+            backend_request(b"ma key M-\r\n"),
             b"ma key MD\r\n".as_slice()
         );
     }
 
     #[test]
     fn preserves_arithmetic_temporal_order() {
-        let request = request(b"ma key t T60 N30\r\n");
-
         assert_eq!(
-            encode(&request).unwrap(),
+            backend_request(b"ma key t T60 N30\r\n"),
             b"ma key t T60 N30\r\n".as_slice()
         );
     }
 
     #[test]
     fn base64_encodes_binary_arithmetic_key() {
-        let request = request(b"ma AAE= b\r\n");
-
-        assert_eq!(encode(&request).unwrap(), b"ma AAE= b\r\n".as_slice());
+        assert_eq!(
+            backend_request(b"ma AAE= b\r\n"),
+            b"ma AAE= b\r\n".as_slice()
+        );
     }
 
     #[test]
     fn returns_delete_reply_expectation() {
         let request = request(b"md key\r\n");
-        let mut out = BytesMut::new();
 
-        assert_eq!(
-            MetaRequestEncoder::new().encode(&request, &mut out),
-            Ok(MetaReplyExpectation::Delete)
-        );
+        assert_eq!(encode_request(&request).1, MetaReplyExpectation::Delete);
     }
 
     #[test]
     fn strips_delete_frontend_metadata_and_routing_prefix() {
-        let request =
-            request(b"md /region/cluster/key C42 E43 F7 I k Otag q T60 x Pproxy Lpath/\r\n");
-
         assert_eq!(
-            encode(&request).unwrap(),
+            backend_request(
+                b"md /region/cluster/key C42 E43 F7 I k Otag q T60 x Pproxy Lpath/\r\n",
+            ),
             b"md key C42 E43 F7 I T60 x\r\n".as_slice()
         );
     }
 
     #[test]
     fn base64_encodes_binary_delete_key() {
-        let request = request(b"md AAE= b\r\n");
-
-        assert_eq!(encode(&request).unwrap(), b"md AAE= b\r\n".as_slice());
+        assert_eq!(
+            backend_request(b"md AAE= b\r\n"),
+            b"md AAE= b\r\n".as_slice()
+        );
     }
 
     #[test]
     fn returns_store_reply_expectation() {
         let request = request(b"ms key 3\r\nfoo\r\n");
-        let mut out = BytesMut::new();
 
         assert_eq!(
-            MetaRequestEncoder::new().encode(&request, &mut out),
-            Ok(MetaReplyExpectation::Store {
+            encode_request(&request).1,
+            MetaReplyExpectation::Store {
                 cas: false,
                 size: false,
-            })
+            }
         );
     }
 
     #[test]
     fn strips_store_frontend_metadata_and_routing_prefix() {
-        let request = request(
-            b"ms /region/cluster/key 3 c C42 E43 F7 I k Otag q s T60 MA N30 Pproxy Lpath/\r\nfoo\r\n",
-        );
-
         assert_eq!(
-            encode(&request).unwrap(),
+            backend_request(
+                b"ms /region/cluster/key 3 c C42 E43 F7 I k Otag q s T60 MA N30 Pproxy Lpath/\r\nfoo\r\n",
+            ),
             b"ms key 3 c s C42 E43 F7 I T60 MA N30\r\nfoo\r\n".as_slice()
         );
     }
@@ -359,26 +302,23 @@ mod tests {
             (b'P', b"ms key 0 MP\r\n\r\n".as_slice()),
         ] {
             let input = [b"ms key 0 M".as_slice(), &[wire_mode], b"\r\n\r\n"].concat();
-            assert_eq!(encode(&request(&input)).unwrap(), expected);
+            assert_eq!(backend_request(&input), expected);
         }
     }
 
     #[test]
     fn encodes_binary_store_key_and_value() {
-        let request = request(b"ms AAE= 4 b\r\na\0b\n\r\n");
-
         assert_eq!(
-            encode(&request).unwrap(),
+            backend_request(b"ms AAE= 4 b\r\na\0b\n\r\n"),
             b"ms AAE= 4 b\r\na\0b\n\r\n".as_slice()
         );
     }
 
     #[test]
     fn rejects_oversized_store_value_atomically() {
-        let request = Request::Store(store(
-            Key::new(Bytes::from_static(b"key")).unwrap(),
-            Bytes::from(vec![b'x'; MAX_VALUE_BYTES + 1]),
-        ));
+        let mut store = expect_store_request(store(b"key", b""));
+        store.value = Bytes::from(vec![b'x'; MAX_VALUE_BYTES + 1]);
+        let request = Request::Store(store);
         let mut out = BytesMut::from(&b"existing"[..]);
 
         assert_eq!(
@@ -392,59 +332,54 @@ mod tests {
 
     #[test]
     fn returns_get_reply_shape() {
-        let mut out = BytesMut::new();
-        let encoder = MetaRequestEncoder::new();
-
         let header = request(b"mg key\r\n");
         assert_eq!(
-            encoder.encode(&header, &mut out),
-            Ok(MetaReplyExpectation::Get(GetSuccessShape::Header))
+            encode_request(&header).1,
+            MetaReplyExpectation::Get(GetSuccessShape::Header)
         );
 
-        out.clear();
         let value = request(b"mg key v\r\n");
         assert_eq!(
-            encoder.encode(&value, &mut out),
-            Ok(MetaReplyExpectation::Get(GetSuccessShape::Value))
+            encode_request(&value).1,
+            MetaReplyExpectation::Get(GetSuccessShape::Value)
         );
 
-        out.clear();
         let conditional = request(b"mg key v C42\r\n");
         assert_eq!(
-            encoder.encode(&conditional, &mut out),
-            Ok(MetaReplyExpectation::Get(GetSuccessShape::HeaderOrValue))
+            encode_request(&conditional).1,
+            MetaReplyExpectation::Get(GetSuccessShape::HeaderOrValue)
         );
     }
 
     #[test]
     fn strips_frontend_metadata_and_routing_prefix() {
-        let request = request(
-            b"mg /region/cluster/key Otag s N30 T40 t R50 c f h k l C99 E100 u v q Pproxy Lpath/\r\n",
-        );
-
         assert_eq!(
-            encode(&request).unwrap(),
+            backend_request(
+                b"mg /region/cluster/key Otag s N30 T40 t R50 c f h k l C99 E100 u v q Pproxy Lpath/\r\n",
+            ),
             b"mg key v f c s h l C99 E100 u N30 T40 t R50\r\n".as_slice()
         );
     }
 
     #[test]
     fn preserves_hash_stop_suffix_on_backend_key() {
-        let request = request(b"mg /region/cluster/key|#|suffix\r\n");
-
-        assert_eq!(encode(&request).unwrap(), b"mg key|#|suffix\r\n".as_slice());
+        assert_eq!(
+            backend_request(b"mg /region/cluster/key|#|suffix\r\n"),
+            b"mg key|#|suffix\r\n".as_slice()
+        );
     }
 
     #[test]
     fn base64_encodes_binary_backend_key_without_allocation() {
-        let request = request(b"mg AAE= b v\r\n");
-
-        assert_eq!(encode(&request).unwrap(), b"mg AAE= b v\r\n".as_slice());
+        assert_eq!(
+            backend_request(b"mg AAE= b v\r\n"),
+            b"mg AAE= b v\r\n".as_slice()
+        );
     }
 
     #[test]
     fn encodes_numeric_boundaries() {
-        let mut request = get(Key::new(Bytes::from_static(b"key")).unwrap());
+        let mut request = expect_get_request(request(b"mg key\r\n"));
         request.check_cas = Some(u64::MAX);
         request.override_cas = Some(0);
         request
@@ -457,16 +392,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            encode(&Request::Get(request)).unwrap(),
+            encode_request(&Request::Get(request)).0,
             b"mg key C18446744073709551615 E0 N-2147483648 T2147483647\r\n".as_slice()
         );
     }
 
     #[test]
     fn rejects_empty_backend_key_atomically() {
-        let request = Request::Get(get(
-            Key::new(Bytes::from_static(b"/region/cluster/")).unwrap()
-        ));
+        let request = request(b"mg /region/cluster/\r\n");
         let mut out = BytesMut::from(&b"existing"[..]);
 
         assert_eq!(
@@ -478,10 +411,13 @@ mod tests {
 
     #[test]
     fn rejects_binary_key_that_expands_past_wire_limit() {
-        let request = Request::Get(get(Key::new(Bytes::from(vec![0; 188])).unwrap()));
+        let mut request = expect_get_request(request(b"mg fixture\r\n"));
+        request.key = key(&[0; 188]);
+        let request = Request::Get(request);
+        let mut out = BytesMut::new();
 
         assert_eq!(
-            encode(&request),
+            MetaRequestEncoder::new().encode(&request, &mut out),
             Err(MetaRequestEncodeError::EncodedKeyTooLong {
                 maximum: MAX_KEY_BYTES,
             })

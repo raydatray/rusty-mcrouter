@@ -49,7 +49,7 @@ mod tests {
     use rusty_mcrouter_core::{
         build_route, DestinationRoute, Route, RoutingMetricsLayout, RoutingMetricsShard,
     };
-    use rusty_mcrouter_protocol::test_support::get;
+    use rusty_mcrouter_protocol::test_support::{get, server_error};
 
     async fn boundary_reply(error: SendError) -> Reply {
         let route = DestinationRoute::new(MockBackend::failing(error)).into_dyn();
@@ -61,12 +61,7 @@ mod tests {
     #[tokio::test]
     async fn unrecovered_timeout_becomes_server_error_at_boundary() {
         let reply = boundary_reply(SendError::Request(RequestError::Timeout { sent: true })).await;
-        assert_eq!(
-            reply,
-            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
-                b"backend unavailable"
-            ))))
-        );
+        assert_eq!(reply, server_error(b"backend unavailable"));
     }
 
     #[tokio::test]
@@ -75,12 +70,7 @@ mod tests {
             reason: ResultCode::Timeout,
         })
         .await;
-        assert_eq!(
-            reply,
-            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
-                b"Server unavailable. Reason: Timeout"
-            ))))
-        );
+        assert_eq!(reply, server_error(b"Server unavailable. Reason: Timeout"));
     }
 
     #[tokio::test]

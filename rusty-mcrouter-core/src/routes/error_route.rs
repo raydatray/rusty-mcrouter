@@ -29,7 +29,7 @@ impl Route for ErrorRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_mcrouter_protocol::test_support::{get, store};
+    use rusty_mcrouter_protocol::test_support::{get, protocol_error, server_error, store};
 
     use crate::context::test_routing_state;
 
@@ -43,17 +43,14 @@ mod tests {
     async fn with_message_returns_server_error_with_message() {
         let r = ErrorRoute::new(Some("boom".to_string()));
         let reply = execute(&r, get(b"k")).await.unwrap();
-        assert_eq!(
-            reply,
-            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"boom"))))
-        );
+        assert_eq!(reply, server_error(b"boom"));
     }
 
     #[tokio::test]
     async fn without_message_returns_bare_error() {
         let r = ErrorRoute::new(None);
         let reply = execute(&r, get(b"k")).await.unwrap();
-        assert_eq!(reply, Reply::Error(ErrorReply::Error));
+        assert_eq!(reply, protocol_error());
     }
 
     #[tokio::test]

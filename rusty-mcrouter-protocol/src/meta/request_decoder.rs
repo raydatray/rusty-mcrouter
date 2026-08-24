@@ -314,14 +314,10 @@ mod tests {
     use crate::request::{
         ArithmeticMode, ArithmeticTemporalInstruction, GetTemporalInstruction, StoreMode,
     };
-
-    fn decode(input: &[u8]) -> DecodedMetaCommand {
-        let mut decoder = MetaRequestDecoder::new();
-        let mut src = BytesMut::from(input);
-        let command = decoder.decode(&mut src).unwrap().unwrap();
-        assert!(src.is_empty());
-        command
-    }
+    use crate::test_support::{
+        self, decode_command, expect_arithmetic_request, expect_debug_request,
+        expect_delete_request, expect_get_request, expect_store_request,
+    };
 
     fn decode_error(input: &[u8]) -> MetaRequestDecodeError {
         let mut decoder = MetaRequestDecoder::new();
@@ -333,13 +329,8 @@ mod tests {
 
     #[test]
     fn decodes_basic_get() {
-        let DecodedMetaCommand::Request {
-            request: Request::Get(request),
-            reply_plan,
-        } = decode(b"mg user:1\r\n")
-        else {
-            panic!("expected get request");
-        };
+        let (request, reply_plan) = test_support::command(b"mg user:1\r\n");
+        let request = expect_get_request(request);
 
         assert_eq!(request.key.as_bytes(), b"user:1");
         assert!(!request.return_value);
@@ -350,13 +341,10 @@ mod tests {
 
     #[test]
     fn separates_get_semantics_from_frontend_reply_plan() {
-        let DecodedMetaCommand::Request {
-            request: Request::Get(request),
-            reply_plan,
-        } = decode(b"mg key Otag s N30 T40 t R50 c f h k l C99 E100 u v q Pproxy Lpath/\r\n")
-        else {
-            panic!("expected get request");
-        };
+        let (request, reply_plan) = test_support::command(
+            b"mg key Otag s N30 T40 t R50 c f h k l C99 E100 u v q Pproxy Lpath/\r\n",
+        );
+        let request = expect_get_request(request);
 
         assert!(request.return_value);
         assert!(request.return_client_flags);
@@ -398,13 +386,8 @@ mod tests {
 
     #[test]
     fn normalizes_base64_get_key() {
-        let DecodedMetaCommand::Request {
-            request: Request::Get(request),
-            reply_plan,
-        } = decode(b"mg a2V5 b k\r\n")
-        else {
-            panic!("expected get request");
-        };
+        let (request, reply_plan) = test_support::command(b"mg a2V5 b k\r\n");
+        let request = expect_get_request(request);
 
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
@@ -413,13 +396,8 @@ mod tests {
 
     #[test]
     fn decodes_basic_store() {
-        let DecodedMetaCommand::Request {
-            request: Request::Store(request),
-            reply_plan,
-        } = decode(b"ms key 3\r\nfoo\r\n")
-        else {
-            panic!("expected store request");
-        };
+        let (request, reply_plan) = test_support::command(b"ms key 3\r\nfoo\r\n");
+        let request = expect_store_request(request);
 
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(request.value, b"foo".as_slice());
@@ -437,13 +415,10 @@ mod tests {
 
     #[test]
     fn separates_store_semantics_from_frontend_reply_plan() {
-        let DecodedMetaCommand::Request {
-            request: Request::Store(request),
-            reply_plan,
-        } = decode(b"ms key 3 c C42 E43 F7 I k Otag q s T60 MA N30 Pproxy Lpath/\r\nfoo\r\n")
-        else {
-            panic!("expected store request");
-        };
+        let (request, reply_plan) = test_support::command(
+            b"ms key 3 c C42 E43 F7 I k Otag q s T60 MA N30 Pproxy Lpath/\r\nfoo\r\n",
+        );
+        let request = expect_store_request(request);
 
         assert_eq!(request.mode, StoreMode::Append);
         assert_eq!(request.client_flags, Some(7));
@@ -479,26 +454,15 @@ mod tests {
             (b'P', StoreMode::Prepend),
         ] {
             let input = [b"ms key 0 M".as_slice(), &[wire_mode], b"\r\n\r\n"].concat();
-            let DecodedMetaCommand::Request {
-                request: Request::Store(request),
-                ..
-            } = decode(&input)
-            else {
-                panic!("expected store request");
-            };
+            let request = expect_store_request(test_support::request(&input));
             assert_eq!(request.mode, expected);
         }
     }
 
     #[test]
     fn normalizes_base64_store_key() {
-        let DecodedMetaCommand::Request {
-            request: Request::Store(request),
-            reply_plan,
-        } = decode(b"ms a2V5 1 b k\r\nx\r\n")
-        else {
-            panic!("expected store request");
-        };
+        let (request, reply_plan) = test_support::command(b"ms a2V5 1 b k\r\nx\r\n");
+        let request = expect_store_request(request);
 
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
@@ -507,13 +471,8 @@ mod tests {
 
     #[test]
     fn decodes_basic_delete() {
-        let DecodedMetaCommand::Request {
-            request: Request::Delete(request),
-            reply_plan,
-        } = decode(b"md key\r\n")
-        else {
-            panic!("expected delete request");
-        };
+        let (request, reply_plan) = test_support::command(b"md key\r\n");
+        let request = expect_delete_request(request);
 
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(request.compare_cas, None);
@@ -527,13 +486,9 @@ mod tests {
 
     #[test]
     fn separates_delete_semantics_from_frontend_reply_plan() {
-        let DecodedMetaCommand::Request {
-            request: Request::Delete(request),
-            reply_plan,
-        } = decode(b"md key C42 E43 F7 I k Otag q T60 x Pproxy Lpath/\r\n")
-        else {
-            panic!("expected delete request");
-        };
+        let (request, reply_plan) =
+            test_support::command(b"md key C42 E43 F7 I k Otag q T60 x Pproxy Lpath/\r\n");
+        let request = expect_delete_request(request);
 
         assert_eq!(request.compare_cas, Some(42));
         assert_eq!(request.override_cas, Some(43));
@@ -580,13 +535,8 @@ mod tests {
 
     #[test]
     fn normalizes_base64_delete_key() {
-        let DecodedMetaCommand::Request {
-            request: Request::Delete(request),
-            reply_plan,
-        } = decode(b"md a2V5 b k\r\n")
-        else {
-            panic!("expected delete request");
-        };
+        let (request, reply_plan) = test_support::command(b"md a2V5 b k\r\n");
+        let request = expect_delete_request(request);
 
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
@@ -611,13 +561,8 @@ mod tests {
 
     #[test]
     fn decodes_basic_arithmetic() {
-        let DecodedMetaCommand::Request {
-            request: Request::Arithmetic(request),
-            reply_plan,
-        } = decode(b"ma key\r\n")
-        else {
-            panic!("expected arithmetic request");
-        };
+        let (request, reply_plan) = test_support::command(b"ma key\r\n");
+        let request = expect_arithmetic_request(request);
 
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(request.mode, ArithmeticMode::Increment);
@@ -633,13 +578,10 @@ mod tests {
 
     #[test]
     fn separates_arithmetic_semantics_from_frontend_reply_plan() {
-        let DecodedMetaCommand::Request {
-            request: Request::Arithmetic(request),
-            reply_plan,
-        } = decode(b"ma key Otag N30 J5 D2 T60 MD q t c v k C42 E43 Pproxy Lpath/\r\n")
-        else {
-            panic!("expected arithmetic request");
-        };
+        let (request, reply_plan) = test_support::command(
+            b"ma key Otag N30 J5 D2 T60 MD q t c v k C42 E43 Pproxy Lpath/\r\n",
+        );
+        let request = expect_arithmetic_request(request);
 
         assert_eq!(request.mode, ArithmeticMode::Decrement);
         assert_eq!(request.delta, 2);
@@ -680,13 +622,7 @@ mod tests {
             (b'-', ArithmeticMode::Decrement),
         ] {
             let input = [b"ma key M".as_slice(), &[wire_mode], b"\r\n"].concat();
-            let DecodedMetaCommand::Request {
-                request: Request::Arithmetic(request),
-                ..
-            } = decode(&input)
-            else {
-                panic!("expected arithmetic request");
-            };
+            let request = expect_arithmetic_request(test_support::request(&input));
             assert_eq!(request.mode, expected);
         }
     }
@@ -720,13 +656,8 @@ mod tests {
 
     #[test]
     fn normalizes_base64_arithmetic_key() {
-        let DecodedMetaCommand::Request {
-            request: Request::Arithmetic(request),
-            reply_plan,
-        } = decode(b"ma a2V5 b k\r\n")
-        else {
-            panic!("expected arithmetic request");
-        };
+        let (request, reply_plan) = test_support::command(b"ma a2V5 b k\r\n");
+        let request = expect_arithmetic_request(request);
 
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(reply_plan.key_encoding, KeyEncoding::Base64);
@@ -759,13 +690,8 @@ mod tests {
 
     #[test]
     fn decodes_basic_debug() {
-        let DecodedMetaCommand::Request {
-            request: Request::Debug(request),
-            reply_plan,
-        } = decode(b"me key\r\n")
-        else {
-            panic!("expected debug request");
-        };
+        let (request, reply_plan) = test_support::command(b"me key\r\n");
+        let request = expect_debug_request(request);
 
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
@@ -804,13 +730,8 @@ mod tests {
 
     #[test]
     fn normalizes_base64_debug_key() {
-        let DecodedMetaCommand::Request {
-            request: Request::Debug(request),
-            reply_plan,
-        } = decode(b"me a2V5 b\r\n")
-        else {
-            panic!("expected debug request");
-        };
+        let (request, reply_plan) = test_support::command(b"me a2V5 b\r\n");
+        let request = expect_debug_request(request);
 
         assert_eq!(request.key.as_bytes(), b"key");
         assert_eq!(reply_plan.external_key.as_deref(), Some(b"key".as_slice()));
@@ -860,13 +781,7 @@ mod tests {
 
     #[test]
     fn decodes_empty_store_value() {
-        let DecodedMetaCommand::Request {
-            request: Request::Store(request),
-            ..
-        } = decode(b"ms key 0\r\n\r\n")
-        else {
-            panic!("expected store request");
-        };
+        let request = expect_store_request(test_support::request(b"ms key 0\r\n\r\n"));
 
         assert!(request.value.is_empty());
     }
@@ -1023,13 +938,9 @@ mod tests {
 
     #[test]
     fn preserves_reverse_temporal_and_output_order() {
-        let DecodedMetaCommand::Request {
-            request: Request::Get(request),
-            reply_plan,
-        } = decode(b"mg key k l h f c t R50 T40 N30 s Otag\r\n")
-        else {
-            panic!("expected get request");
-        };
+        let (request, reply_plan) =
+            test_support::command(b"mg key k l h f c t R50 T40 N30 s Otag\r\n");
+        let request = expect_get_request(request);
 
         assert_eq!(
             request.temporal.iter().cloned().collect::<Vec<_>>(),
@@ -1122,9 +1033,8 @@ mod tests {
         let mut accepted = Vec::from(&b"mg key O"[..]);
         accepted.extend(std::iter::repeat(b'x').take(MAX_OPAQUE_BYTES));
         accepted.extend_from_slice(b"\r\n");
-        let DecodedMetaCommand::Request { reply_plan, .. } = decode(&accepted) else {
-            panic!("expected get request");
-        };
+        let (request, reply_plan) = test_support::command(&accepted);
+        expect_get_request(request);
         assert_eq!(reply_plan.opaque.unwrap().len(), MAX_OPAQUE_BYTES);
 
         let mut rejected = Vec::from(&b"mg key O"[..]);
@@ -1155,13 +1065,9 @@ mod tests {
         );
 
         // The same line minus one flag sits at the budget and must parse.
-        let DecodedMetaCommand::Request {
-            request: Request::Get(request),
-            reply_plan,
-        } = decode(b"mg AAAA b c f h k l q s t u v C1 E1 N30 R30 T30 Otag Pp\r\n")
-        else {
-            panic!("expected get request at the flag budget");
-        };
+        let (request, reply_plan) =
+            test_support::command(b"mg AAAA b c f h k l q s t u v C1 E1 N30 R30 T30 Otag Pp\r\n");
+        let request = expect_get_request(request);
         assert!(request.return_value);
         assert_eq!(reply_plan.opaque.as_deref(), Some(b"tag".as_slice()));
     }
@@ -1197,13 +1103,7 @@ mod tests {
         input.push(b'\n');
         assert_eq!(input.len(), MAX_COMMAND_LINE_BYTES);
 
-        let DecodedMetaCommand::Request {
-            request: Request::Get(request),
-            ..
-        } = decode(&input)
-        else {
-            panic!("expected get request");
-        };
+        let request = expect_get_request(test_support::request(&input));
         assert_eq!(request.key.as_bytes(), b"key");
     }
 
@@ -1243,11 +1143,7 @@ mod tests {
     #[test]
     fn decodes_noop_with_lf_or_crlf() {
         for input in [b"mn\n".as_slice(), b"mn\r\n".as_slice()] {
-            let mut decoder = MetaRequestDecoder::new();
-            let mut src = BytesMut::from(input);
-
-            assert_eq!(decoder.decode(&mut src), Ok(Some(DecodedMetaCommand::NoOp)));
-            assert!(src.is_empty());
+            assert_eq!(decode_command(input), DecodedMetaCommand::NoOp);
         }
     }
 

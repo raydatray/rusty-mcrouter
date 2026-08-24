@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [features]
-testing = []
+testing = ["rusty-mcrouter-protocol/testing"]
 
 [dependencies]
 bytes.workspace = true

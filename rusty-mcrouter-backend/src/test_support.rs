@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusty_mcrouter_protocol::reply::GetReply;
+use rusty_mcrouter_protocol::test_support::get_miss;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -85,7 +85,7 @@ impl MockBackend {
     }
 
     pub fn miss() -> Self {
-        Self::replying(Reply::Get(GetReply::Miss))
+        Self::replying(get_miss())
     }
 
     pub fn received(&self) -> Vec<Request> {
@@ -167,7 +167,7 @@ impl BackendFactory for MockBackendFactory {
         }
         self.made.lock().unwrap().push(server.to_string());
         Ok(MockBackend::replying(
-            self.reply.clone().unwrap_or(Reply::Get(GetReply::Miss)),
+            self.reply.clone().unwrap_or_else(get_miss),
         ))
     }
 }
