@@ -80,7 +80,7 @@ impl Request {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{delete, get, request, store};
+    use crate::test_support::{arithmetic, debug, delete, get, store};
 
     use super::*;
 
@@ -90,8 +90,8 @@ mod tests {
             (get(b"key"), RequestKind::Get, "mg"),
             (store(b"key", b"value"), RequestKind::Store, "ms"),
             (delete(b"key"), RequestKind::Delete, "md"),
-            (request(b"ma key v\r\n"), RequestKind::Arithmetic, "ma"),
-            (request(b"me key\r\n"), RequestKind::Debug, "me"),
+            (arithmetic(b"key"), RequestKind::Arithmetic, "ma"),
+            (debug(b"key"), RequestKind::Debug, "me"),
         ];
 
         for (request, expected, command) in cases {

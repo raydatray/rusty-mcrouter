@@ -487,37 +487,23 @@ fn ttl_remaining(expiry: Option<Instant>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn req(input: &[u8]) -> Request {
-        let mut decoder = MetaRequestDecoder::new();
-        let mut src = BytesMut::from(input);
-        let DecodedMetaCommand::Request { request, .. } =
-            decoder.decode(&mut src).unwrap().unwrap()
-        else {
-            panic!("expected request");
-        };
-        request
-    }
-
-    fn hit(reply: Reply) -> GetHit {
-        let Reply::Get(GetReply::Hit(hit)) = reply else {
-            panic!("expected get hit, got {reply:?}");
-        };
-        hit
-    }
+    use rusty_mcrouter_protocol::test_support::{
+        client_error, debug_miss, delete_success, expect_arithmetic_success, expect_debug_hit,
+        expect_get_hit, expect_get_value, expect_store_success, get_miss, reply, request,
+    };
 
     #[test]
     fn store_get_round_trip_with_projections() {
         let mut store = MockMcStore::default();
         assert_eq!(
-            store.apply(req(b"ms k 5 F9 c s\r\nworld\r\n")),
-            Reply::Store(StoreReply::Success(StoreResult {
+            expect_store_success(store.apply(request(b"ms k 5 F9 c s\r\nworld\r\n"))),
+            StoreResult {
                 cas: Some(1),
                 size: Some(5),
-            }))
+            }
         );
 
-        let hit = hit(store.apply(req(b"mg k v f c s\r\n")));
+        let hit = expect_get_hit(store.apply(request(b"mg k v f c s\r\n")));
         assert_eq!(hit.value.as_deref(), Some(b"world".as_slice()));
         assert_eq!(hit.client_flags, Some(9));
         assert_eq!(hit.cas, Some(1));
@@ -527,123 +513,98 @@ mod tests {
     #[test]
     fn get_miss_and_bare_hit() {
         let mut store = MockMcStore::default();
-        assert_eq!(
-            store.apply(req(b"mg nope v\r\n")),
-            Reply::Get(GetReply::Miss)
-        );
+        assert_eq!(store.apply(request(b"mg nope v\r\n")), get_miss());
 
-        store.apply(req(b"ms k 1\r\nx\r\n"));
-        assert_eq!(hit(store.apply(req(b"mg k\r\n"))), GetHit::default());
+        store.apply(request(b"ms k 1\r\nx\r\n"));
+        assert_eq!(
+            expect_get_hit(store.apply(request(b"mg k\r\n"))),
+            GetHit::default()
+        );
     }
 
     #[test]
     fn add_and_replace_gate_on_presence() {
         let mut store = MockMcStore::default();
-        assert!(matches!(
-            store.apply(req(b"ms k 1 ME\r\na\r\n")),
-            Reply::Store(StoreReply::Success(_))
-        ));
-        assert!(matches!(
-            store.apply(req(b"ms k 1 ME\r\nb\r\n")),
-            Reply::Store(StoreReply::NotStored(_))
-        ));
-        assert!(matches!(
-            store.apply(req(b"ms missing 1 MR\r\nc\r\n")),
-            Reply::Store(StoreReply::NotStored(_))
-        ));
-        assert!(matches!(
-            store.apply(req(b"ms k 1 MR\r\nd\r\n")),
-            Reply::Store(StoreReply::Success(_))
-        ));
+        let command = b"ms k 1 ME\r\na\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"HD\r\n"));
+        let command = b"ms k 1 ME\r\nb\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"NS\r\n"));
+        let command = b"ms missing 1 MR\r\nc\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"NS\r\n"));
+        let command = b"ms k 1 MR\r\nd\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"HD\r\n"));
         assert_eq!(
-            hit(store.apply(req(b"mg k v\r\n"))).value.as_deref(),
-            Some(b"d".as_slice())
+            expect_get_value(store.apply(request(b"mg k v\r\n"))),
+            b"d".as_slice()
         );
     }
 
     #[test]
     fn append_prepend_and_vivify() {
         let mut store = MockMcStore::default();
-        store.apply(req(b"ms k 5\r\nhello\r\n"));
-        assert!(matches!(
-            store.apply(req(b"ms k 6 MA\r\n world\r\n")),
-            Reply::Store(StoreReply::Success(_))
-        ));
-        assert!(matches!(
-            store.apply(req(b"ms k 6 MP\r\nsays: \r\n")),
-            Reply::Store(StoreReply::Success(_))
-        ));
+        store.apply(request(b"ms k 5\r\nhello\r\n"));
+        let command = b"ms k 6 MA\r\n world\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"HD\r\n"));
+        let command = b"ms k 6 MP\r\nsays: \r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"HD\r\n"));
         assert_eq!(
-            hit(store.apply(req(b"mg k v\r\n"))).value.as_deref(),
-            Some(b"says: hello world".as_slice())
+            expect_get_value(store.apply(request(b"mg k v\r\n"))),
+            b"says: hello world".as_slice()
         );
 
-        assert!(matches!(
-            store.apply(req(b"ms missing 1 MA\r\nx\r\n")),
-            Reply::Store(StoreReply::NotStored(_))
-        ));
-        assert!(matches!(
-            store.apply(req(b"ms vivified 3 MA N60\r\nnew\r\n")),
-            Reply::Store(StoreReply::Success(_))
-        ));
+        let command = b"ms missing 1 MA\r\nx\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"NS\r\n"));
+        let command = b"ms vivified 3 MA N60\r\nnew\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"HD\r\n"));
         assert_eq!(
-            hit(store.apply(req(b"mg vivified v\r\n"))).value.as_deref(),
-            Some(b"new".as_slice())
+            expect_get_value(store.apply(request(b"mg vivified v\r\n"))),
+            b"new".as_slice()
         );
     }
 
     #[test]
     fn compare_cas_gates_stores_and_deletes() {
         let mut store = MockMcStore::default();
-        store.apply(req(b"ms k 1\r\na\r\n")); // cas 1
-        assert!(matches!(
-            store.apply(req(b"ms k 1 C999\r\nb\r\n")),
-            Reply::Store(StoreReply::Exists(_))
-        ));
-        assert!(matches!(
-            store.apply(req(b"ms missing 1 C1\r\nb\r\n")),
-            Reply::Store(StoreReply::NotFound(_))
-        ));
-        assert!(matches!(
-            store.apply(req(b"ms k 1 C1\r\nb\r\n")),
-            Reply::Store(StoreReply::Success(_))
-        ));
+        store.apply(request(b"ms k 1\r\na\r\n")); // cas 1
+        let command = b"ms k 1 C999\r\nb\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"EX\r\n"));
+        let command = b"ms missing 1 C1\r\nb\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"NF\r\n"));
+        let command = b"ms k 1 C1\r\nb\r\n";
+        assert_eq!(store.apply(request(command)), reply(command, b"HD\r\n"));
 
         assert_eq!(
-            store.apply(req(b"md k C999\r\n")),
-            Reply::Delete(DeleteReply::Exists)
+            store.apply(request(b"md k C999\r\n")),
+            reply(b"md k C999\r\n", b"EX\r\n")
         );
+        assert_eq!(store.apply(request(b"md k\r\n")), delete_success());
         assert_eq!(
-            store.apply(req(b"md k\r\n")),
-            Reply::Delete(DeleteReply::Success)
-        );
-        assert_eq!(
-            store.apply(req(b"md k\r\n")),
-            Reply::Delete(DeleteReply::NotFound)
+            store.apply(request(b"md k\r\n")),
+            reply(b"md k\r\n", b"NF\r\n")
         );
     }
 
     #[test]
     fn get_check_cas_suppresses_matching_value() {
         let mut store = MockMcStore::default();
-        store.apply(req(b"ms k 1\r\nx\r\n")); // cas 1
-        assert_eq!(hit(store.apply(req(b"mg k v C1\r\n"))).value, None);
+        store.apply(request(b"ms k 1\r\nx\r\n")); // cas 1
         assert_eq!(
-            hit(store.apply(req(b"mg k v C999\r\n"))).value.as_deref(),
-            Some(b"x".as_slice())
+            expect_get_hit(store.apply(request(b"mg k v C1\r\n"))).value,
+            None
+        );
+        assert_eq!(
+            expect_get_value(store.apply(request(b"mg k v C999\r\n"))),
+            b"x".as_slice()
         );
     }
 
     #[test]
     fn delete_x_leaves_an_empty_tombstone() {
         let mut store = MockMcStore::default();
-        store.apply(req(b"ms k 5\r\nhello\r\n"));
+        store.apply(request(b"ms k 5\r\nhello\r\n"));
+        assert_eq!(store.apply(request(b"md k x\r\n")), delete_success());
         assert_eq!(
-            store.apply(req(b"md k x\r\n")),
-            Reply::Delete(DeleteReply::Success)
-        );
-        assert_eq!(
-            hit(store.apply(req(b"mg k v s\r\n"))),
+            expect_get_hit(store.apply(request(b"mg k v s\r\n"))),
             GetHit {
                 value: Some(Bytes::new()),
                 size: Some(0),
@@ -656,59 +617,52 @@ mod tests {
     fn arithmetic_full_surface() {
         let mut store = MockMcStore::default();
         assert_eq!(
-            store.apply(req(b"ma missing\r\n")),
-            Reply::Arithmetic(ArithmeticReply::NotFound(ArithmeticResult::default()))
+            store.apply(request(b"ma missing\r\n")),
+            reply(b"ma missing\r\n", b"NF\r\n")
         );
 
         // vivify seeds J and skips the delta
         assert_eq!(
-            store.apply(req(b"ma counter N60 J5 v c\r\n")),
-            Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
+            expect_arithmetic_success(store.apply(request(b"ma counter N60 J5 v c\r\n"))),
+            ArithmeticResult {
                 value: Some(5),
                 cas: Some(1),
                 ttl: None,
-            }))
+            }
         );
         assert_eq!(
-            store.apply(req(b"ma counter D2 v\r\n")),
-            Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
+            expect_arithmetic_success(store.apply(request(b"ma counter D2 v\r\n"))),
+            ArithmeticResult {
                 value: Some(7),
                 ..ArithmeticResult::default()
-            }))
+            }
         );
         assert_eq!(
-            store.apply(req(b"ma counter MD D100 v\r\n")),
-            Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
+            expect_arithmetic_success(store.apply(request(b"ma counter MD D100 v\r\n"))),
+            ArithmeticResult {
                 value: Some(0),
                 ..ArithmeticResult::default()
-            }))
+            }
         );
         assert_eq!(
-            store.apply(req(b"ma counter C999\r\n")),
-            Reply::Arithmetic(ArithmeticReply::Exists(ArithmeticResult::default()))
+            store.apply(request(b"ma counter C999\r\n")),
+            reply(b"ma counter C999\r\n", b"EX\r\n")
         );
 
-        store.apply(req(b"ms text 3\r\nabc\r\n"));
+        store.apply(request(b"ms text 3\r\nabc\r\n"));
         assert_eq!(
-            store.apply(req(b"ma text\r\n")),
-            Reply::Error(ErrorReply::Client(Some(Bytes::from_static(
-                b"cannot increment or decrement non-numeric value",
-            ))))
+            store.apply(request(b"ma text\r\n")),
+            client_error(b"cannot increment or decrement non-numeric value")
         );
     }
 
     #[test]
     fn debug_reports_metadata() {
         let mut store = MockMcStore::default();
-        assert_eq!(
-            store.apply(req(b"me missing\r\n")),
-            Reply::Debug(DebugReply::Miss)
-        );
+        assert_eq!(store.apply(request(b"me missing\r\n")), debug_miss());
 
-        store.apply(req(b"ms k 3\r\nabc\r\n"));
-        let Reply::Debug(DebugReply::Hit(hit)) = store.apply(req(b"me k\r\n")) else {
-            panic!("expected debug hit");
-        };
+        store.apply(request(b"ms k 3\r\nabc\r\n"));
+        let hit = expect_debug_hit(store.apply(request(b"me k\r\n")));
         let field = |name: &[u8]| {
             hit.fields
                 .iter()
@@ -726,20 +680,26 @@ mod tests {
     #[test]
     fn hit_state_and_lru_bump() {
         let mut store = MockMcStore::default();
-        store.apply(req(b"ms k 1\r\nx\r\n"));
+        store.apply(request(b"ms k 1\r\nx\r\n"));
         assert_eq!(
-            hit(store.apply(req(b"mg k h u\r\n"))).hit_before,
+            expect_get_hit(store.apply(request(b"mg k h u\r\n"))).hit_before,
             Some(false)
         );
         // `u` above suppressed the bump, so the state is still fresh.
-        assert_eq!(hit(store.apply(req(b"mg k h\r\n"))).hit_before, Some(false));
-        assert_eq!(hit(store.apply(req(b"mg k h\r\n"))).hit_before, Some(true));
+        assert_eq!(
+            expect_get_hit(store.apply(request(b"mg k h\r\n"))).hit_before,
+            Some(false)
+        );
+        assert_eq!(
+            expect_get_hit(store.apply(request(b"mg k h\r\n"))).hit_before,
+            Some(true)
+        );
     }
 
     #[test]
     fn vivify_on_get_miss_wins_recache() {
         let mut store = MockMcStore::default();
-        let first = hit(store.apply(req(b"mg k v N60 t\r\n")));
+        let first = expect_get_hit(store.apply(request(b"mg k v N60 t\r\n")));
         assert_eq!(first.recache, RecacheState::Won);
         assert_eq!(first.value.as_deref(), Some(b"".as_slice()));
         assert!(first.ttl.is_some_and(|ttl| (1..=60).contains(&ttl)));
@@ -748,11 +708,11 @@ mod tests {
     #[test]
     fn lazy_expiry_treats_expired_as_absent() {
         let mut store = MockMcStore::default();
-        store.apply(req(b"ms k 1 T-1\r\nx\r\n"));
-        assert_eq!(store.apply(req(b"mg k v\r\n")), Reply::Get(GetReply::Miss));
+        store.apply(request(b"ms k 1 T-1\r\nx\r\n"));
+        assert_eq!(store.apply(request(b"mg k v\r\n")), get_miss());
         assert_eq!(
-            store.apply(req(b"md k\r\n")),
-            Reply::Delete(DeleteReply::NotFound)
+            store.apply(request(b"md k\r\n")),
+            reply(b"md k\r\n", b"NF\r\n")
         );
     }
 }

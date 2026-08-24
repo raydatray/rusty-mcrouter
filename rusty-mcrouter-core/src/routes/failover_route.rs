@@ -152,28 +152,15 @@ mod tests {
     use super::*;
     use crate::failover::{InOrderPolicy, LeastFailuresPolicy};
     use crate::routes::{DestinationRoute, RouteError};
-    use bytes::Bytes;
     use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_backend::error::{ConnectError, LocalError, RequestError, SendError};
     use rusty_mcrouter_backend::test_support::MockBackend;
-    use rusty_mcrouter_protocol::reply::{
-        ArithmeticReply, ArithmeticResult, ErrorReply, GetReply, StoreReply, StoreResult,
+    use rusty_mcrouter_protocol::test_support::{
+        arithmetic_value, get, get_miss, server_error, store, store_success,
     };
-    use rusty_mcrouter_protocol::test_support::{get, store};
 
     use crate::context::test_routing_state;
     use crate::{RoutingEventSink, RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
-
-    fn numeric(value: u64) -> Reply {
-        Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult {
-            value: Some(value),
-            ..ArithmeticResult::default()
-        }))
-    }
-
-    fn server_error(message: &'static [u8]) -> Reply {
-        Reply::Error(ErrorReply::Server(Some(Bytes::from_static(message))))
-    }
 
     fn dest(backend: MockBackend) -> Rc<dyn DynRoute> {
         DestinationRoute::new(backend).into_dyn()
@@ -232,15 +219,15 @@ mod tests {
     #[tokio::test]
     async fn primary_success_records_no_failover_metrics() {
         let route = in_order(vec![
-            dest(MockBackend::replying(numeric(1))),
-            dest(MockBackend::replying(numeric(2))),
+            dest(MockBackend::replying(arithmetic_value(1))),
+            dest(MockBackend::replying(arithmetic_value(2))),
         ]);
         let (state, metrics, events) = instrumented_state();
         let context = state.context();
 
         assert_eq!(
             route.route(&context, get(b"key")).await.unwrap(),
-            numeric(1)
+            arithmetic_value(1)
         );
         assert_eq!(
             metrics.failover[FailoverPolicyKind::InOrder as usize].load(),
@@ -336,14 +323,14 @@ mod tests {
         for error in [tko(), SendError::Connect(ConnectError::Timeout)] {
             let route = in_order(vec![
                 dest(MockBackend::failing(error)),
-                dest(MockBackend::replying(numeric(1))),
+                dest(MockBackend::replying(arithmetic_value(1))),
             ]);
             let (state, metrics, _events) = instrumented_state();
             let context = state.context();
 
             assert_eq!(
                 route.route(&context, get(b"key")).await.unwrap(),
-                numeric(1)
+                arithmetic_value(1)
             );
             assert_eq!(
                 metrics.failover_policy_errors[FailoverErrorClass::Tko as usize].load(),
@@ -361,7 +348,7 @@ mod tests {
         let route = FailoverRoute::new(
             vec![
                 dest(MockBackend::failing(timeout())),
-                dest(MockBackend::replying(numeric(1))),
+                dest(MockBackend::replying(arithmetic_value(1))),
             ],
             FailoverErrors::default(),
             Box::new(InOrderPolicy),
@@ -387,7 +374,7 @@ mod tests {
     async fn real_primary_error_claims_final_attribution() {
         let route = in_order(vec![
             pooled_dest(MockBackend::failing(timeout()), 0),
-            pooled_dest(MockBackend::replying(numeric(1)), 1),
+            pooled_dest(MockBackend::replying(arithmetic_value(1)), 1),
         ]);
         let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
@@ -395,7 +382,7 @@ mod tests {
         let context = state.context();
 
         let result = route.route(&context, get(b"key")).await;
-        assert_eq!(result.as_ref().unwrap(), &numeric(1));
+        assert_eq!(result.as_ref().unwrap(), &arithmetic_value(1));
         context.finish(&result);
 
         assert_eq!(metrics.pools[0].requests.load(), 1);
@@ -431,7 +418,7 @@ mod tests {
     async fn tko_primary_does_not_claim_final_attribution() {
         let route = in_order(vec![
             pooled_dest(MockBackend::failing(tko()), 0),
-            pooled_dest(MockBackend::replying(numeric(1)), 1),
+            pooled_dest(MockBackend::replying(arithmetic_value(1)), 1),
         ]);
         let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
@@ -439,7 +426,7 @@ mod tests {
         let context = state.context();
 
         let result = route.route(&context, get(b"key")).await;
-        assert_eq!(result.as_ref().unwrap(), &numeric(1));
+        assert_eq!(result.as_ref().unwrap(), &arithmetic_value(1));
         context.finish(&result);
 
         assert_eq!(metrics.pools[0].requests.load(), 1);
@@ -475,7 +462,7 @@ mod tests {
         let route = FailoverRoute::new(
             vec![
                 dest(MockBackend::failing(timeout())),
-                dest(MockBackend::replying(numeric(1))),
+                dest(MockBackend::replying(arithmetic_value(1))),
             ],
             FailoverErrors::default(),
             Box::new(LeastFailuresPolicy::new(2, 2)),
@@ -487,7 +474,7 @@ mod tests {
 
         assert_eq!(
             route.route(&context, get(b"key")).await.unwrap(),
-            numeric(1)
+            arithmetic_value(1)
         );
         assert_eq!(
             metrics.failover[FailoverPolicyKind::LeastFailures as usize].load(),
@@ -532,10 +519,13 @@ mod tests {
             tko(),
         ] {
             let primary = MockBackend::failing(err);
-            let backup = MockBackend::replying(numeric(1));
+            let backup = MockBackend::replying(arithmetic_value(1));
             let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
-            assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(1));
+            assert_eq!(
+                execute(&route, get(b"k")).await.unwrap(),
+                arithmetic_value(1)
+            );
             assert_eq!(primary.received().len(), 1);
             assert_eq!(backup.received().len(), 1);
         }
@@ -544,34 +534,37 @@ mod tests {
     #[tokio::test]
     async fn server_error_reply_fails_over() {
         let primary = MockBackend::replying(server_error(b"boom"));
-        let backup = MockBackend::replying(numeric(1));
+        let backup = MockBackend::replying(arithmetic_value(1));
         let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
-        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(1));
+        assert_eq!(
+            execute(&route, get(b"k")).await.unwrap(),
+            arithmetic_value(1)
+        );
         assert_eq!(backup.received().len(), 1);
     }
 
     #[tokio::test]
     async fn a_miss_does_not_fail_over() {
-        let primary = MockBackend::replying(Reply::Get(GetReply::Miss));
-        let backup = MockBackend::replying(numeric(1));
+        let primary = MockBackend::replying(get_miss());
+        let backup = MockBackend::replying(arithmetic_value(1));
         let route = in_order(vec![dest(primary.clone()), dest(backup.clone())]);
 
-        assert_eq!(
-            execute(&route, get(b"k")).await.unwrap(),
-            Reply::Get(GetReply::Miss)
-        );
+        assert_eq!(execute(&route, get(b"k")).await.unwrap(), get_miss());
         assert!(backup.received().is_empty());
     }
 
     #[tokio::test]
     async fn first_success_wins_and_later_children_are_untouched() {
         let a = MockBackend::failing(timeout());
-        let b = MockBackend::replying(numeric(2));
-        let c = MockBackend::replying(numeric(3));
+        let b = MockBackend::replying(arithmetic_value(2));
+        let c = MockBackend::replying(arithmetic_value(3));
         let route = in_order(vec![dest(a.clone()), dest(b.clone()), dest(c.clone())]);
 
-        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(2));
+        assert_eq!(
+            execute(&route, get(b"k")).await.unwrap(),
+            arithmetic_value(2)
+        );
         assert_eq!(a.received().len(), 1);
         assert_eq!(b.received().len(), 1);
         assert!(c.received().is_empty());
@@ -602,9 +595,12 @@ mod tests {
 
     #[tokio::test]
     async fn single_child_has_no_backup() {
-        let only = MockBackend::replying(numeric(1));
+        let only = MockBackend::replying(arithmetic_value(1));
         let route = in_order(vec![dest(only.clone())]);
-        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(1));
+        assert_eq!(
+            execute(&route, get(b"k")).await.unwrap(),
+            arithmetic_value(1)
+        );
         assert_eq!(only.received().len(), 1);
 
         let route = in_order(vec![dest(MockBackend::failing(timeout()))]);
@@ -630,8 +626,7 @@ mod tests {
     #[tokio::test]
     async fn per_op_updates_empty_blocks_write_failover() {
         let primary = MockBackend::failing(timeout());
-        let backup =
-            MockBackend::replying(Reply::Store(StoreReply::Success(StoreResult::default())));
+        let backup = MockBackend::replying(store_success());
         let route = FailoverRoute::new(
             vec![dest(primary.clone()), dest(backup.clone())],
             FailoverErrors::new(None, Some(vec![]), None),
@@ -654,7 +649,7 @@ mod tests {
     #[tokio::test]
     async fn max_tries_budget_stops_the_walk() {
         let primary = MockBackend::failing(timeout());
-        let backup = MockBackend::replying(numeric(1));
+        let backup = MockBackend::replying(arithmetic_value(1));
         let route = FailoverRoute::new(
             vec![dest(primary.clone()), dest(backup.clone())],
             FailoverErrors::default(),
@@ -676,7 +671,7 @@ mod tests {
     #[tokio::test]
     async fn tko_fast_fail_is_a_free_try() {
         let primary = MockBackend::failing(tko());
-        let backup = MockBackend::replying(numeric(1));
+        let backup = MockBackend::replying(arithmetic_value(1));
         let route = FailoverRoute::new(
             vec![dest(primary.clone()), dest(backup.clone())],
             FailoverErrors::default(),
@@ -685,7 +680,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(1));
+        assert_eq!(
+            execute(&route, get(b"k")).await.unwrap(),
+            arithmetic_value(1)
+        );
     }
 
     /// Hard-TKO-class connect failures are also free (is_tko_or_hard_tko).
@@ -695,7 +693,7 @@ mod tests {
             std::io::ErrorKind::ConnectionRefused,
         )));
         let b = MockBackend::failing(SendError::Connect(ConnectError::Timeout));
-        let c = MockBackend::replying(numeric(3));
+        let c = MockBackend::replying(arithmetic_value(3));
         let route = FailoverRoute::new(
             vec![dest(a.clone()), dest(b.clone()), dest(c.clone())],
             FailoverErrors::default(),
@@ -704,6 +702,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(execute(&route, get(b"k")).await.unwrap(), numeric(3));
+        assert_eq!(
+            execute(&route, get(b"k")).await.unwrap(),
+            arithmetic_value(3)
+        );
     }
 }

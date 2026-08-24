@@ -217,11 +217,12 @@ pub fn invalid_flag(_: FlagError) -> MetaReplyDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::{command::debug::MAX_DEBUG_FIELDS, MetaRequestEncoder};
+    use crate::meta::command::debug::MAX_DEBUG_FIELDS;
     use crate::reply::{
         ArithmeticReply, ArithmeticResult, DebugField, DebugHit, DebugReply, DeleteReply, GetHit,
         GetReply, RecacheState, StoreReply, StoreResult,
     };
+    use crate::test_support::{decode_reply, expectation};
 
     const HEADER: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Header);
     const VALUE: MetaReplyExpectation = MetaReplyExpectation::Get(GetSuccessShape::Value);
@@ -246,34 +247,16 @@ mod tests {
         cas: true,
         ttl: true,
     };
-
-    fn decode(expectation: &MetaReplyExpectation, input: &[u8]) -> Reply {
-        let decoder = MetaReplyDecoder::new();
-        let mut src = BytesMut::from(input);
-        let reply = decoder.decode(expectation, &mut src).unwrap().unwrap();
-        assert!(src.is_empty());
-        reply
-    }
-
-    fn debug_expectation(key: &'static [u8]) -> MetaReplyExpectation {
-        MetaReplyExpectation::Debug {
-            key: Bytes::from_static(key),
-        }
-    }
-
-    fn version_expectation() -> MetaReplyExpectation {
-        let mut request = BytesMut::new();
-        MetaRequestEncoder::new().encode_version_probe(&mut request)
-    }
+    const VERSION: MetaReplyExpectation = MetaReplyExpectation::Version;
 
     #[test]
     fn decodes_get_miss() {
-        assert_eq!(decode(&HEADER, b"EN\r\n"), Reply::Get(GetReply::Miss));
+        assert_eq!(decode_reply(&HEADER, b"EN\r\n"), Reply::Get(GetReply::Miss));
     }
 
     #[test]
     fn decodes_version_reply_at_every_split_point() {
-        let expectation = version_expectation();
+        let expectation = VERSION;
         let input = b"VERSION 1.6.39\r\n";
 
         for split in 0..=input.len() {
@@ -296,7 +279,7 @@ mod tests {
 
     #[test]
     fn rejects_non_version_success_for_version_probe() {
-        let expectation = version_expectation();
+        let expectation = VERSION;
 
         for input in [
             b"VERSION\r\n".as_slice(),
@@ -317,16 +300,16 @@ mod tests {
     #[test]
     fn version_probe_accepts_standard_error_reply() {
         assert_eq!(
-            decode(&version_expectation(), b"SERVER_ERROR warming up\r\n"),
+            decode_reply(&VERSION, b"SERVER_ERROR warming up\r\n"),
             Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"warming up"))))
         );
     }
 
     #[test]
     fn decodes_debug_hit_and_miss() {
-        let expectation = debug_expectation(b"key");
+        let expectation = expectation(b"me key\r\n");
         assert_eq!(
-            decode(
+            decode_reply(
                 &expectation,
                 b"ME key exp=60 la=2 cas=42 fetch=yes cls=1 size=3\r\n"
             ),
@@ -360,16 +343,16 @@ mod tests {
             }))
         );
         assert_eq!(
-            decode(&expectation, b"EN\r\n"),
+            decode_reply(&expectation, b"EN\r\n"),
             Reply::Debug(DebugReply::Miss)
         );
     }
 
     #[test]
     fn validates_base64_debug_key() {
-        let expectation = debug_expectation(b"\0\x01");
+        let expectation = expectation(b"me AAE= b\r\n");
         assert!(matches!(
-            decode(&expectation, b"ME AAE= exp=60\r\n"),
+            decode_reply(&expectation, b"ME AAE= exp=60\r\n"),
             Reply::Debug(DebugReply::Hit(_))
         ));
     }
@@ -380,9 +363,9 @@ mod tests {
         // was stored with the `b` flag, even for a plain-text `me` request:
         //   >> me key64
         //   << ME a2V5NjQ= exp=-1 la=0 cas=41 fetch=no cls=1 size=67
-        let expectation = debug_expectation(b"key64");
+        let expectation = expectation(b"me key64\r\n");
         assert_eq!(
-            decode(
+            decode_reply(
                 &expectation,
                 b"ME a2V5NjQ= exp=-1 la=0 cas=41 fetch=no cls=1 size=67\r\n"
             ),
@@ -419,7 +402,7 @@ mod tests {
 
     #[test]
     fn rejects_debug_key_mismatch_and_malformed_fields() {
-        let expectation = debug_expectation(b"key");
+        let expectation = expectation(b"me key\r\n");
         for input in [
             b"ME other exp=60\r\n".as_slice(),
             // valid base64, but decodes to "other", not "key"
@@ -439,14 +422,14 @@ mod tests {
 
     #[test]
     fn bounds_debug_fields() {
-        let expectation = debug_expectation(b"key");
+        let expectation = expectation(b"me key\r\n");
         let mut accepted = Vec::from(&b"ME key"[..]);
         for index in 0..MAX_DEBUG_FIELDS {
             accepted.extend_from_slice(format!(" f{index}=v").as_bytes());
         }
         accepted.extend_from_slice(b"\r\n");
         assert!(matches!(
-            decode(&expectation, &accepted),
+            decode_reply(&expectation, &accepted),
             Reply::Debug(DebugReply::Hit(_))
         ));
 
@@ -492,7 +475,10 @@ mod tests {
                 }),
             ),
         ] {
-            assert_eq!(decode(&STORE_WITH_FIELDS, input), Reply::Store(expected));
+            assert_eq!(
+                decode_reply(&STORE_WITH_FIELDS, input),
+                Reply::Store(expected)
+            );
         }
     }
 
@@ -504,14 +490,14 @@ mod tests {
             (b"EX\r\n".as_slice(), DeleteReply::Exists),
             (b"NF\r\n".as_slice(), DeleteReply::NotFound),
         ] {
-            assert_eq!(decode(&DELETE, input), Reply::Delete(expected));
+            assert_eq!(decode_reply(&DELETE, input), Reply::Delete(expected));
         }
     }
 
     #[test]
     fn decodes_arithmetic_header_success() {
         assert_eq!(
-            decode(&ARITHMETIC_HEADER, b"HD\r\n"),
+            decode_reply(&ARITHMETIC_HEADER, b"HD\r\n"),
             Reply::Arithmetic(ArithmeticReply::Success(ArithmeticResult::default()))
         );
     }
@@ -568,7 +554,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                decode(&ARITHMETIC_HEADER, input),
+                decode_reply(&ARITHMETIC_HEADER, input),
                 Reply::Arithmetic(expected)
             );
         }
@@ -612,7 +598,7 @@ mod tests {
     #[test]
     fn decodes_store_attributes_in_any_order() {
         assert_eq!(
-            decode(&STORE_WITH_FIELDS, b"HD s3 c42\r\n"),
+            decode_reply(&STORE_WITH_FIELDS, b"HD s3 c42\r\n"),
             Reply::Store(StoreReply::Success(StoreResult {
                 cas: Some(42),
                 size: Some(3),
@@ -647,7 +633,7 @@ mod tests {
     #[test]
     fn decodes_header_hit_attributes_in_any_order() {
         assert_eq!(
-            decode(&HEADER, b"HD X l9 h1 t-1 s3 f7 c42 W\r\n"),
+            decode_reply(&HEADER, b"HD X l9 h1 t-1 s3 f7 c42 W\r\n"),
             Reply::Get(GetReply::Hit(GetHit {
                 value: None,
                 client_flags: Some(7),
@@ -689,11 +675,11 @@ mod tests {
     #[test]
     fn conditional_value_accepts_header_or_value() {
         assert!(matches!(
-            decode(&CONDITIONAL, b"HD c42\r\n"),
+            decode_reply(&CONDITIONAL, b"HD c42\r\n"),
             Reply::Get(GetReply::Hit(GetHit { value: None, .. }))
         ));
         assert!(matches!(
-            decode(&CONDITIONAL, b"VA 1 c43\r\nx\r\n"),
+            decode_reply(&CONDITIONAL, b"VA 1 c43\r\nx\r\n"),
             Reply::Get(GetReply::Hit(GetHit { value: Some(_), .. }))
         ));
     }
@@ -716,15 +702,15 @@ mod tests {
     #[test]
     fn decodes_standard_error_replies() {
         assert_eq!(
-            decode(&HEADER, b"ERROR\r\n"),
+            decode_reply(&HEADER, b"ERROR\r\n"),
             Reply::Error(ErrorReply::Error)
         );
         assert_eq!(
-            decode(&HEADER, b"CLIENT_ERROR bad command\r\n"),
+            decode_reply(&HEADER, b"CLIENT_ERROR bad command\r\n"),
             Reply::Error(ErrorReply::Client(Some(Bytes::from_static(b"bad command"))))
         );
         assert_eq!(
-            decode(&HEADER, b"SERVER_ERROR\r\n"),
+            decode_reply(&HEADER, b"SERVER_ERROR\r\n"),
             Reply::Error(ErrorReply::Server(None))
         );
     }

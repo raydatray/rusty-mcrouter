@@ -80,10 +80,7 @@ impl ConnectionHandle {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use rusty_mcrouter_protocol::reply::GetReply;
-    use rusty_mcrouter_protocol::test_support::get;
-    use rusty_mcrouter_protocol::Reply;
+    use rusty_mcrouter_protocol::test_support::{expect_get_value, expect_version, get, get_miss};
 
     use super::*;
     use crate::connection::DownReason;
@@ -109,13 +106,6 @@ mod tests {
             Arc::clone(&metrics),
         );
         (handle, log, metrics)
-    }
-
-    fn hit_data(reply: Reply) -> Bytes {
-        let Reply::Get(GetReply::Hit(hit)) = reply else {
-            panic!("expected get hit, got {reply:?}");
-        };
-        hit.value.expect("hit with value")
     }
 
     async fn wait_for(log: &ConnectionEventLog, ev: &ConnectionEvent) {
@@ -204,10 +194,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(server.accept_count(), 0, "spawn must perform no I/O");
 
-            assert_eq!(
-                handle.send(get(b"a")).await.unwrap(),
-                Reply::Get(GetReply::Miss)
-            );
+            assert_eq!(handle.send(get(b"a")).await.unwrap(), get_miss());
             assert_eq!(server.accept_count(), 1);
         })
         .await;
@@ -293,7 +280,7 @@ mod tests {
             let (handle, _log, _counters) = spawn_to(&server, cfg);
 
             assert_eq!(
-                hit_data(handle.send(get(b"k")).await.unwrap()).as_ref(),
+                expect_get_value(handle.send(get(b"k")).await.unwrap()).as_ref(),
                 b"A"
             );
 
@@ -308,7 +295,7 @@ mod tests {
 
             // without the tombstone, C's caller would receive "B" here
             assert_eq!(
-                hit_data(handle.send(get(b"k")).await.unwrap()).as_ref(),
+                expect_get_value(handle.send(get(b"k")).await.unwrap()).as_ref(),
                 b"C"
             );
             assert_eq!(
@@ -438,10 +425,7 @@ mod tests {
             );
             wait_for(&log, &ConnectionEvent::Down(DownReason::Protocol)).await;
 
-            assert_eq!(
-                handle.send(get(b"b")).await.unwrap(),
-                Reply::Get(GetReply::Miss)
-            );
+            assert_eq!(handle.send(get(b"b")).await.unwrap(), get_miss());
             assert_eq!(server.accept_count(), 2);
         })
         .await;
@@ -482,8 +466,8 @@ mod tests {
             let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             let (a, b) = tokio::join!(handle.send(get(b"a")), handle.send(get(b"b")));
-            assert_eq!(a.unwrap(), Reply::Get(GetReply::Miss));
-            assert_eq!(b.unwrap(), Reply::Get(GetReply::Miss));
+            assert_eq!(a.unwrap(), get_miss());
+            assert_eq!(b.unwrap(), get_miss());
         })
         .await;
     }
@@ -505,9 +489,9 @@ mod tests {
                 handle.send(get(b"k")),
                 handle.send(get(b"k")),
             );
-            assert_eq!(hit_data(r1.unwrap()).as_ref(), b"1");
-            assert_eq!(hit_data(r2.unwrap()).as_ref(), b"2");
-            assert_eq!(hit_data(r3.unwrap()).as_ref(), b"3");
+            assert_eq!(expect_get_value(r1.unwrap()).as_ref(), b"1");
+            assert_eq!(expect_get_value(r2.unwrap()).as_ref(), b"2");
+            assert_eq!(expect_get_value(r3.unwrap()).as_ref(), b"3");
         })
         .await;
     }
@@ -523,7 +507,7 @@ mod tests {
             let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             assert_eq!(
-                hit_data(handle.send(get(b"foo")).await.unwrap()).as_ref(),
+                expect_get_value(handle.send(get(b"foo")).await.unwrap()).as_ref(),
                 b"bar"
             );
         })
@@ -551,10 +535,7 @@ mod tests {
                 "got {result:?}"
             );
 
-            assert_eq!(
-                handle.send(get(b"ok")).await.unwrap(),
-                Reply::Get(GetReply::Miss)
-            );
+            assert_eq!(handle.send(get(b"ok")).await.unwrap(), get_miss());
         })
         .await;
     }
@@ -570,8 +551,8 @@ mod tests {
             let (handle, _log, _counters) = spawn_to(&server, BackendConnectionConfig::default());
 
             assert_eq!(
-                handle.send_probe().await.unwrap(),
-                Reply::Version(Bytes::from_static(b"1.6.39"))
+                expect_version(handle.send_probe().await.unwrap()),
+                b"1.6.39".as_slice()
             );
         })
         .await;
@@ -592,11 +573,8 @@ mod tests {
                 handle.send_probe(),
                 handle.send(get(b"key")),
             );
-            assert_eq!(
-                version.unwrap(),
-                Reply::Version(Bytes::from_static(b"1.6.39"))
-            );
-            assert_eq!(get_reply.unwrap(), Reply::Get(GetReply::Miss));
+            assert_eq!(expect_version(version.unwrap()), b"1.6.39".as_slice());
+            assert_eq!(get_reply.unwrap(), get_miss());
         })
         .await;
     }
@@ -683,7 +661,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(3)).await;
                 handle.close_idle(); // lands while the reply is mid-flight
             });
-            assert_eq!(hit_data(reply.unwrap()).as_ref(), b"bar");
+            assert_eq!(expect_get_value(reply.unwrap()).as_ref(), b"bar");
             assert_eq!(server.accept_count(), 1);
             assert!(
                 !log.borrow().contains(&ConnectionEvent::Closed),

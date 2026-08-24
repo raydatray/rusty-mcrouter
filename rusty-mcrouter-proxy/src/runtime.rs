@@ -173,9 +173,7 @@ mod tests {
     use rusty_mcrouter_backend::metrics::BackendMetricsShard;
     use rusty_mcrouter_backend::tko::{TkoEventSink, TkoTrackerMap};
     use rusty_mcrouter_core::{NullRoute, Route, RoutingMetricsLayout, RoutingMetricsShard};
-    use rusty_mcrouter_protocol::reply::GetReply;
-    use rusty_mcrouter_protocol::test_support::get;
-    use rusty_mcrouter_protocol::Reply;
+    use rusty_mcrouter_protocol::test_support::{get, get_miss};
 
     use super::*;
     use crate::{ProxyHandle, ProxyRequest};
@@ -218,10 +216,7 @@ mod tests {
                 let (runtime, handle, _work_tx) = test_runtime();
                 let task = tokio::task::spawn_local(runtime.run());
 
-                assert_eq!(
-                    handle.send_request(get(b"key")).await,
-                    Reply::Get(GetReply::Miss)
-                );
+                assert_eq!(handle.send_request(get(b"key")).await, get_miss());
                 handle.shutdown().await.unwrap();
                 task.await.unwrap().unwrap();
             })

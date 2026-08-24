@@ -77,10 +77,9 @@ mod tests {
     use bytes::Bytes;
     use rusty_mcrouter_backend::error::{ConnectError, LocalError, RequestError, SendError};
     use rusty_mcrouter_protocol::reply::{
-        ArithmeticReply, ArithmeticResult, DeleteReply, ErrorReply, GetReply, StoreReply,
-        StoreResult,
+        ArithmeticReply, ArithmeticResult, DeleteReply, ErrorReply, StoreReply, StoreResult,
     };
-    use rusty_mcrouter_protocol::test_support::{delete, get, store};
+    use rusty_mcrouter_protocol::test_support::{delete, get, get_miss, server_error, store};
 
     use super::*;
 
@@ -90,16 +89,6 @@ mod tests {
 
     fn timeout() -> Result<Reply> {
         backend(SendError::Request(RequestError::Timeout { sent: true }))
-    }
-
-    fn server_error() -> Result<Reply> {
-        Ok(Reply::Error(ErrorReply::Server(Some(Bytes::from_static(
-            b"boom",
-        )))))
-    }
-
-    fn miss() -> Result<Reply> {
-        Ok(Reply::Get(GetReply::Miss))
     }
 
     #[test]
@@ -117,7 +106,7 @@ mod tests {
             backend(SendError::Tko {
                 reason: ResultCode::Timeout,
             }),
-            server_error(),
+            Ok(server_error(b"boom")),
         ];
         let errors = FailoverErrors::default();
         for case in &cases {
@@ -131,7 +120,7 @@ mod tests {
     #[test]
     fn valid_replies_and_internal_conditions_are_not_failover_errors() {
         let cases = [
-            miss(),
+            Ok(get_miss()),
             Ok(Reply::Delete(DeleteReply::NotFound)),
             Ok(Reply::Store(StoreReply::Success(StoreResult::default()))),
             Ok(Reply::Arithmetic(ArithmeticReply::Success(
@@ -159,8 +148,11 @@ mod tests {
     #[test]
     fn route_code_projects_both_surfaces() {
         assert_eq!(route_code(&timeout()), Some(ResultCode::Timeout));
-        assert_eq!(route_code(&server_error()), Some(ResultCode::RemoteError));
-        assert_eq!(route_code(&miss()), Some(ResultCode::Success));
+        assert_eq!(
+            route_code(&Ok(server_error(b"boom"))),
+            Some(ResultCode::RemoteError)
+        );
+        assert_eq!(route_code(&Ok(get_miss())), Some(ResultCode::Success));
         assert_eq!(
             route_code(&Err(RouteError::SelectorOutOfRange { idx: 1, len: 1 })),
             None
@@ -195,7 +187,7 @@ mod tests {
         assert!(errors.should_failover(&get(b"k"), &timeout()));
         assert!(errors.should_failover(&store(b"k", b"v"), &timeout()));
         assert!(errors.should_failover(&delete(b"k"), &timeout()));
-        assert!(!errors.should_failover(&get(b"k"), &miss()));
+        assert!(!errors.should_failover(&get(b"k"), &Ok(get_miss())));
     }
 
     #[test]
@@ -214,7 +206,7 @@ mod tests {
     #[test]
     fn explicit_list_matches_only_named_codes() {
         let errors = FailoverErrors::new(Some(vec![ResultCode::RemoteError]), None, None);
-        assert!(errors.should_failover(&get(b"k"), &server_error()));
+        assert!(errors.should_failover(&get(b"k"), &Ok(server_error(b"boom"))));
         assert!(!errors.should_failover(&get(b"k"), &timeout()));
     }
 }

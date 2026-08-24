@@ -90,8 +90,7 @@ pub(crate) fn test_routing_state() -> Rc<RoutingState> {
 mod tests {
     use std::cell::Cell;
 
-    use rusty_mcrouter_protocol::reply::GetReply;
-    use rusty_mcrouter_protocol::test_support::get;
+    use rusty_mcrouter_protocol::test_support::{get, get_miss};
     use rusty_mcrouter_protocol::{Reply, Request};
 
     use super::*;
@@ -111,7 +110,7 @@ mod tests {
             self.observe(context);
             tokio::task::yield_now().await;
             self.observe(context);
-            Ok(Reply::Get(GetReply::Miss))
+            Ok(get_miss())
         }
     }
 
@@ -193,7 +192,7 @@ mod tests {
         context.select_pool(0);
         context.select_pool(1);
 
-        context.finish(&Ok(Reply::Get(GetReply::Miss)));
+        context.finish(&Ok(get_miss()));
 
         assert_eq!(metrics.pools[0].completed_requests.load(), 1);
         assert_eq!(metrics.pools[1].completed_requests.load(), 0);
@@ -209,8 +208,8 @@ mod tests {
         first.select_pool(0);
         second.select_pool(1);
 
-        first.finish(&Ok(Reply::Get(GetReply::Miss)));
-        second.finish(&Ok(Reply::Get(GetReply::Miss)));
+        first.finish(&Ok(get_miss()));
+        second.finish(&Ok(get_miss()));
 
         assert_eq!(metrics.pools[0].completed_requests.load(), 1);
         assert_eq!(metrics.pools[1].completed_requests.load(), 1);
@@ -222,7 +221,7 @@ mod tests {
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics));
 
-        state.context().finish(&Ok(Reply::Get(GetReply::Miss)));
+        state.context().finish(&Ok(get_miss()));
 
         assert_eq!(metrics.pools[0].completed_requests.load(), 0);
         assert_eq!(metrics.pools[0].final_errors.load(), 0);

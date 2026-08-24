@@ -341,11 +341,9 @@ fn build_failover_policy(cfg: &FailoverPolicyConfig, n: usize) -> (Box<dyn Failo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use rusty_mcrouter_backend::test_support::MockBackendFactory;
     use rusty_mcrouter_config::parse;
-    use rusty_mcrouter_protocol::reply::{ErrorReply, GetReply};
-    use rusty_mcrouter_protocol::test_support::get;
+    use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
     use rusty_mcrouter_protocol::{Reply, Request};
 
     use crate::{RoutingMetricsShard, RoutingState};
@@ -392,7 +390,7 @@ mod tests {
         let cfg = parse(r#"{"route": "NullRoute"}"#).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get(GetReply::Miss));
+        assert_eq!(reply, get_miss());
     }
 
     #[tokio::test]
@@ -400,7 +398,7 @@ mod tests {
         let cfg = parse(r#"{"route": {"type": "NullRoute"}}"#).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get(GetReply::Miss));
+        assert_eq!(reply, get_miss());
     }
 
     #[tokio::test]
@@ -408,10 +406,7 @@ mod tests {
         let cfg = parse(r#"{"route": {"type": "ErrorRoute", "message": "boom"}}"#).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(
-            reply,
-            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"boom"))))
-        );
+        assert_eq!(reply, server_error(b"boom"));
     }
 
     #[tokio::test]
@@ -419,10 +414,7 @@ mod tests {
         let cfg = parse(r#"{"route": "ErrorRoute|nope"}"#).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(
-            reply,
-            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"nope"))))
-        );
+        assert_eq!(reply, server_error(b"nope"));
     }
 
     #[tokio::test]
@@ -431,7 +423,7 @@ mod tests {
         let cfg = parse(json).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get(GetReply::Miss));
+        assert_eq!(reply, get_miss());
     }
 
     #[tokio::test]
@@ -440,7 +432,7 @@ mod tests {
         let cfg = parse(json).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get(GetReply::Miss));
+        assert_eq!(reply, get_miss());
     }
 
     #[test]
@@ -514,7 +506,7 @@ mod tests {
         let cfg = parse(json).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get(GetReply::Miss));
+        assert_eq!(reply, get_miss());
     }
 
     #[tokio::test]
@@ -523,22 +515,17 @@ mod tests {
         let cfg = parse(json).unwrap();
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get(GetReply::Miss));
+        assert_eq!(reply, get_miss());
     }
 
     #[tokio::test]
     async fn failover_route_surfaces_last_error_when_all_children_fail() {
         let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"]}}"#;
         let cfg = parse(json).unwrap();
-        let factory = MockBackendFactory::replying(Reply::Error(ErrorReply::Server(Some(
-            Bytes::from_static(b"down"),
-        ))));
+        let factory = MockBackendFactory::replying(server_error(b"down"));
         let route = build(&cfg, &factory).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(
-            reply,
-            Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"down"))))
-        );
+        assert_eq!(reply, server_error(b"down"));
     }
 
     #[test]

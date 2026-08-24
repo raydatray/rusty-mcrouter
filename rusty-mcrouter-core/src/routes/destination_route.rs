@@ -63,12 +63,13 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use bytes::Bytes;
     use rusty_mcrouter_backend::error::{ProtocolError, RequestError, SendError};
     use rusty_mcrouter_backend::test_support::MockBackend;
     use rusty_mcrouter_backend::{PreparedSend, TkoRejection};
-    use rusty_mcrouter_protocol::reply::{ErrorReply, GetHit, GetReply, StoreReply, StoreResult};
-    use rusty_mcrouter_protocol::test_support::{get, store};
+    use rusty_mcrouter_protocol::test_support::{
+        bare_server_error, expect_get_value, get, get_hit, get_miss, server_error, store,
+        store_success,
+    };
 
     use crate::context::test_routing_state;
     use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
@@ -85,7 +86,7 @@ mod tests {
         > {
             Ok(PreparedSend::new(async {
                 tokio::time::sleep(Duration::from_millis(2)).await;
-                Ok(Reply::Get(GetReply::Miss))
+                Ok(get_miss())
             }))
         }
     }
@@ -132,10 +133,7 @@ mod tests {
         let layout = RoutingMetricsLayout::new(["pool".to_string()]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics));
-        let route = DestinationRoute::for_pool(
-            MockBackend::replying(Reply::Error(ErrorReply::Server(None))),
-            0,
-        );
+        let route = DestinationRoute::for_pool(MockBackend::replying(bare_server_error()), 0);
         let context = state.context();
 
         let result = route.route(&context, get(b"foo")).await;
@@ -171,17 +169,11 @@ mod tests {
 
     #[tokio::test]
     async fn forwards_request_to_backend_and_returns_reply() {
-        let backend = MockBackend::replying(Reply::Get(GetReply::Hit(GetHit {
-            value: Some(Bytes::from_static(b"bar")),
-            ..GetHit::default()
-        })));
+        let backend = MockBackend::replying(get_hit(b"bar"));
         let route = DestinationRoute::<MockBackend>::new(backend.clone());
 
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        let Reply::Get(GetReply::Hit(hit)) = reply else {
-            panic!("expected a get hit");
-        };
-        assert_eq!(hit.value.as_deref(), Some(b"bar".as_slice()));
+        assert_eq!(expect_get_value(reply), b"bar".as_slice());
         assert_eq!(backend.received(), vec![get(b"foo")]);
     }
 
@@ -189,7 +181,7 @@ mod tests {
     async fn returns_miss_reply_on_miss() {
         let route = DestinationRoute::<MockBackend>::new(MockBackend::miss());
         let reply = execute(&route, get(b"foo")).await.unwrap();
-        assert_eq!(reply, Reply::Get(GetReply::Miss));
+        assert_eq!(reply, get_miss());
     }
 
     #[tokio::test]
@@ -218,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn forwards_store_request_and_returns_success() {
-        let stored = Reply::Store(StoreReply::Success(StoreResult::default()));
+        let stored = store_success();
         let backend = MockBackend::replying(stored.clone());
         let route = DestinationRoute::<MockBackend>::new(backend.clone());
 
@@ -230,7 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn propagates_backend_server_error_as_reply() {
-        let server_error = Reply::Error(ErrorReply::Server(Some(Bytes::from_static(b"oom"))));
+        let server_error = server_error(b"oom");
         let route =
             DestinationRoute::<MockBackend>::new(MockBackend::replying(server_error.clone()));
         let reply = execute(&route, get(b"foo")).await.unwrap();
@@ -250,7 +242,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.unwrap(), Reply::Get(GetReply::Miss));
+        assert_eq!(result.unwrap(), get_miss());
     }
 
     #[tokio::test]
@@ -271,8 +263,8 @@ mod tests {
                 tokio::join!(r1, r2)
             })
             .await;
-        assert_eq!(a.unwrap().unwrap(), Reply::Get(GetReply::Miss));
-        assert_eq!(b.unwrap().unwrap(), Reply::Get(GetReply::Miss));
+        assert_eq!(a.unwrap().unwrap(), get_miss());
+        assert_eq!(b.unwrap().unwrap(), get_miss());
         assert_eq!(backend.received().len(), 2);
     }
 }
