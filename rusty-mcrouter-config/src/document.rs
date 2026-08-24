@@ -1,10 +1,29 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
+use json_comments::StripComments;
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
 use serde_json::Value;
+use thiserror::Error;
 
-use crate::{ConfigError, PoolConfig, RouteHandleConfig};
+use crate::{PoolConfig, RouteHandleConfig};
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("json parse error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("config must define exactly one of `route` or `routes`; both were provided")]
+    BothRouteAndRoutes,
+
+    #[error("config must define exactly one of `route` or `routes`; neither was provided")]
+    MissingRoute,
+}
+
+type ConfigResult<T> = std::result::Result<T, ConfigError>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigDocument {
@@ -41,7 +60,7 @@ struct ConfigDocumentRaw {
 }
 
 impl ConfigDocument {
-    pub(crate) fn from_value(value: Value) -> crate::Result<Self> {
+    fn from_value(value: Value) -> ConfigResult<Self> {
         let raw = serde_json::from_value::<ConfigDocumentRaw>(value)?;
 
         let route = match (raw.route, raw.routes) {
@@ -57,6 +76,18 @@ impl ConfigDocument {
             route,
         })
     }
+}
+
+pub fn parse(input: &str) -> ConfigResult<ConfigDocument> {
+    let stripped = StripComments::new(input.as_bytes());
+    let value = serde_json::from_reader(stripped)?;
+
+    ConfigDocument::from_value(value)
+}
+
+pub fn parse_file(path: impl AsRef<Path>) -> ConfigResult<ConfigDocument> {
+    let text = std::fs::read_to_string(path)?;
+    parse(&text)
 }
 
 fn deserialize_named_handles<'de, D>(
