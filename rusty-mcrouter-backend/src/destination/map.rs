@@ -133,7 +133,7 @@ mod tests {
     }
 
     fn tko_map() -> Arc<TkoTrackerMap> {
-        TkoTrackerMap::with_sink(noop_sink())
+        TkoTrackerMap::new(noop_sink())
     }
 
     fn test_map() -> Rc<Map> {

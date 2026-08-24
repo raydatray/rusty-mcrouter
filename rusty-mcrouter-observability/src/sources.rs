@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn tko_source_reflects_marks_and_gates() {
-        let map = TkoTrackerMap::with_sink(noop_sink());
+        let map = TkoTrackerMap::new(noop_sink());
         let tracker = map.tracker_for("10.0.0.1:11211", 3);
         assert!(tracker.record_hard_failure(DestToken::allocate(), ResultCode::ConnectError));
 
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn destination_source_walks_and_labels() {
-        let map = TkoTrackerMap::with_sink(noop_sink());
+        let map = TkoTrackerMap::new(noop_sink());
         let registry = DestinationMetricsRegistry::new();
         let addr: Arc<str> = Arc::from("10.0.0.1:11211");
         let tracker = map.tracker_for(&addr, 3);

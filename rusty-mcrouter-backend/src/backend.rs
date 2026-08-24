@@ -146,7 +146,7 @@ mod tests {
     use crate::tko::{DestToken, TkoTrackerMap};
 
     fn factory() -> (Arc<TkoTrackerMap>, DestinationFactory) {
-        let tko = TkoTrackerMap::with_sink(noop_sink());
+        let tko = TkoTrackerMap::new(noop_sink());
         let factory = DestinationFactory::new(Map::new(
             Arc::clone(&tko),
             BackendMetricsShard::new(),
