@@ -45,7 +45,7 @@ pub struct PrefixedRoute {
 }
 
 #[derive(Deserialize)]
-struct ConfigDocumentRaw {
+struct RawConfigDocument {
     #[serde(default)]
     pools: BTreeMap<String, PoolConfig>,
 
@@ -59,10 +59,10 @@ struct ConfigDocumentRaw {
     routes: Option<Vec<PrefixedRoute>>,
 }
 
-impl ConfigDocument {
-    fn from_value(value: Value) -> ConfigResult<Self> {
-        let raw = serde_json::from_value::<ConfigDocumentRaw>(value)?;
+impl TryFrom<RawConfigDocument> for ConfigDocument {
+    type Error = ConfigError;
 
+    fn try_from(raw: RawConfigDocument) -> ConfigResult<Self> {
         let route = match (raw.route, raw.routes) {
             (Some(_), Some(_)) => return Err(ConfigError::BothRouteAndRoutes),
             (None, None) => return Err(ConfigError::MissingRoute),
@@ -80,9 +80,9 @@ impl ConfigDocument {
 
 pub fn parse(input: &str) -> ConfigResult<ConfigDocument> {
     let stripped = StripComments::new(input.as_bytes());
-    let value = serde_json::from_reader(stripped)?;
+    let raw: RawConfigDocument = serde_json::from_reader(stripped)?;
 
-    ConfigDocument::from_value(value)
+    ConfigDocument::try_from(raw)
 }
 
 pub fn parse_file(path: impl AsRef<Path>) -> ConfigResult<ConfigDocument> {
