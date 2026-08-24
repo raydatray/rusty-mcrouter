@@ -318,7 +318,8 @@ impl MetricsSource for SelfSource {
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_backend::tko::{DestToken, FailOpenThresholds, TkoEventSink};
+    use rusty_mcrouter_backend::tko::{DestToken, FailOpenThresholds};
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
     use super::*;
     use crate::metrics::MetricsRegistry;
@@ -419,7 +420,7 @@ mod tests {
 
     #[test]
     fn tko_source_reflects_marks_and_gates() {
-        let map = TkoTrackerMap::with_sink(TkoEventSink::new(|_| {}));
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let tracker = map.tracker_for("10.0.0.1:11211", 3);
         assert!(tracker.record_hard_failure(DestToken::allocate(), ResultCode::ConnectError));
 
@@ -444,7 +445,7 @@ mod tests {
 
     #[test]
     fn destination_source_walks_and_labels() {
-        let map = TkoTrackerMap::with_sink(TkoEventSink::new(|_| {}));
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let registry = DestinationMetricsRegistry::new();
         let addr: Arc<str> = Arc::from("10.0.0.1:11211");
         let tracker = map.tracker_for(&addr, 3);

@@ -122,17 +122,15 @@ impl TkoTrackerMap {
 
 #[cfg(test)]
 mod tests {
+    use rusty_mcrouter_observability_primitives::test_support::{noop_sink, recording_sink_with};
+
     use super::*;
     use crate::classify::ResultCode;
     use crate::tko::DestToken;
 
-    fn null_sink() -> TkoEventSink {
-        TkoEventSink::new(|_| {})
-    }
-
     #[test]
     fn tracker_for_dedups_to_same_arc() {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let a = map.tracker_for("s:1", 3);
         let b = map.tracker_for("s:1", 3);
         assert!(Arc::ptr_eq(&a, &b), "same server must share one tracker");
@@ -144,7 +142,7 @@ mod tests {
     /// FRESH tracker (dead state is not resurrected).
     #[test]
     fn dead_tracker_is_replaced_with_fresh_state() {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let a = map.tracker_for("s:1", 1);
         assert!(a.record_soft_failure(DestToken::allocate(), ResultCode::Timeout));
         assert!(a.is_tko());
@@ -156,7 +154,7 @@ mod tests {
 
     #[test]
     fn pool_tracker_for_dedups_by_name() {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let a = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
         let b = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
         assert!(Arc::ptr_eq(&a, &b), "same pool must share one gate");
@@ -168,7 +166,7 @@ mod tests {
     /// pass - a dropped pool leaves the scrape output AND the map.
     #[test]
     fn pool_snapshot_returns_live_and_prunes_dead() {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let a = map.pool_tracker_for("pool_a", FailOpenThresholds { enter: 3, exit: 1 });
         let _b = map.pool_tracker_for("pool_b", FailOpenThresholds { enter: 3, exit: 1 });
 
@@ -187,7 +185,7 @@ mod tests {
 
     #[test]
     fn sus_servers_reports_only_failing_trackers() {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let bad = map.tracker_for("bad:1", 3);
         let _good = map.tracker_for("good:1", 3);
         assert!(!bad.record_soft_failure(DestToken::allocate(), ResultCode::Timeout));
@@ -208,19 +206,6 @@ mod tests {
     };
     use std::time::Duration;
 
-    /// Sink that collects events across threads (sinks fire from whichever
-    /// proxy thread crosses a threshold, so this must be Send + Sync).
-    fn collecting_sink() -> (TkoEventSink, Arc<Mutex<Vec<TkoEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let sink = {
-            let events = Arc::clone(&events);
-            TkoEventSink::new(move |rec: TkoEventRecord| {
-                events.lock().unwrap().push(rec.event);
-            })
-        };
-        (sink, events)
-    }
-
     /// THE invariant the whole encoding exists for: across N threads
     /// hammering soft failures with distinct tokens, every TKO episode has
     /// EXACTLY one responsible destination — proven because record_success
@@ -229,7 +214,7 @@ mod tests {
     /// case. The gauge draining to zero proves mark/unmark pairing.
     #[test]
     fn responsibility_is_unique_under_contention() {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let tracker = map.tracker_for("s:1", 3);
         let target_wins = 200u64;
         let total_wins = AtomicU64::new(0);
@@ -262,7 +247,7 @@ mod tests {
     /// ever, and full capacity still available afterwards.
     #[test]
     fn pool_reservation_undo_balances_under_contention() {
-        let (sink, events) = collecting_sink();
+        let (sink, events) = recording_sink_with(|record: TkoEventRecord| record.event);
         let map = TkoTrackerMap::with_sink(sink);
         let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 8, exit: 1 });
         let tracker = map.tracker_for("s:1", 1); // threshold 1: every attempt reserves
@@ -308,7 +293,7 @@ mod tests {
     /// ExitFailOpen exactly once -> marking admitted again.
     #[test]
     fn fail_open_hysteresis_emits_enter_and_exit_exactly_once() {
-        let (sink, events) = collecting_sink();
+        let (sink, events) = recording_sink_with(|record: TkoEventRecord| record.event);
         let map = TkoTrackerMap::with_sink(sink);
         let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
 
@@ -366,7 +351,7 @@ mod tests {
     /// one, and the winner's token is the only one that can unmark.
     #[test]
     fn hard_failure_single_winner_under_contention() {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let tracker = map.tracker_for("s:1", 3);
         let tokens: Vec<DestToken> = (0..8).map(|_| DestToken::allocate()).collect();
         let wins = AtomicUsize::new(0);
@@ -398,7 +383,7 @@ mod tests {
         const WORKERS: usize = 4;
         const ROUNDS: usize = 5_000;
 
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let active = Arc::new(AtomicUsize::new(WORKERS));
         let start = Arc::new(Barrier::new(WORKERS + 1));
         let (done_tx, done_rx) = mpsc::channel();

@@ -308,17 +308,15 @@ impl Drop for TkoTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tko::{FailOpenThresholds, TkoEventSink, TkoTrackerMap};
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
-    fn null_sink() -> TkoEventSink {
-        TkoEventSink::new(|_| {})
-    }
+    use super::*;
+    use crate::tko::{FailOpenThresholds, TkoTrackerMap};
 
     /// Tracker via the map (the only production construction path); the map
     /// is returned too so tests can read the global gauge.
     fn tracker(threshold: u64) -> (Arc<TkoTrackerMap>, Arc<TkoTracker>) {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let t = map.tracker_for("server:11211", threshold);
         (map, t)
     }
@@ -400,7 +398,7 @@ mod tests {
     /// gate.
     #[test]
     fn soft_to_hard_conversion_moves_globals_but_not_pool_count() {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 2, exit: 1 });
         let a = map.tracker_for("a:11211", 1);
         let b = map.tracker_for("b:11211", 1);
@@ -456,7 +454,7 @@ mod tests {
     /// keeps failing naturally instead of being marked.
     #[test]
     fn gate_refusal_leaves_word_unmarked() {
-        let map = TkoTrackerMap::with_sink(null_sink());
+        let map = TkoTrackerMap::with_sink(noop_sink());
         let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
         let a = map.tracker_for("a:11211", 1);
         let b = map.tracker_for("b:11211", 1);
