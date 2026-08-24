@@ -147,7 +147,7 @@ impl Route for FailoverRoute {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use super::*;
     use crate::failover::{InOrderPolicy, LeastFailuresPolicy};
@@ -155,12 +155,13 @@ mod tests {
     use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_backend::error::{ConnectError, LocalError, RequestError, SendError};
     use rusty_mcrouter_backend::test_support::MockBackend;
+    use rusty_mcrouter_observability_primitives::test_support::{recording_sink, EventLog};
     use rusty_mcrouter_protocol::test_support::{
         get, get_hit, get_miss, server_error, store, store_success,
     };
 
     use crate::context::test_routing_state;
-    use crate::{RoutingEventSink, RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
+    use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
 
     fn dest(backend: MockBackend) -> Rc<dyn DynRoute> {
         DestinationRoute::new(backend).into_dyn()
@@ -201,14 +202,10 @@ mod tests {
     fn instrumented_state() -> (
         Rc<RoutingState>,
         Arc<RoutingMetricsShard>,
-        Arc<Mutex<Vec<RoutingEventRecord>>>,
+        EventLog<RoutingEventRecord>,
     ) {
         let metrics = RoutingMetricsShard::new(RoutingMetricsLayout::new(Vec::<String>::new()));
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let sink = {
-            let events = Arc::clone(&events);
-            RoutingEventSink::new(move |event| events.lock().unwrap().push(event))
-        };
+        let (sink, events) = recording_sink();
         (
             RoutingState::with_event_sink(Arc::clone(&metrics), sink),
             metrics,

@@ -135,6 +135,7 @@ impl BackendFactory for DestinationFactory {
 
 #[cfg(test)]
 mod tests {
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss};
 
     use super::*;
@@ -145,7 +146,7 @@ mod tests {
     use crate::tko::{DestToken, TkoTrackerMap};
 
     fn factory() -> (Arc<TkoTrackerMap>, DestinationFactory) {
-        let tko = TkoTrackerMap::with_sink(crate::tko::TkoEventSink::new(|_| {}));
+        let tko = TkoTrackerMap::with_sink(noop_sink());
         let factory = DestinationFactory::new(Map::new(
             Arc::clone(&tko),
             BackendMetricsShard::new(),

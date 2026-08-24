@@ -114,6 +114,7 @@ impl Map {
 
 #[cfg(test)]
 mod tests {
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::get;
     use rusty_mcrouter_protocol::{Reply, Request};
 
@@ -132,7 +133,7 @@ mod tests {
     }
 
     fn tko_map() -> Arc<TkoTrackerMap> {
-        TkoTrackerMap::with_sink(crate::tko::TkoEventSink::new(|_| {}))
+        TkoTrackerMap::with_sink(noop_sink())
     }
 
     fn test_map() -> Rc<Map> {

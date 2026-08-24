@@ -171,8 +171,9 @@ async fn wait_for_sweep(task: &mut Option<JoinHandle<()>>) -> anyhow::Result<()>
 mod tests {
     use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
     use rusty_mcrouter_backend::metrics::BackendMetricsShard;
-    use rusty_mcrouter_backend::tko::{TkoEventSink, TkoTrackerMap};
+    use rusty_mcrouter_backend::tko::TkoTrackerMap;
     use rusty_mcrouter_core::{NullRoute, Route, RoutingMetricsLayout, RoutingMetricsShard};
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss};
 
     use super::*;
@@ -184,7 +185,7 @@ mod tests {
         let (work_tx, work_rx) = mpsc::channel(8);
         let handle = ProxyHandle::new(0, request_tx, command_tx);
         let proxies = ProxySet::new(vec![handle.clone()]);
-        let tko = TkoTrackerMap::with_sink(TkoEventSink::new(|_| {}));
+        let tko = TkoTrackerMap::with_sink(noop_sink());
         let map = destination::Map::new(
             tko,
             BackendMetricsShard::new(),

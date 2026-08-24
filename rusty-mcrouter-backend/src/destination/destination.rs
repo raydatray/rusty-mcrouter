@@ -264,32 +264,21 @@ impl Drop for InflightGuard<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::time::Duration;
 
+    use rusty_mcrouter_observability_primitives::test_support::{recording_sink_with, EventLog};
     use rusty_mcrouter_protocol::test_support::{get, store};
 
     use super::*;
     use crate::destination::DestinationMetricsRegistry;
     use crate::test_support::{run_local, scripted_backend_serial, ScriptedServer, Step};
-    use crate::tko::{TkoEventSink, TkoTrackerMap};
+    use crate::tko::{TkoEventRecord, TkoTrackerMap};
 
     async fn send(dest: &Rc<Destination>, request: Request) -> Result<Reply, SendError> {
         match dest.prepare_send(request) {
             Ok(prepared) => prepared.send().await,
             Err(rejection) => Err(rejection.into()),
         }
-    }
-
-    fn collecting_sink() -> (TkoEventSink, Arc<Mutex<Vec<TkoEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let sink = {
-            let events = Arc::clone(&events);
-            TkoEventSink::new(move |rec: crate::tko::TkoEventRecord| {
-                events.lock().unwrap().push(rec.event);
-            })
-        };
-        (sink, events)
     }
 
     fn cfg(
@@ -319,9 +308,9 @@ mod tests {
         Arc<TkoTrackerMap>,
         Arc<TkoTracker>,
         Rc<Destination>,
-        Arc<Mutex<Vec<TkoEvent>>>,
+        EventLog<TkoEvent>,
     ) {
-        let (sink, events) = collecting_sink();
+        let (sink, events) = recording_sink_with(|record: TkoEventRecord| record.event);
         let map = TkoTrackerMap::with_sink(sink);
         let addr: Arc<str> = Arc::from(server.addr.to_string());
         let tracker = map.tracker_for(&addr, cfg.failures_until_tko);
@@ -546,7 +535,7 @@ mod tests {
             ]])
             .await;
 
-            let (sink, _events) = collecting_sink();
+            let (sink, _events) = recording_sink_with(|record: TkoEventRecord| record.event);
             let map = TkoTrackerMap::with_sink(sink);
             let addr: Arc<str> = Arc::from(server.addr.to_string());
             let tracker = map.tracker_for(&addr, 3);

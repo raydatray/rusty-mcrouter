@@ -19,6 +19,7 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 bytes.workspace = true
+rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives", features = ["testing"] }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol", features = ["testing"] }
 rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend", features = ["testing"] }
 serde_json.workspace = true
