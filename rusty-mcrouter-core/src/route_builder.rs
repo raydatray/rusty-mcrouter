@@ -68,12 +68,15 @@ type Result<T> = std::result::Result<T, BuildError>;
 /// succeeds — it just starts life failing (and TKOs). `defaults` carries the
 /// router-level destination config; pools override it via `server_timeout` /
 /// `connect_timeout`.
-pub fn build_route<F: BackendFactory>(
+pub fn build_route<F>(
     config: &ConfigDocument,
     factory: &F,
     defaults: &destination::DestinationConfig,
     metrics_layout: &RoutingMetricsLayout,
-) -> Result<Rc<dyn DynRoute>> {
+) -> Result<Rc<dyn DynRoute>>
+where
+    F: BackendFactory,
+{
     let entry = match &config.route {
         RouteEntry::Single(handle) => handle,
         RouteEntry::Prefixed(_) => return Err(BuildError::PrefixRoutingNotImplemented),
@@ -83,7 +86,10 @@ pub fn build_route<F: BackendFactory>(
     route_builder.build_handle(entry)
 }
 
-struct RouteBuilder<'a, F: BackendFactory> {
+struct RouteBuilder<'a, F>
+where
+    F: BackendFactory,
+{
     config: &'a ConfigDocument,
     factory: &'a F,
     defaults: &'a destination::DestinationConfig,
@@ -91,7 +97,10 @@ struct RouteBuilder<'a, F: BackendFactory> {
     pool_cache: BTreeMap<String, Vec<Rc<DestinationRoute<F::Backend>>>>,
 }
 
-impl<'a, F: BackendFactory> RouteBuilder<'a, F> {
+impl<'a, F> RouteBuilder<'a, F>
+where
+    F: BackendFactory,
+{
     fn new(
         config: &'a ConfigDocument,
         factory: &'a F,
@@ -280,11 +289,14 @@ fn resolve_fail_open(
     Ok(FailOpenThresholds { enter, exit })
 }
 
-fn build_pool_handle<B: Backend>(
+fn build_pool_handle<B>(
     pool_name: &str,
     hash: &HashConfig,
     destinations: Vec<Rc<DestinationRoute<B>>>,
-) -> Result<Rc<dyn DynRoute>> {
+) -> Result<Rc<dyn DynRoute>>
+where
+    B: Backend,
+{
     let selector = build_selector(hash, destinations.len())?;
     let route = PoolRoute::new(pool_name, destinations, selector);
 
@@ -362,7 +374,10 @@ mod tests {
         state: Rc<RoutingState>,
     }
 
-    fn build<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> Result<BuiltRoute> {
+    fn build<F>(cfg: &ConfigDocument, factory: &F) -> Result<BuiltRoute>
+    where
+        F: BackendFactory,
+    {
         let layout = RoutingMetricsLayout::new(cfg.pools.keys().cloned());
         let route = build_route(cfg, factory, &defaults(), &layout)?;
         let metrics = RoutingMetricsShard::new(layout);
@@ -374,7 +389,10 @@ mod tests {
         })
     }
 
-    fn expect_err<F: BackendFactory>(cfg: &ConfigDocument, factory: &F) -> BuildError {
+    fn expect_err<F>(cfg: &ConfigDocument, factory: &F) -> BuildError
+    where
+        F: BackendFactory,
+    {
         match build(cfg, factory) {
             Err(e) => e,
             Ok(_) => panic!("expected build_route to fail, but it succeeded"),

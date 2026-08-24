@@ -14,11 +14,14 @@ pub struct PoolRoute {
 }
 
 impl PoolRoute {
-    pub fn new<B: Backend>(
+    pub fn new<B>(
         pool_name: impl Into<String>,
         destinations: Vec<Rc<DestinationRoute<B>>>,
         selector: Box<dyn Selector>,
-    ) -> Self {
+    ) -> Self
+    where
+        B: Backend,
+    {
         let children = destinations
             .into_iter()
             .map(|d| d as Rc<dyn DynRoute>)

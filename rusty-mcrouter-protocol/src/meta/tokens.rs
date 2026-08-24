@@ -124,7 +124,10 @@ pub struct BadNumber;
 /// Parses one decimal token. std's integer grammar — an optional sign
 /// followed by ASCII digits, overflow-checked, no whitespace — matches
 /// memcached's accepted set exactly.
-fn parse_number<T: FromStr>(raw: &[u8]) -> Result<T, BadNumber> {
+fn parse_number<T>(raw: &[u8]) -> Result<T, BadNumber>
+where
+    T: FromStr,
+{
     std::str::from_utf8(raw)
         .ok()
         .and_then(|raw| raw.parse().ok())

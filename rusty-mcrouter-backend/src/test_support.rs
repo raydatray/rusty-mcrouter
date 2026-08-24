@@ -27,7 +27,10 @@ use crate::{Backend, BackendFactory, BackendFactoryError, PoolHealth, PreparedSe
 /// spawned via
 /// `spawn_local`, which panics in a bare `#[tokio::test]`; every actor test
 /// wraps its body in this.
-pub async fn run_local<F: Future>(fut: F) -> F::Output {
+pub async fn run_local<F>(fut: F) -> F::Output
+where
+    F: Future,
+{
     tokio::task::LocalSet::new().run_until(fut).await
 }
 
