@@ -58,7 +58,10 @@ pub trait DynRoute: 'static {
     fn route_dyn<'a>(&'a self, context: &'a RouteContext<'_>, request: Request) -> RouteFuture<'a>;
 }
 
-impl<R: Route> DynRoute for R {
+impl<R> DynRoute for R
+where
+    R: Route,
+{
     fn route_dyn<'a>(&'a self, context: &'a RouteContext<'_>, request: Request) -> RouteFuture<'a> {
         Box::pin(<R as Route>::route(self, context, request))
     }

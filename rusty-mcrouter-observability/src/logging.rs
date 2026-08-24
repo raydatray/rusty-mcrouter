@@ -107,7 +107,10 @@ mod tests {
     #[derive(Clone, Default)]
     struct Collector(Arc<Mutex<Vec<(Level, String)>>>);
 
-    impl<S: tracing::Subscriber> Layer<S> for Collector {
+    impl<S> Layer<S> for Collector
+    where
+        S: tracing::Subscriber,
+    {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
             self.0.lock().unwrap().push((
                 *event.metadata().level(),

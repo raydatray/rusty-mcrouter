@@ -157,7 +157,10 @@ mod tests {
 
     /// Route-shaped consumption: a generic fn constrained on Backend driving
     /// the production impl end to end.
-    async fn through_trait<B: Backend>(backend: &B, req: Request) -> Result<Reply, SendError> {
+    async fn through_trait<B>(backend: &B, req: Request) -> Result<Reply, SendError>
+    where
+        B: Backend,
+    {
         match backend.prepare_send(req) {
             Ok(prepared) => prepared.send().await,
             Err(rejection) => Err(rejection.into()),

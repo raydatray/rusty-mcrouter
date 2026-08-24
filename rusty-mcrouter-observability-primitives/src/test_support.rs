@@ -4,11 +4,17 @@ use crate::EventSink;
 
 pub type EventLog<T> = Arc<Mutex<Vec<T>>>;
 
-pub fn noop_sink<T: Send + 'static>() -> Box<dyn EventSink<T>> {
+pub fn noop_sink<T>() -> Box<dyn EventSink<T>>
+where
+    T: Send + 'static,
+{
     Box::new(NoopEventSink)
 }
 
-pub fn recording_sink<T: Send + 'static>() -> (Box<dyn EventSink<T>>, EventLog<T>) {
+pub fn recording_sink<T>() -> (Box<dyn EventSink<T>>, EventLog<T>)
+where
+    T: Send + 'static,
+{
     recording_sink_with(std::convert::identity)
 }
 
@@ -29,7 +35,10 @@ where
 
 struct NoopEventSink;
 
-impl<T: Send + 'static> EventSink<T> for NoopEventSink {
+impl<T> EventSink<T> for NoopEventSink
+where
+    T: Send + 'static,
+{
     fn emit(&self, _: T) {}
 }
 

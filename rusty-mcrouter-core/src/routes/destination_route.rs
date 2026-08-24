@@ -5,12 +5,18 @@ use tokio::time::Instant;
 use crate::routes::{Result, Route, RouteError};
 use crate::RouteContext;
 
-pub struct DestinationRoute<B: Backend> {
+pub struct DestinationRoute<B>
+where
+    B: Backend,
+{
     backend: B,
     pool_index: Option<usize>,
 }
 
-impl<B: Backend> DestinationRoute<B> {
+impl<B> DestinationRoute<B>
+where
+    B: Backend,
+{
     pub fn new(backend: B) -> Self {
         Self {
             backend,
@@ -26,7 +32,10 @@ impl<B: Backend> DestinationRoute<B> {
     }
 }
 
-impl<B: Backend> Route for DestinationRoute<B> {
+impl<B> Route for DestinationRoute<B>
+where
+    B: Backend,
+{
     async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
         let started = Instant::now();
         let result = match self.backend.prepare_send(request) {
@@ -92,7 +101,10 @@ mod tests {
         }
     }
 
-    async fn execute<B: Backend>(route: &DestinationRoute<B>, request: Request) -> Result<Reply> {
+    async fn execute<B>(route: &DestinationRoute<B>, request: Request) -> Result<Reply>
+    where
+        B: Backend,
+    {
         let state = test_routing_state();
         let context = state.context();
         route.route(&context, request).await
