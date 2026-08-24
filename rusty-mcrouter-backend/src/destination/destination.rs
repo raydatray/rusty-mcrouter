@@ -311,7 +311,7 @@ mod tests {
         EventLog<TkoEvent>,
     ) {
         let (sink, events) = recording_sink_with(|record: TkoEventRecord| record.event);
-        let map = TkoTrackerMap::with_sink(sink);
+        let map = TkoTrackerMap::new(sink);
         let addr: Arc<str> = Arc::from(server.addr.to_string());
         let tracker = map.tracker_for(&addr, cfg.failures_until_tko);
         let metrics = DestinationMetricsRegistry::new().metrics_for(&tracker);
@@ -536,7 +536,7 @@ mod tests {
             .await;
 
             let (sink, _events) = recording_sink_with(|record: TkoEventRecord| record.event);
-            let map = TkoTrackerMap::with_sink(sink);
+            let map = TkoTrackerMap::new(sink);
             let addr: Arc<str> = Arc::from(server.addr.to_string());
             let tracker = map.tracker_for(&addr, 3);
             let metrics = DestinationMetricsRegistry::new().metrics_for(&tracker);

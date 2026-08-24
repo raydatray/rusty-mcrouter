@@ -185,7 +185,7 @@ mod tests {
         let (work_tx, work_rx) = mpsc::channel(8);
         let handle = ProxyHandle::new(0, request_tx, command_tx);
         let proxies = ProxySet::new(vec![handle.clone()]);
-        let tko = TkoTrackerMap::with_sink(noop_sink());
+        let tko = TkoTrackerMap::new(noop_sink());
         let map = destination::Map::new(
             tko,
             BackendMetricsShard::new(),

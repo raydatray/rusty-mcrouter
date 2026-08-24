@@ -185,7 +185,7 @@ fn main() -> anyhow::Result<()> {
 
     // the cross-thread objects: per-server health and per-server counters,
     // shared by every proxy thread's destinations, atomics only
-    let tko_map = TkoTrackerMap::with_sink(observability.events().sink());
+    let tko_map = TkoTrackerMap::new(observability.events().sink());
     let metrics_registry = DestinationMetricsRegistry::new();
     let defaults = destination_defaults(&args.options);
     let sweep_interval = Duration::from_millis(args.options.reset_inactive_connection_interval_ms);
