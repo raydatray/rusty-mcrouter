@@ -6,7 +6,7 @@ use rusty_mcrouter_backend::{
 };
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
-    PoolTkoTrackerConfig, RouteEntry, RouteHandleConfig,
+    RouteEntry, RouteHandleConfig,
 };
 use thiserror::Error;
 
@@ -38,9 +38,6 @@ pub enum BuildError {
         #[source]
         source: BackendFactoryError,
     },
-
-    #[error("invalid tko_tracker for pool `{pool}`: {reason}")]
-    InvalidPoolTkoTracker { pool: String, reason: &'static str },
 
     #[error("`PoolRoute|...` shorthand requires exactly 1 arg, got {got}")]
     PoolRouteShorthandArity { got: usize },
@@ -207,11 +204,10 @@ where
         let dest_cfg = pool_destination_config(self.defaults, pool_config);
         let pool_health = PoolHealth {
             pool_name,
-            fail_open: pool_config
-                .tko_tracker
-                .as_ref()
-                .map(|cfg| resolve_fail_open(pool_name, cfg, pool_config.servers.len()))
-                .transpose()?,
+            fail_open: pool_config.tko_tracker.map(|config| FailOpenThresholds {
+                enter: config.enter(),
+                exit: config.exit(),
+            }),
         };
 
         let mut destinations = Vec::with_capacity(pool_config.servers.len());
@@ -257,36 +253,6 @@ fn pool_destination_config(
         cfg.connect_timeout = Some(Duration::from_millis(ms));
     }
     cfg
-}
-
-/// Resolves the pool tko_tracker block to concrete fail-open thresholds.
-/// num takes precedence over percent; percent resolves as pct * servers / 100
-/// (verified if/else-if, McRouteHandleProvider-inl.h:256-275). Validation
-/// ports both upstream checkLogics (:276-282).
-fn resolve_fail_open(
-    pool_name: &str,
-    cfg: &PoolTkoTrackerConfig,
-    num_servers: usize,
-) -> Result<FailOpenThresholds> {
-    let resolve = |num: Option<u64>, pct: Option<u64>| {
-        num.or_else(|| pct.map(|p| p * num_servers as u64 / 100))
-            .unwrap_or(0)
-    };
-    let enter = resolve(cfg.num_tko_threshold_upper, cfg.percent_tko_threshold_upper);
-    let exit = resolve(cfg.num_tko_threshold_lower, cfg.percent_tko_threshold_lower);
-    if enter == 0 || exit == 0 {
-        return Err(BuildError::InvalidPoolTkoTracker {
-            pool: pool_name.to_string(),
-            reason: "both tko threshold upper and lower must be configured",
-        });
-    }
-    if exit > enter {
-        return Err(BuildError::InvalidPoolTkoTracker {
-            pool: pool_name.to_string(),
-            reason: "tko upper threshold must be >= lower threshold",
-        });
-    }
-    Ok(FailOpenThresholds { enter, exit })
 }
 
 fn build_pool_handle<B>(
@@ -609,7 +575,11 @@ mod tests {
     // ── pool config derivation ───────────────────────────────────────────
 
     fn pool_json(json: &str) -> PoolConfig {
-        serde_json::from_str(json).unwrap()
+        let document = parse(&format!(
+            r#"{{"pools":{{"test":{json}}},"route":"NullRoute"}}"#
+        ))
+        .unwrap();
+        document.pools["test"].clone()
     }
 
     /// The D2 guardrail: a pool server_timeout drags connect_timeout down
@@ -638,66 +608,5 @@ mod tests {
         let cfg = pool_destination_config(&defaults(), &pool);
         assert_eq!(cfg.reply_timeout, defaults().reply_timeout);
         assert_eq!(cfg.connect_timeout, defaults().connect_timeout);
-    }
-
-    // ── fail-open threshold resolution ───────────────────────────────────
-
-    fn tko_cfg(json: &str) -> PoolTkoTrackerConfig {
-        serde_json::from_str(json).unwrap()
-    }
-
-    #[test]
-    fn resolves_num_thresholds() {
-        let cfg = tko_cfg(r#"{ "num_tko_threshold_upper": 3, "num_tko_threshold_lower": 1 }"#);
-        assert_eq!(
-            resolve_fail_open("p", &cfg, 10).unwrap(),
-            FailOpenThresholds { enter: 3, exit: 1 }
-        );
-    }
-
-    #[test]
-    fn resolves_percent_thresholds_against_pool_size() {
-        let cfg =
-            tko_cfg(r#"{ "percent_tko_threshold_upper": 30, "percent_tko_threshold_lower": 10 }"#);
-        assert_eq!(
-            resolve_fail_open("p", &cfg, 10).unwrap(),
-            FailOpenThresholds { enter: 3, exit: 1 }
-        );
-    }
-
-    /// Verified upstream precedence: num beats percent when both are set.
-    #[test]
-    fn num_takes_precedence_over_percent() {
-        let cfg = tko_cfg(
-            r#"{ "num_tko_threshold_upper": 5, "percent_tko_threshold_upper": 10,
-                 "num_tko_threshold_lower": 2 }"#,
-        );
-        assert_eq!(
-            resolve_fail_open("p", &cfg, 10).unwrap(),
-            FailOpenThresholds { enter: 5, exit: 2 }
-        );
-    }
-
-    #[test]
-    fn rejects_missing_or_zero_thresholds() {
-        let cfg = tko_cfg(r#"{ "num_tko_threshold_upper": 3 }"#);
-        assert!(matches!(
-            resolve_fail_open("p", &cfg, 10),
-            Err(BuildError::InvalidPoolTkoTracker { .. })
-        ));
-        let cfg = tko_cfg(r#"{}"#);
-        assert!(matches!(
-            resolve_fail_open("p", &cfg, 10),
-            Err(BuildError::InvalidPoolTkoTracker { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_lower_above_upper() {
-        let cfg = tko_cfg(r#"{ "num_tko_threshold_upper": 1, "num_tko_threshold_lower": 3 }"#);
-        assert!(matches!(
-            resolve_fail_open("p", &cfg, 10),
-            Err(BuildError::InvalidPoolTkoTracker { .. })
-        ));
     }
 }

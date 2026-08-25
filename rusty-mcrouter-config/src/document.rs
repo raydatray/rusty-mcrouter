@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::{PoolConfig, RouteHandleConfig};
+use crate::{pool::RawPoolConfig, PoolConfig, RouteHandleConfig};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -21,6 +21,9 @@ pub enum ConfigError {
 
     #[error("config must define exactly one of `route` or `routes`; neither was provided")]
     MissingRoute,
+
+    #[error("invalid tko_tracker for pool `{pool}`: {reason}")]
+    InvalidPoolTkoTracker { pool: String, reason: &'static str },
 }
 
 type ConfigResult<T> = std::result::Result<T, ConfigError>;
@@ -47,7 +50,7 @@ pub struct PrefixedRoute {
 #[derive(Deserialize)]
 struct RawConfigDocument {
     #[serde(default)]
-    pools: BTreeMap<String, PoolConfig>,
+    pools: BTreeMap<String, RawPoolConfig>,
 
     #[serde(default, deserialize_with = "deserialize_named_handles")]
     named_handles: BTreeMap<String, RouteHandleConfig>,
@@ -63,6 +66,12 @@ impl TryFrom<RawConfigDocument> for ConfigDocument {
     type Error = ConfigError;
 
     fn try_from(raw: RawConfigDocument) -> ConfigResult<Self> {
+        let pools = raw
+            .pools
+            .into_iter()
+            .map(|(name, pool)| pool.validate(&name).map(|pool| (name, pool)))
+            .collect::<ConfigResult<_>>()?;
+
         let route = match (raw.route, raw.routes) {
             (Some(_), Some(_)) => return Err(ConfigError::BothRouteAndRoutes),
             (None, None) => return Err(ConfigError::MissingRoute),
@@ -71,7 +80,7 @@ impl TryFrom<RawConfigDocument> for ConfigDocument {
         };
 
         Ok(ConfigDocument {
-            pools: raw.pools,
+            pools,
             named_handles: raw.named_handles,
             route,
         })
