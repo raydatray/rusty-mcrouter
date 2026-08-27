@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use rusty_mcrouter_backend::mock_memcached::{spawn_failing_mock_memcached, spawn_mock_memcached};
@@ -7,9 +9,52 @@ use tokio::process::Command;
 
 mod support;
 
-use support::{assert_series, exchange, scrape, RouterProcess};
+use support::{exchange, RouterProcess};
 
 type Stack = RouterProcess;
+
+impl RouterProcess {
+    fn metrics_addr(&self) -> SocketAddr {
+        self._metrics_addr
+    }
+
+    fn pid(&self) -> u32 {
+        self._child.id().expect("router process is running")
+    }
+
+    async fn wait(&mut self) -> std::process::ExitStatus {
+        self._child.wait().await.unwrap()
+    }
+}
+
+async fn scrape(addr: SocketAddr) -> String {
+    let mut connection = TcpStream::connect(addr).await.unwrap();
+    connection
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    connection.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    response.split_once("\r\n\r\n").unwrap().1.to_string()
+}
+
+fn assert_series(body: &str, name: &str, labels: &[(&str, &str)], expected: u64) {
+    let mut rendered = String::from(name);
+    if !labels.is_empty() {
+        rendered.push('{');
+        for (index, (key, value)) in labels.iter().enumerate() {
+            if index != 0 {
+                rendered.push(',');
+            }
+            write!(rendered, "{key}=\"{value}\"").unwrap();
+        }
+        rendered.push('}');
+    }
+    writeln!(rendered, " {expected}").unwrap();
+    assert!(body.contains(&rendered), "missing {rendered:?} in:\n{body}");
+}
 
 async fn start_router(config_body: &str, tag: u16) -> Stack {
     start_router_with_args(config_body, tag, 1, &[]).await
@@ -37,42 +82,31 @@ async fn start_stack() -> Stack {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn get_seeded_key_returns_value() {
+async fn basic_command_flow_crosses_the_full_stack() {
     let fx = start_stack().await;
+
     exchange(fx.router_addr, b"mg seeded_foo v\r\n", b"VA 3\r\nbar\r\n").await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn get_missing_key_returns_miss() {
-    let fx = start_stack().await;
-    exchange(fx.router_addr, b"mg mock_e2e_missing v\r\n", b"EN\r\n").await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn store_then_get_round_trip() {
-    let fx = start_stack().await;
-    exchange(fx.router_addr, b"ms me2e_k 5 F9\r\nworld\r\n", b"HD\r\n").await;
+    exchange(fx.router_addr, b"mg system_missing v\r\n", b"EN\r\n").await;
     exchange(
         fx.router_addr,
-        b"mg me2e_k v f s\r\n",
+        b"ms system_store 5 F9\r\nworld\r\n",
+        b"HD\r\n",
+    )
+    .await;
+    exchange(
+        fx.router_addr,
+        b"mg system_store v f s\r\n",
         b"VA 5 f9 s5\r\nworld\r\n",
     )
     .await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn store_delete_get_round_trip() {
-    let fx = start_stack().await;
-    exchange(fx.router_addr, b"ms me2e_d 1\r\nx\r\n", b"HD\r\n").await;
-    exchange(fx.router_addr, b"md me2e_d\r\n", b"HD\r\n").await;
-    exchange(fx.router_addr, b"mg me2e_d v\r\n", b"EN\r\n").await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn arithmetic_returns_new_value() {
-    let fx = start_stack().await;
-    exchange(fx.router_addr, b"ms me2e_n 2\r\n42\r\n", b"HD\r\n").await;
-    exchange(fx.router_addr, b"ma me2e_n v\r\n", b"VA 2\r\n43\r\n").await;
+    exchange(
+        fx.router_addr,
+        b"ma system_counter N60 J41 v\r\n",
+        b"VA 2\r\n41\r\n",
+    )
+    .await;
+    exchange(fx.router_addr, b"md system_store\r\n", b"HD\r\n").await;
+    exchange(fx.router_addr, b"mg system_store v\r\n", b"EN\r\n").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -121,7 +155,7 @@ async fn metrics_endpoint_reports_traffic() {
     exchange(fx.router_addr, b"mg seeded_foo v\r\n", b"VA 3\r\nbar\r\n").await;
     exchange(fx.router_addr, b"mg mock_e2e_missing v\r\n", b"EN\r\n").await;
 
-    let body = scrape(fx.metrics_addr).await;
+    let body = scrape(fx.metrics_addr()).await;
     assert!(
         body.contains("rusty_mcrouter_requests_total{command=\"mg\"} 2\n"),
         "{body}"
@@ -154,7 +188,7 @@ async fn metrics_endpoint_reports_null_route_requests() {
 
     exchange(fx.router_addr, b"mg discarded v\r\n", b"EN\r\n").await;
 
-    let body = scrape(fx.metrics_addr).await;
+    let body = scrape(fx.metrics_addr()).await;
     assert!(
         body.contains("rusty_mcrouter_dev_null_requests_total 1\n"),
         "{body}"
@@ -168,7 +202,7 @@ async fn null_route_sums_two_proxy_shards() {
     exchange(fx.router_addr, b"mg first v\r\n", b"EN\r\n").await;
     exchange(fx.router_addr, b"mg second v\r\n", b"EN\r\n").await;
 
-    let body = scrape(fx.metrics_addr).await;
+    let body = scrape(fx.metrics_addr()).await;
     assert_series(&body, "rusty_mcrouter_dev_null_requests_total", &[], 2);
 }
 
@@ -215,7 +249,7 @@ async fn metrics_endpoint_reports_tko() {
         let _ = tokio::time::timeout(Duration::from_secs(2), conn.read(&mut chunk)).await;
         drop(conn);
 
-        let body = scrape(fx.metrics_addr).await;
+        let body = scrape(fx.metrics_addr()).await;
         if body.contains("rusty_mcrouter_tko{kind=\"hard\"} 1\n") {
             assert!(
                 body.contains(&format!(
@@ -287,7 +321,7 @@ async fn failover_metrics_count_one_entry_and_three_pool_attempts() {
     )
     .await;
 
-    let body = scrape(stack.metrics_addr).await;
+    let body = scrape(stack.metrics_addr()).await;
     assert_series(
         &body,
         "rusty_mcrouter_failover_total",
@@ -327,7 +361,7 @@ async fn two_proxy_shards_sum_into_one_pool_series() {
     exchange(stack.router_addr, b"mg first v\r\n", b"EN\r\n").await;
     exchange(stack.router_addr, b"mg second v\r\n", b"EN\r\n").await;
 
-    let body = scrape(stack.metrics_addr).await;
+    let body = scrape(stack.metrics_addr()).await;
     assert_series(
         &body,
         "rusty_mcrouter_pool_requests_total",
