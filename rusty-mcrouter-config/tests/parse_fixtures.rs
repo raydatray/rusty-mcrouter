@@ -60,6 +60,14 @@ fn upstream_pool_timeout_parses() {
 }
 
 #[test]
+fn unsupported_caret_protocol_is_rejected() {
+    assert!(matches!(
+        parse_err("basic_caret.json"),
+        ConfigError::UnsupportedPoolProtocol { ref protocol, .. } if protocol == "caret"
+    ));
+}
+
+#[test]
 fn unsupported_prefix_selector_route_is_rejected() {
     assert!(matches!(
         parse_err("dev_null.json"),
@@ -188,22 +196,10 @@ fn failover_custom_errors_parses_per_op_lists() {
 }
 
 #[test]
-fn failover_limit_parses_and_tolerates_unsupported_rate_limiter() {
-    let doc = parse_ok("failover_limit.json");
-    let RouteConfig::FailoverRoute {
-        children,
-        failover_errors,
-        failover_policy,
-    } = doc.route()
-    else {
-        panic!("expected FailoverRoute, got {:?}", doc.route());
-    };
-    assert_eq!(children.len(), 2);
-    assert_eq!(*failover_errors, FailoverErrorsConfig::Default);
-    assert_eq!(*failover_policy, FailoverPolicyConfig::InOrder);
+fn unsupported_failover_limit_is_rejected() {
     assert!(matches!(
-        children.first(),
-        Some(RouteConfig::ErrorRoute { .. })
+        parse_err("failover_limit.json"),
+        ConfigError::Schema { .. }
     ));
 }
 

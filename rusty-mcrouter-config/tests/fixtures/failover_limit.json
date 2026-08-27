@@ -1,6 +1,5 @@
 // source: mcrouter/test/test_failover_limit.json
-// note: `failover_limit` (rate limiter) is recognized-but-unmodeled and is
-// tolerated (parsed and ignored) until the rate-limiter seam lands.
+// expected rejection: `failover_limit` is not implemented.
 {
   "pools": {
     "A.gut": { "servers": [ "localhost:12345" ] }

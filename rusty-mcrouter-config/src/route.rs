@@ -190,6 +190,9 @@ fn parse_object_form(mut map: Map<String, Value>) -> Result<RawRouteConfig, Stri
             Ok(RawRouteConfig::PoolRoute { pool, hash })
         }
         "FailoverRoute" => {
+            if map.contains_key("failover_limit") {
+                return Err("FailoverRoute `failover_limit` is not supported".to_string());
+            }
             let children = parse_failover_children(&mut map)?;
             let failover_errors = parse_failover_errors(&mut map)?;
             let failover_policy = parse_failover_policy(&mut map)?;
@@ -587,6 +590,20 @@ mod tests {
         assert_eq!(children.len(), 2);
         assert_eq!(failover_errors, FailoverErrorsConfig::Default);
         assert_eq!(failover_policy, FailoverPolicyConfig::InOrder);
+    }
+
+    #[test]
+    fn failover_route_rejects_unsupported_rate_limiter() {
+        let error = serde_json::from_str::<RawRouteConfig>(
+            r#"{
+                "type": "FailoverRoute",
+                "children": ["PoolRoute|A"],
+                "failover_limit": { "rate": 0.2, "burst": 9.8 }
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("failover_limit"));
     }
 
     #[test]

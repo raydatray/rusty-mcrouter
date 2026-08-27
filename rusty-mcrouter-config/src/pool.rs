@@ -98,6 +98,7 @@ impl RawPoolConfig {
         let server_timeout_ms = validate_timeout(name, "server_timeout", self.server_timeout_ms)?;
         let connect_timeout_ms =
             validate_timeout(name, "connect_timeout", self.connect_timeout_ms)?;
+        validate_protocol(name, self.extra.get("protocol"))?;
 
         Ok(PoolConfig {
             name: name.to_string(),
@@ -107,6 +108,21 @@ impl RawPoolConfig {
             tko_tracker,
             extra: self.extra,
         })
+    }
+}
+
+fn validate_protocol(pool: &str, value: Option<&Value>) -> Result<(), ConfigError> {
+    match value {
+        None => Ok(()),
+        Some(Value::String(protocol)) if protocol == "ascii" => Ok(()),
+        Some(Value::String(protocol)) => Err(ConfigError::UnsupportedPoolProtocol {
+            pool: pool.to_string(),
+            protocol: protocol.clone(),
+        }),
+        Some(_) => Err(ConfigError::InvalidPoolOption {
+            pool: pool.to_string(),
+            option: "protocol",
+        }),
     }
 }
 
@@ -226,6 +242,29 @@ mod tests {
             pool.extra.get("enable_compression").unwrap(),
             &Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_or_invalid_protocols() {
+        let raw = serde_json::from_value::<RawPoolConfig>(serde_json::json!({
+            "servers": ["a:1"],
+            "protocol": "caret",
+        }))
+        .unwrap();
+        assert!(matches!(
+            raw.validate("test"),
+            Err(ConfigError::UnsupportedPoolProtocol { .. })
+        ));
+
+        let raw = serde_json::from_value::<RawPoolConfig>(serde_json::json!({
+            "servers": ["a:1"],
+            "protocol": true,
+        }))
+        .unwrap();
+        assert!(matches!(
+            raw.validate("test"),
+            Err(ConfigError::InvalidPoolOption { .. })
+        ));
     }
 
     #[test]
