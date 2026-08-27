@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use json_comments::StripComments;
 use serde::de::{self, Deserializer};
@@ -12,11 +15,22 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("failed to read config `{path}`: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("json parse error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("config schema error at `{path}`: {source}")]
+    Schema {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
 
     #[error("config must define exactly one of `route` or `routes`; both were provided")]
     BothRouteAndRoutes,
@@ -113,13 +127,10 @@ impl ConfigDocument {
 struct RawConfigDocument {
     #[serde(default)]
     pools: BTreeMap<String, RawPoolConfig>,
-
     #[serde(default, deserialize_with = "deserialize_named_handles")]
-    named_handles: BTreeMap<String, RouteHandleConfig>,
-
-    #[serde(default)]
-    route: Option<RouteHandleConfig>,
-
+    named_handles: BTreeMap<String, RawRouteConfig>,
+    #[serde(default, deserialize_with = "deserialize_route_field")]
+    route: Option<RawRouteConfig>,
     #[serde(default, deserialize_with = "deserialize_routes_field")]
     routes: Option<Vec<RawPrefixedRoute>>,
 }
@@ -273,11 +284,9 @@ impl<'a> RouteValidator<'a> {
                     failover_policy,
                 })
             }
-            RouteHandleConfig::NullRoute => Ok(RouteConfig::NullRoute),
-            RouteHandleConfig::ErrorRoute { message } => Ok(RouteConfig::ErrorRoute { message }),
-            RouteHandleConfig::Unknown { kind, .. } => {
-                Err(ConfigError::UnsupportedRouteType { kind })
-            }
+            RawRouteConfig::NullRoute => Ok(RouteConfig::NullRoute),
+            RawRouteConfig::ErrorRoute { message } => Ok(RouteConfig::ErrorRoute { message }),
+            RawRouteConfig::Unknown { kind, .. } => Err(ConfigError::UnsupportedRouteType { kind }),
         }
     }
 
@@ -313,19 +322,39 @@ impl<'a> RouteValidator<'a> {
 
 pub fn parse(input: &str) -> ConfigResult<ConfigDocument> {
     let stripped = StripComments::new(input.as_bytes());
-    let raw: RawConfigDocument = serde_json::from_reader(stripped)?;
+    let mut deserializer = serde_json::Deserializer::from_reader(stripped);
+    let raw: RawConfigDocument =
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            let path = error.path().to_string();
+            let source = error.into_inner();
+            match source.classify() {
+                serde_json::error::Category::Data => ConfigError::Schema { path, source },
+                _ => ConfigError::Json(source),
+            }
+        })?;
 
     ConfigDocument::try_from(raw)
 }
 
 pub fn parse_file(path: impl AsRef<Path>) -> ConfigResult<ConfigDocument> {
-    let text = std::fs::read_to_string(path)?;
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
     parse(&text)
+}
+
+fn deserialize_route_field<'de, D>(deserializer: D) -> Result<Option<RawRouteConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    RawRouteConfig::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_named_handles<'de, D>(
     deserializer: D,
-) -> Result<BTreeMap<String, RouteHandleConfig>, D::Error>
+) -> Result<BTreeMap<String, RawRouteConfig>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -339,9 +368,9 @@ where
                 Ok((name, route))
             })
             .collect(),
-        Value::Array(items) => items
-            .into_iter()
-            .map(|item| {
+        Value::Array(items) => {
+            let mut handles = BTreeMap::new();
+            for item in items {
                 let mut obj = match item {
                     Value::Object(o) => o,
                     other => {
@@ -361,12 +390,16 @@ where
                     }
                 };
 
-                let route: RouteHandleConfig =
+                let route: RawRouteConfig =
                     serde_json::from_value(Value::Object(obj)).map_err(de::Error::custom)?;
-
-                Ok((name, route))
-            })
-            .collect(),
+                if handles.insert(name.clone(), route).is_some() {
+                    return Err(de::Error::custom(format!(
+                        "duplicate named handle `{name}`"
+                    )));
+                }
+            }
+            Ok(handles)
+        }
         other => Err(de::Error::custom(format!(
             "named_handles must be an object or array, got {other}"
         ))),
@@ -376,7 +409,7 @@ where
 #[derive(Deserialize)]
 struct RawPrefixedRouteEntry {
     aliases: Vec<String>,
-    route: RouteHandleConfig,
+    route: RawRouteConfig,
 }
 
 fn deserialize_routes_field<'de, D>(
@@ -594,5 +627,42 @@ mod tests {
         let document =
             parse_ok(r#"{ "pools": { "empty": { "servers": [] } }, "route": "NullRoute" }"#);
         assert!(document.pool_by_name("empty").unwrap().servers().is_empty());
+    }
+
+    #[test]
+    fn rejects_null_and_duplicate_document_fields() {
+        assert!(matches!(
+            parse_err(r#"{ "route": null }"#),
+            ConfigError::Schema { ref path, .. } if path == "route"
+        ));
+        assert!(matches!(
+            parse_err(r#"{ "route": "NullRoute", "route": "ErrorRoute" }"#),
+            ConfigError::Schema { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_list_form_named_handles() {
+        assert!(matches!(
+            parse_err(
+                r#"{
+                    "named_handles": [
+                        { "name": "same", "type": "NullRoute" },
+                        { "name": "same", "type": "ErrorRoute" }
+                    ],
+                    "route": "same"
+                }"#
+            ),
+            ConfigError::Schema { ref path, .. } if path == "named_handles"
+        ));
+    }
+
+    #[test]
+    fn parse_file_reports_the_path_for_read_errors() {
+        let path = Path::new("/definitely/missing/rusty-mcrouter-config.json");
+        assert!(matches!(
+            parse_file(path),
+            Err(ConfigError::Read { path: ref actual, .. }) if actual == path
+        ));
     }
 }
