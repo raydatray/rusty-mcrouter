@@ -51,6 +51,15 @@ fn memcache_local_config_parses() {
 }
 
 #[test]
+fn upstream_pool_timeout_parses() {
+    let doc = parse_ok("tko_reconfigure1.json");
+    assert_eq!(
+        doc.pool_by_name("A").unwrap().server_timeout_ms(),
+        Some(12_345)
+    );
+}
+
+#[test]
 fn unsupported_prefix_selector_route_is_rejected() {
     assert!(matches!(
         parse_err("dev_null.json"),

@@ -3,6 +3,8 @@ use serde_json::{Map, Value};
 
 use crate::{server::RawServerConfig, ConfigError, ServerConfig};
 
+const MAX_TIMEOUT_MS: u64 = 1_000_000;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PoolConfig {
     name: String,
@@ -93,15 +95,33 @@ impl RawPoolConfig {
             .tko_tracker
             .map(|config| config.validate(name, servers.len()))
             .transpose()?;
+        let server_timeout_ms = validate_timeout(name, "server_timeout", self.server_timeout_ms)?;
+        let connect_timeout_ms =
+            validate_timeout(name, "connect_timeout", self.connect_timeout_ms)?;
 
         Ok(PoolConfig {
             name: name.to_string(),
             servers,
-            server_timeout_ms: self.server_timeout_ms,
-            connect_timeout_ms: self.connect_timeout_ms,
+            server_timeout_ms,
+            connect_timeout_ms,
             tko_tracker,
             extra: self.extra,
         })
+    }
+}
+
+fn validate_timeout(
+    pool: &str,
+    field: &'static str,
+    value: Option<u64>,
+) -> Result<Option<u64>, ConfigError> {
+    match value {
+        None | Some(1..=MAX_TIMEOUT_MS) => Ok(value),
+        Some(value) => Err(ConfigError::InvalidPoolTimeout {
+            pool: pool.to_string(),
+            field,
+            value,
+        }),
     }
 }
 
@@ -233,6 +253,31 @@ mod tests {
     }
 
     #[test]
+    fn validates_timeout_bounds() {
+        for value in [1, MAX_TIMEOUT_MS] {
+            let raw = serde_json::from_value::<RawPoolConfig>(serde_json::json!({
+                "servers": ["a:1"],
+                "server_timeout": value,
+                "connect_timeout": value,
+            }))
+            .unwrap();
+            assert!(raw.validate("test").is_ok());
+        }
+
+        for value in [0, MAX_TIMEOUT_MS + 1] {
+            let raw = serde_json::from_value::<RawPoolConfig>(serde_json::json!({
+                "servers": ["a:1"],
+                "server_timeout": value,
+            }))
+            .unwrap();
+            assert!(matches!(
+                raw.validate("test"),
+                Err(ConfigError::InvalidPoolTimeout { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn parse_tko_tracker_block() {
         let pool = pool(
             r#"{
@@ -247,6 +292,54 @@ mod tests {
         let tko = pool.tko_tracker.unwrap();
         assert_eq!(tko.enter(), 2);
         assert_eq!(tko.exit(), 1);
+    }
+
+    #[test]
+    fn resolves_percent_tko_thresholds() {
+        let pool = pool(
+            r#"{
+                "servers": ["a:1", "b:2", "c:3", "d:4", "e:5", "f:6", "g:7", "h:8", "i:9", "j:10"],
+                "tko_tracker": {
+                    "percent_tko_threshold_upper": 50,
+                    "percent_tko_threshold_lower": 20
+                }
+            }"#,
+        );
+
+        let tko = pool.tko_tracker.unwrap();
+        assert_eq!(tko.enter(), 5);
+        assert_eq!(tko.exit(), 2);
+    }
+
+    #[test]
+    fn numeric_tko_threshold_takes_precedence() {
+        assert_eq!(
+            resolve_tko_threshold(Some(2), Some(u64::MAX), usize::MAX, "test").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn rejects_tko_thresholds_that_resolve_to_zero_or_overflow() {
+        let raw = serde_json::from_str::<RawPoolConfig>(
+            r#"{
+                "servers": ["a:1", "b:2", "c:3"],
+                "tko_tracker": {
+                    "percent_tko_threshold_upper": 1,
+                    "percent_tko_threshold_lower": 1
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            raw.validate("test"),
+            Err(ConfigError::InvalidPoolTkoTracker { .. })
+        ));
+
+        assert!(matches!(
+            resolve_tko_threshold(None, Some(u64::MAX), usize::MAX, "test"),
+            Err(ConfigError::InvalidPoolTkoTracker { .. })
+        ));
     }
 
     #[test]
