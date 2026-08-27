@@ -19,17 +19,8 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum BuildError {
-    #[error("pool `{name}` is referenced by a route but not defined in `pools`")]
-    PoolNotFound { name: String },
-
-    #[error("pool `{name}` has zero servers; refusing to construct empty PoolRoute")]
-    EmptyPool { name: String },
-
     #[error("pool `{name}` is missing from the routing metrics layout")]
     PoolMissingFromMetricsLayout { name: String },
-
-    #[error("FailoverRoute has zero children; refusing to construct an empty failover")]
-    EmptyFailover,
 
     #[error("invalid server `{server}` in pool `{pool}`: {source}")]
     InvalidServer {
@@ -38,19 +29,6 @@ pub enum BuildError {
         #[source]
         source: BackendFactoryError,
     },
-
-    #[error("`PoolRoute|...` shorthand requires exactly 1 arg, got {got}")]
-    PoolRouteShorthandArity { got: usize },
-
-    // todo - remove these as we add routes
-    #[error("route type `{kind}` is not implemented")]
-    RouteTypeNotImplemented { kind: String },
-
-    #[error("`routes` (with prefix aliases) is not implemented ")]
-    PrefixRoutingNotImplemented,
-
-    #[error("unresolved reference `{name}`: not a known route type, and named_handles resolution is not implemented")]
-    UnresolvedReference { name: String },
 
     #[error(transparent)]
     Selector(#[from] SelectorBuildError),
@@ -74,9 +52,8 @@ pub fn build_route<F>(
 where
     F: BackendFactory,
 {
-    let entry = match &config.route {
-        RouteEntry::Single(handle) => handle,
-        RouteEntry::Prefixed(_) => return Err(BuildError::PrefixRoutingNotImplemented),
+    let RouteEntry::Single(entry) = &config.route else {
+        unreachable!("config parsing rejects prefixed routes")
     };
 
     let mut route_builder = RouteBuilder::new(config, factory, defaults, metrics_layout);
@@ -135,39 +112,17 @@ where
                 for child in children {
                     built.push(self.build_handle(child)?);
                 }
-                if built.is_empty() {
-                    return Err(BuildError::EmptyFailover);
-                }
                 let errors = build_failover_errors(failover_errors);
                 let (policy, max_error_tries) = build_failover_policy(failover_policy, built.len());
                 FailoverRoute::new(built, errors, policy, max_error_tries)
                     .map(Route::into_dyn)
-                    .ok_or(BuildError::EmptyFailover)
+                    .ok_or_else(|| unreachable!("config parsing rejects empty failovers"))
             }
 
-            RouteHandleConfig::Reference(name) => match name.as_str() {
-                "NullRoute" => Ok(NullRoute.into_dyn()),
-                "ErrorRoute" => Ok(ErrorRoute::new(None).into_dyn()),
-                _ => Err(BuildError::UnresolvedReference { name: name.clone() }),
-            },
-
-            RouteHandleConfig::Shorthand { kind, args } => match kind.as_str() {
-                "NullRoute" => Ok(NullRoute.into_dyn()),
-                "ErrorRoute" => Ok(ErrorRoute::new(args.first().cloned()).into_dyn()),
-                "PoolRoute" => {
-                    if args.len() != 1 {
-                        return Err(BuildError::PoolRouteShorthandArity { got: args.len() });
-                    }
-                    let destinations = self.get_or_build_destinations(&args[0])?;
-                    build_pool_handle(&args[0], &HashConfig::default(), destinations)
-                }
-                other => Err(BuildError::RouteTypeNotImplemented {
-                    kind: other.to_string(),
-                }),
-            },
-
-            RouteHandleConfig::Unknown { kind, .. } => {
-                Err(BuildError::RouteTypeNotImplemented { kind: kind.clone() })
+            RouteHandleConfig::Reference(_)
+            | RouteHandleConfig::Shorthand { .. }
+            | RouteHandleConfig::Unknown { .. } => {
+                unreachable!("config parsing normalizes executable routes")
             }
         }
     }
@@ -180,19 +135,12 @@ where
             return Ok(cached.clone());
         }
 
-        let pool_config =
-            self.config
-                .pools
-                .get(pool_name)
-                .ok_or_else(|| BuildError::PoolNotFound {
-                    name: pool_name.to_string(),
-                })?;
-
-        if pool_config.servers.is_empty() {
-            return Err(BuildError::EmptyPool {
-                name: pool_name.to_string(),
-            });
-        }
+        let pool_config = self
+            .config
+            .pools
+            .get(pool_name)
+            .expect("config parsing resolves pool references");
+        debug_assert!(!pool_config.servers.is_empty());
 
         let pool_index = self
             .metrics_layout
@@ -423,20 +371,6 @@ mod tests {
     }
 
     #[test]
-    fn errors_when_pool_not_found() {
-        let cfg = parse(r#"{"route": "PoolRoute|missing"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(err, BuildError::PoolNotFound { ref name } if name == "missing"));
-    }
-
-    #[test]
-    fn errors_when_pool_has_zero_servers() {
-        let cfg = parse(r#"{"pools": {"E": {"servers": []}}, "route": "PoolRoute|E"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(err, BuildError::EmptyPool { ref name } if name == "E"));
-    }
-
-    #[test]
     fn errors_when_pool_is_missing_from_metrics_layout() {
         let cfg = parse(r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#)
             .unwrap();
@@ -448,43 +382,6 @@ mod tests {
             err,
             BuildError::PoolMissingFromMetricsLayout { ref name } if name == "P"
         ));
-    }
-
-    #[test]
-    fn errors_on_unknown_object_route_type() {
-        let cfg = parse(r#"{"route": {"type": "AllSyncRoute", "children": []}}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(
-            err,
-            BuildError::RouteTypeNotImplemented { ref kind } if kind == "AllSyncRoute"
-        ));
-    }
-
-    #[test]
-    fn errors_on_unknown_shorthand_kind() {
-        let cfg = parse(r#"{"route": "AllSyncRoute|x"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(
-            err,
-            BuildError::RouteTypeNotImplemented { ref kind } if kind == "AllSyncRoute"
-        ));
-    }
-
-    #[test]
-    fn errors_on_empty_failover_children() {
-        let cfg = parse(r#"{"route": {"type": "FailoverRoute", "children": []}}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(err, BuildError::EmptyFailover));
-    }
-
-    #[test]
-    fn empty_least_failures_returns_build_error_instead_of_panicking() {
-        let cfg = parse(
-            r#"{"route": {"type": "FailoverRoute", "children": [], "failover_policy": {"type": "LeastFailuresPolicy", "max_tries": 1}}}"#,
-        )
-        .unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(err, BuildError::EmptyFailover));
     }
 
     #[tokio::test]
@@ -513,34 +410,6 @@ mod tests {
         let route = build(&cfg, &factory).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(reply, server_error(b"down"));
-    }
-
-    #[test]
-    fn errors_on_unresolved_bare_reference() {
-        let cfg = parse(r#"{"route": "route:made-up"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(
-            err,
-            BuildError::UnresolvedReference { ref name } if name == "route:made-up"
-        ));
-    }
-
-    #[test]
-    fn errors_on_prefixed_routes() {
-        let json = r#"{"pools": {"A": {"servers": ["x:1"]}}, "routes": [{"aliases": ["/a/"], "route": "PoolRoute|A"}]}"#;
-        let cfg = parse(json).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(err, BuildError::PrefixRoutingNotImplemented));
-    }
-
-    #[test]
-    fn errors_on_pool_route_shorthand_with_wrong_arity() {
-        let cfg = parse(r#"{"route": "PoolRoute|a|b"}"#).unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::new());
-        assert!(matches!(
-            err,
-            BuildError::PoolRouteShorthandArity { got: 2 }
-        ));
     }
 
     #[test]
