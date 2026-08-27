@@ -1,6 +1,6 @@
 use rusty_mcrouter_config::{
     parse_file, ConfigDocument, ConfigError, FailoverErrorKind, FailoverErrorsConfig,
-    FailoverPolicyConfig, RouteEntry, RouteHandleConfig,
+    FailoverPolicyConfig, RouteConfig,
 };
 use std::path::PathBuf;
 
@@ -24,32 +24,30 @@ fn parse_err(name: &str) -> ConfigError {
 #[test]
 fn nullroute_minimal_config() {
     let doc = parse_ok("nullroute.json");
-    assert!(doc.pools.is_empty());
-    assert!(doc.named_handles.is_empty());
-
-    assert_eq!(doc.route, RouteEntry::Single(RouteHandleConfig::NullRoute));
+    assert!(doc.pools().is_empty());
+    assert_eq!(doc.route(), &RouteConfig::NullRoute);
 }
 
 #[test]
 fn basic_1_1_1_canonical_pool_and_route() {
     let doc = parse_ok("basic_1_1_1.json");
-    assert_eq!(doc.pools.len(), 1);
+    assert_eq!(doc.pools().len(), 1);
     assert_eq!(
-        doc.pools["foo"].servers[0].access_point(),
+        doc.pool("foo").unwrap().servers[0].access_point(),
         "localhost:12345"
     );
 
     assert!(matches!(
-        doc.route,
-        RouteEntry::Single(RouteHandleConfig::PoolRoute { ref pool, .. }) if pool == "foo"
+        doc.route(),
+        RouteConfig::PoolRoute { pool, .. } if pool == "foo"
     ));
 }
 
 #[test]
 fn memcache_local_config_parses() {
     let doc = parse_ok("memcache_local_config.json");
-    assert_eq!(doc.pools.len(), 1);
-    assert!(doc.pools.contains_key("A"));
+    assert_eq!(doc.pools().len(), 1);
+    assert!(doc.pool("A").is_some());
 }
 
 #[test]
@@ -96,13 +94,10 @@ fn routes_plural_is_rejected_until_supported() {
 fn comments_in_jsonc_are_stripped() {
     let doc = parse_ok("with_comments.json");
     assert_eq!(
-        doc.pools["foo"].servers[0].access_point(),
+        doc.pool("foo").unwrap().servers[0].access_point(),
         "localhost:11211"
     );
-    assert!(matches!(
-        doc.route,
-        RouteEntry::Single(RouteHandleConfig::PoolRoute { .. })
-    ));
+    assert!(matches!(doc.route(), RouteConfig::PoolRoute { .. }));
 }
 
 #[test]
@@ -147,14 +142,14 @@ fn route_invalid_type_yields_json_error() {
 #[test]
 fn failover_least_failures_parses_children_and_policy() {
     let doc = parse_ok("failover_least_failures.json");
-    assert_eq!(doc.pools.len(), 4);
-    let RouteEntry::Single(RouteHandleConfig::FailoverRoute {
+    assert_eq!(doc.pools().len(), 4);
+    let RouteConfig::FailoverRoute {
         children,
         failover_errors,
         failover_policy,
-    }) = &doc.route
+    } = doc.route()
     else {
-        panic!("expected FailoverRoute, got {:?}", doc.route);
+        panic!("expected FailoverRoute, got {:?}", doc.route());
     };
     assert_eq!(children.len(), 4);
     assert_eq!(*failover_errors, FailoverErrorsConfig::Default);
@@ -167,11 +162,11 @@ fn failover_least_failures_parses_children_and_policy() {
 #[test]
 fn failover_custom_errors_parses_per_op_lists() {
     let doc = parse_ok("failover_custom_errors.json");
-    let RouteEntry::Single(RouteHandleConfig::FailoverRoute {
+    let RouteConfig::FailoverRoute {
         failover_errors, ..
-    }) = &doc.route
+    } = doc.route()
     else {
-        panic!("expected FailoverRoute, got {:?}", doc.route);
+        panic!("expected FailoverRoute, got {:?}", doc.route());
     };
     assert_eq!(
         *failover_errors,
@@ -186,20 +181,20 @@ fn failover_custom_errors_parses_per_op_lists() {
 #[test]
 fn failover_limit_parses_and_tolerates_unsupported_rate_limiter() {
     let doc = parse_ok("failover_limit.json");
-    let RouteEntry::Single(RouteHandleConfig::FailoverRoute {
+    let RouteConfig::FailoverRoute {
         children,
         failover_errors,
         failover_policy,
-    }) = &doc.route
+    } = doc.route()
     else {
-        panic!("expected FailoverRoute, got {:?}", doc.route);
+        panic!("expected FailoverRoute, got {:?}", doc.route());
     };
     assert_eq!(children.len(), 2);
     assert_eq!(*failover_errors, FailoverErrorsConfig::Default);
     assert_eq!(*failover_policy, FailoverPolicyConfig::InOrder);
     assert!(matches!(
         children.first(),
-        Some(RouteHandleConfig::ErrorRoute { .. })
+        Some(RouteConfig::ErrorRoute { .. })
     ));
 }
 

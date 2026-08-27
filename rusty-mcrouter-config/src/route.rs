@@ -4,7 +4,7 @@ use serde::de::{self, Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum RouteHandleConfig {
+pub(crate) enum RawRouteConfig {
     Reference(String),
     Shorthand {
         kind: String,
@@ -15,7 +15,7 @@ pub enum RouteHandleConfig {
         hash: HashConfig,
     },
     FailoverRoute {
-        children: Vec<RouteHandleConfig>,
+        children: Vec<RawRouteConfig>,
         failover_errors: FailoverErrorsConfig,
         failover_policy: FailoverPolicyConfig,
     },
@@ -28,6 +28,23 @@ pub enum RouteHandleConfig {
     Unknown {
         kind: String,
         fields: Map<String, Value>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RouteConfig {
+    PoolRoute {
+        pool: String,
+        hash: HashConfig,
+    },
+    FailoverRoute {
+        children: Vec<RouteConfig>,
+        failover_errors: FailoverErrorsConfig,
+        failover_policy: FailoverPolicyConfig,
+    },
+    NullRoute,
+    ErrorRoute {
+        message: Option<String>,
     },
 }
 
@@ -99,7 +116,7 @@ impl FromStr for FailoverErrorKind {
     }
 }
 
-impl<'de> Deserialize<'de> for RouteHandleConfig {
+impl<'de> Deserialize<'de> for RawRouteConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -116,17 +133,17 @@ impl<'de> Deserialize<'de> for RouteHandleConfig {
     }
 }
 
-fn parse_string_form(s: &str) -> RouteHandleConfig {
+fn parse_string_form(s: &str) -> RawRouteConfig {
     match s.split_once('|') {
-        None => RouteHandleConfig::Reference(s.to_string()),
-        Some((kind, rest)) => RouteHandleConfig::Shorthand {
+        None => RawRouteConfig::Reference(s.to_string()),
+        Some((kind, rest)) => RawRouteConfig::Shorthand {
             kind: kind.to_string(),
             args: rest.split('|').map(String::from).collect(),
         },
     }
 }
 
-fn parse_object_form(mut map: Map<String, Value>) -> Result<RouteHandleConfig, String> {
+fn parse_object_form(mut map: Map<String, Value>) -> Result<RawRouteConfig, String> {
     let kind = match map.remove("type") {
         Some(Value::String(s)) => s,
         Some(other) => return Err(format!("`type` must be a string, got {}", other)),
@@ -134,7 +151,7 @@ fn parse_object_form(mut map: Map<String, Value>) -> Result<RouteHandleConfig, S
     };
 
     match kind.as_str() {
-        "NullRoute" => Ok(RouteHandleConfig::NullRoute),
+        "NullRoute" => Ok(RawRouteConfig::NullRoute),
         "ErrorRoute" => {
             let message = match map.remove("message") {
                 Some(Value::String(s)) => Some(s),
@@ -146,7 +163,7 @@ fn parse_object_form(mut map: Map<String, Value>) -> Result<RouteHandleConfig, S
                 }
                 None => None,
             };
-            Ok(RouteHandleConfig::ErrorRoute { message })
+            Ok(RawRouteConfig::ErrorRoute { message })
         }
         "PoolRoute" => {
             let pool = match map.remove("pool") {
@@ -168,19 +185,19 @@ fn parse_object_form(mut map: Map<String, Value>) -> Result<RouteHandleConfig, S
                 None => return Err("PoolRoute missing required field `pool`".to_string()),
             };
             let hash = parse_hash(&mut map)?;
-            Ok(RouteHandleConfig::PoolRoute { pool, hash })
+            Ok(RawRouteConfig::PoolRoute { pool, hash })
         }
         "FailoverRoute" => {
             let children = parse_failover_children(&mut map)?;
             let failover_errors = parse_failover_errors(&mut map)?;
             let failover_policy = parse_failover_policy(&mut map)?;
-            Ok(RouteHandleConfig::FailoverRoute {
+            Ok(RawRouteConfig::FailoverRoute {
                 children,
                 failover_errors,
                 failover_policy,
             })
         }
-        _ => Ok(RouteHandleConfig::Unknown { kind, fields: map }),
+        _ => Ok(RawRouteConfig::Unknown { kind, fields: map }),
     }
 }
 
@@ -216,7 +233,7 @@ fn parse_hash_func(name: &str) -> Result<HashFunc, String> {
     }
 }
 
-fn parse_failover_children(map: &mut Map<String, Value>) -> Result<Vec<RouteHandleConfig>, String> {
+fn parse_failover_children(map: &mut Map<String, Value>) -> Result<Vec<RawRouteConfig>, String> {
     match map.remove("children") {
         Some(Value::Array(items)) => items
             .into_iter()
@@ -320,7 +337,7 @@ fn parse_failover_policy(map: &mut Map<String, Value>) -> Result<FailoverPolicyC
 mod tests {
     use super::*;
 
-    fn route_handle(json: &str) -> RouteHandleConfig {
+    fn route_handle(json: &str) -> RawRouteConfig {
         serde_json::from_str(json).unwrap()
     }
 
@@ -328,11 +345,11 @@ mod tests {
     fn bare_string_with_no_pipe_is_a_reference() {
         assert_eq!(
             route_handle(r#""NullRoute""#),
-            RouteHandleConfig::Reference("NullRoute".into())
+            RawRouteConfig::Reference("NullRoute".into())
         );
         assert_eq!(
             route_handle(r#""route:A""#),
-            RouteHandleConfig::Reference("route:A".into())
+            RawRouteConfig::Reference("route:A".into())
         );
     }
 
@@ -340,7 +357,7 @@ mod tests {
     fn pipe_form_becomes_shorthand_with_args() {
         assert_eq!(
             route_handle(r#""PoolRoute|foo""#),
-            RouteHandleConfig::Shorthand {
+            RawRouteConfig::Shorthand {
                 kind: "PoolRoute".into(),
                 args: vec!["foo".into()]
             }
@@ -351,7 +368,7 @@ mod tests {
     fn multi_pipe_form_keeps_all_args() {
         assert_eq!(
             route_handle(r#""AllSyncRoute|Pool|A-foo""#),
-            RouteHandleConfig::Shorthand {
+            RawRouteConfig::Shorthand {
                 kind: "AllSyncRoute".into(),
                 args: vec!["Pool".into(), "A-foo".into()],
             }
@@ -363,7 +380,7 @@ mod tests {
         let r = route_handle(r#"{ "type": "PoolRoute", "pool": "foo" }"#);
         assert_eq!(
             r,
-            RouteHandleConfig::PoolRoute {
+            RawRouteConfig::PoolRoute {
                 pool: "foo".into(),
                 hash: HashConfig::default()
             }
@@ -376,7 +393,7 @@ mod tests {
             route_handle(r#"{ "type": "PoolRoute", "pool": { "name": "foo", "servers": [] } }"#);
         assert_eq!(
             r,
-            RouteHandleConfig::PoolRoute {
+            RawRouteConfig::PoolRoute {
                 pool: "foo".into(),
                 hash: HashConfig::default()
             }
@@ -388,7 +405,7 @@ mod tests {
         let r = route_handle(r#"{ "type": "PoolRoute", "pool": "foo", "asynclog": "log_a" }"#);
         assert_eq!(
             r,
-            RouteHandleConfig::PoolRoute {
+            RawRouteConfig::PoolRoute {
                 pool: "foo".into(),
                 hash: HashConfig::default()
             }
@@ -400,7 +417,7 @@ mod tests {
         let r = route_handle(r#"{ "type": "PoolRoute", "pool": "A", "hash": "Crc32" }"#);
         assert_eq!(
             r,
-            RouteHandleConfig::PoolRoute {
+            RawRouteConfig::PoolRoute {
                 pool: "A".into(),
                 hash: HashConfig {
                     func: HashFunc::Crc32,
@@ -417,7 +434,7 @@ mod tests {
         );
         assert_eq!(
             r,
-            RouteHandleConfig::PoolRoute {
+            RawRouteConfig::PoolRoute {
                 pool: "A".into(),
                 hash: HashConfig {
                     func: HashFunc::Crc32,
@@ -432,7 +449,7 @@ mod tests {
         let r = route_handle(r#"{ "type": "PoolRoute", "pool": "A", "hash": { "salt": "x" } }"#);
         assert_eq!(
             r,
-            RouteHandleConfig::PoolRoute {
+            RawRouteConfig::PoolRoute {
                 pool: "A".into(),
                 hash: HashConfig {
                     func: HashFunc::Ch3,
@@ -444,7 +461,7 @@ mod tests {
 
     #[test]
     fn pool_route_unknown_hash_func_is_error() {
-        let err = serde_json::from_str::<RouteHandleConfig>(
+        let err = serde_json::from_str::<RawRouteConfig>(
             r#"{ "type": "PoolRoute", "pool": "A", "hash": "Nope" }"#,
         )
         .unwrap_err();
@@ -453,7 +470,7 @@ mod tests {
 
     #[test]
     fn pool_route_non_string_hash_func_is_error() {
-        let err = serde_json::from_str::<RouteHandleConfig>(
+        let err = serde_json::from_str::<RawRouteConfig>(
             r#"{ "type": "PoolRoute", "pool": "A", "hash": { "hash_func": 123 } }"#,
         )
         .unwrap_err();
@@ -464,7 +481,7 @@ mod tests {
     fn object_form_null_route() {
         assert_eq!(
             route_handle(r#"{ "type": "NullRoute" }"#),
-            RouteHandleConfig::NullRoute
+            RawRouteConfig::NullRoute
         );
     }
 
@@ -473,7 +490,7 @@ mod tests {
         let r = route_handle(r#"{ "type": "ErrorRoute", "message": "boom" }"#);
         assert_eq!(
             r,
-            RouteHandleConfig::ErrorRoute {
+            RawRouteConfig::ErrorRoute {
                 message: Some("boom".into())
             }
         );
@@ -482,7 +499,7 @@ mod tests {
     #[test]
     fn object_form_error_route_without_message() {
         let r = route_handle(r#"{ "type": "ErrorRoute" }"#);
-        assert_eq!(r, RouteHandleConfig::ErrorRoute { message: None });
+        assert_eq!(r, RawRouteConfig::ErrorRoute { message: None });
     }
 
     #[test]
@@ -491,7 +508,7 @@ mod tests {
             r#"{ "type": "PrefixSelectorRoute", "policies": { "good": "PoolRoute|A" }, "wildcard": "PoolRoute|B" }"#,
         );
         match r {
-            RouteHandleConfig::Unknown { kind, fields } => {
+            RawRouteConfig::Unknown { kind, fields } => {
                 assert_eq!(kind, "PrefixSelectorRoute");
                 assert!(fields.contains_key("policies"));
                 assert!(fields.contains_key("wildcard"));
@@ -503,22 +520,21 @@ mod tests {
 
     #[test]
     fn rejects_object_without_type() {
-        let err = serde_json::from_str::<RouteHandleConfig>(r#"{ "pool": "A" }"#).unwrap_err();
+        let err = serde_json::from_str::<RawRouteConfig>(r#"{ "pool": "A" }"#).unwrap_err();
         assert!(err.to_string().contains("type"), "got: {err}");
     }
 
     #[test]
     fn rejects_pool_route_without_pool() {
-        let err =
-            serde_json::from_str::<RouteHandleConfig>(r#"{ "type": "PoolRoute" }"#).unwrap_err();
+        let err = serde_json::from_str::<RawRouteConfig>(r#"{ "type": "PoolRoute" }"#).unwrap_err();
         assert!(err.to_string().contains("pool"), "got: {err}");
     }
 
     #[test]
     fn rejects_non_string_non_object_root() {
-        assert!(serde_json::from_str::<RouteHandleConfig>("42").is_err());
-        assert!(serde_json::from_str::<RouteHandleConfig>("[]").is_err());
-        assert!(serde_json::from_str::<RouteHandleConfig>("true").is_err());
+        assert!(serde_json::from_str::<RawRouteConfig>("42").is_err());
+        assert!(serde_json::from_str::<RawRouteConfig>("[]").is_err());
+        assert!(serde_json::from_str::<RawRouteConfig>("true").is_err());
     }
 
     #[test]
@@ -558,7 +574,7 @@ mod tests {
         let r = route_handle(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"] }"#,
         );
-        let RouteHandleConfig::FailoverRoute {
+        let RawRouteConfig::FailoverRoute {
             children,
             failover_errors,
             failover_policy,
@@ -573,14 +589,14 @@ mod tests {
 
     #[test]
     fn failover_route_missing_children_is_error() {
-        let err = serde_json::from_str::<RouteHandleConfig>(r#"{ "type": "FailoverRoute" }"#)
-            .unwrap_err();
+        let err =
+            serde_json::from_str::<RawRouteConfig>(r#"{ "type": "FailoverRoute" }"#).unwrap_err();
         assert!(err.to_string().contains("children"), "got: {err}");
     }
 
     #[test]
     fn failover_route_non_array_children_is_error() {
-        let err = serde_json::from_str::<RouteHandleConfig>(
+        let err = serde_json::from_str::<RawRouteConfig>(
             r#"{ "type": "FailoverRoute", "children": "nope" }"#,
         )
         .unwrap_err();
@@ -592,12 +608,12 @@ mod tests {
         let r = route_handle(
             r#"{ "type": "FailoverRoute", "children": [ { "type": "FailoverRoute", "children": ["PoolRoute|A"] }, "PoolRoute|B" ] }"#,
         );
-        let RouteHandleConfig::FailoverRoute { children, .. } = r else {
+        let RawRouteConfig::FailoverRoute { children, .. } = r else {
             panic!("expected FailoverRoute");
         };
         assert!(matches!(
             children.first(),
-            Some(RouteHandleConfig::FailoverRoute { .. })
+            Some(RawRouteConfig::FailoverRoute { .. })
         ));
     }
 
@@ -606,7 +622,7 @@ mod tests {
         let r = route_handle(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": ["timeout", "server_error"] }"#,
         );
-        let RouteHandleConfig::FailoverRoute {
+        let RawRouteConfig::FailoverRoute {
             failover_errors, ..
         } = r
         else {
@@ -626,7 +642,7 @@ mod tests {
         let r = route_handle(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": { "updates": [] } }"#,
         );
-        let RouteHandleConfig::FailoverRoute {
+        let RawRouteConfig::FailoverRoute {
             failover_errors, ..
         } = r
         else {
@@ -644,7 +660,7 @@ mod tests {
 
     #[test]
     fn failover_errors_unknown_name_is_error() {
-        let err = serde_json::from_str::<RouteHandleConfig>(
+        let err = serde_json::from_str::<RawRouteConfig>(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_errors": ["busy"] }"#,
         )
         .unwrap_err();
@@ -656,7 +672,7 @@ mod tests {
         let r = route_handle(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_policy": { "type": "LeastFailuresPolicy", "max_tries": 3 } }"#,
         );
-        let RouteHandleConfig::FailoverRoute {
+        let RawRouteConfig::FailoverRoute {
             failover_policy, ..
         } = r
         else {
@@ -670,7 +686,7 @@ mod tests {
 
     #[test]
     fn failover_policy_least_failures_requires_max_tries() {
-        let err = serde_json::from_str::<RouteHandleConfig>(
+        let err = serde_json::from_str::<RawRouteConfig>(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_policy": { "type": "LeastFailuresPolicy" } }"#,
         )
         .unwrap_err();
@@ -679,7 +695,7 @@ mod tests {
 
     #[test]
     fn failover_policy_least_failures_rejects_zero_max_tries() {
-        let err = serde_json::from_str::<RouteHandleConfig>(
+        let err = serde_json::from_str::<RawRouteConfig>(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_policy": { "type": "LeastFailuresPolicy", "max_tries": 0 } }"#,
         )
         .unwrap_err();
@@ -688,7 +704,7 @@ mod tests {
 
     #[test]
     fn failover_policy_unknown_type_is_error() {
-        let err = serde_json::from_str::<RouteHandleConfig>(
+        let err = serde_json::from_str::<RawRouteConfig>(
             r#"{ "type": "FailoverRoute", "children": ["PoolRoute|A"], "failover_policy": { "type": "Nope" } }"#,
         )
         .unwrap_err();

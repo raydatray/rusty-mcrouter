@@ -181,7 +181,7 @@ fn main() -> anyhow::Result<()> {
     let mut observability = Observability::new(1024);
 
     let config = Arc::new(parse_file(&args.config)?);
-    let routing_layout = RoutingMetricsLayout::new(config.pools.keys().cloned());
+    let routing_layout = RoutingMetricsLayout::new(config.pool_names().map(str::to_owned));
 
     // the cross-thread objects: per-server health and per-server counters,
     // shared by every proxy thread's destinations, atomics only
