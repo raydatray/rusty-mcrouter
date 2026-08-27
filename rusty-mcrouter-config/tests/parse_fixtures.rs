@@ -24,7 +24,7 @@ fn parse_err(name: &str) -> ConfigError {
 #[test]
 fn nullroute_minimal_config() {
     let doc = parse_ok("nullroute.json");
-    assert!(doc.pools().is_empty());
+    assert_eq!(doc.pools().len(), 0);
     assert_eq!(doc.route(), &RouteConfig::NullRoute);
 }
 
@@ -33,13 +33,13 @@ fn basic_1_1_1_canonical_pool_and_route() {
     let doc = parse_ok("basic_1_1_1.json");
     assert_eq!(doc.pools().len(), 1);
     assert_eq!(
-        doc.pool("foo").unwrap().servers[0].access_point(),
+        doc.pool_by_name("foo").unwrap().servers()[0].access_point(),
         "localhost:12345"
     );
 
     assert!(matches!(
         doc.route(),
-        RouteConfig::PoolRoute { pool, .. } if pool == "foo"
+        RouteConfig::PoolRoute { pool, .. } if doc.pool(*pool).name() == "foo"
     ));
 }
 
@@ -47,7 +47,7 @@ fn basic_1_1_1_canonical_pool_and_route() {
 fn memcache_local_config_parses() {
     let doc = parse_ok("memcache_local_config.json");
     assert_eq!(doc.pools().len(), 1);
-    assert!(doc.pool("A").is_some());
+    assert!(doc.pool_by_name("A").is_some());
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn routes_plural_is_rejected_until_supported() {
 fn comments_in_jsonc_are_stripped() {
     let doc = parse_ok("with_comments.json");
     assert_eq!(
-        doc.pool("foo").unwrap().servers[0].access_point(),
+        doc.pool_by_name("foo").unwrap().servers()[0].access_point(),
         "localhost:11211"
     );
     assert!(matches!(doc.route(), RouteConfig::PoolRoute { .. }));

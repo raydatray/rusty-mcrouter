@@ -3,6 +3,8 @@ use std::str::FromStr;
 use serde::de::{self, Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
+use crate::PoolId;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RawRouteConfig {
     Reference(String),
@@ -34,7 +36,7 @@ pub(crate) enum RawRouteConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RouteConfig {
     PoolRoute {
-        pool: String,
+        pool: PoolId,
         hash: HashConfig,
     },
     FailoverRoute {

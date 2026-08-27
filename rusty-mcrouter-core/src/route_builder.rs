@@ -6,7 +6,7 @@ use rusty_mcrouter_backend::{
 };
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
-    RouteConfig,
+    PoolId, RouteConfig,
 };
 use thiserror::Error;
 
@@ -64,7 +64,7 @@ where
     factory: &'a F,
     defaults: &'a destination::DestinationConfig,
     metrics_layout: &'a RoutingMetricsLayout,
-    pool_cache: BTreeMap<String, Vec<Rc<DestinationRoute<F::Backend>>>>,
+    pool_cache: BTreeMap<PoolId, Vec<Rc<DestinationRoute<F::Backend>>>>,
 }
 
 impl<'a, F> RouteBuilder<'a, F>
@@ -93,8 +93,8 @@ where
             RouteConfig::ErrorRoute { message } => Ok(ErrorRoute::new(message.clone()).into_dyn()),
 
             RouteConfig::PoolRoute { pool, hash } => {
-                let destinations = self.get_or_build_destinations(pool)?;
-                build_pool_handle(pool, hash, destinations)
+                let destinations = self.get_or_build_destinations(*pool)?;
+                build_pool_handle(self.config.pool(*pool).name(), hash, destinations)
             }
 
             RouteConfig::FailoverRoute {
@@ -117,17 +117,15 @@ where
 
     fn get_or_build_destinations(
         &mut self,
-        pool_name: &str,
+        pool_id: PoolId,
     ) -> Result<Vec<Rc<DestinationRoute<F::Backend>>>> {
-        if let Some(cached) = self.pool_cache.get(pool_name) {
+        if let Some(cached) = self.pool_cache.get(&pool_id) {
             return Ok(cached.clone());
         }
 
-        let pool_config = self
-            .config
-            .pool(pool_name)
-            .expect("config parsing resolves pool references");
-        debug_assert!(!pool_config.servers.is_empty());
+        let pool_config = self.config.pool(pool_id);
+        let pool_name = pool_config.name();
+        debug_assert!(!pool_config.servers().is_empty());
 
         let pool_index = self
             .metrics_layout
@@ -139,15 +137,15 @@ where
         let dest_cfg = pool_destination_config(self.defaults, pool_config);
         let pool_health = PoolHealth {
             pool_name,
-            fail_open: pool_config.tko_tracker.map(|config| FailOpenThresholds {
+            fail_open: pool_config.tko_tracker().map(|config| FailOpenThresholds {
                 enter: config.enter(),
                 exit: config.exit(),
             }),
         };
 
-        let mut destinations = Vec::with_capacity(pool_config.servers.len());
+        let mut destinations = Vec::with_capacity(pool_config.servers().len());
 
-        for server in &pool_config.servers {
+        for server in pool_config.servers() {
             let backend = self
                 .factory
                 .make(server.access_point(), &dest_cfg, &pool_health)
@@ -161,8 +159,7 @@ where
             )));
         }
 
-        self.pool_cache
-            .insert(pool_name.to_string(), destinations.clone());
+        self.pool_cache.insert(pool_id, destinations.clone());
 
         Ok(destinations)
     }
@@ -180,11 +177,11 @@ fn pool_destination_config(
     pool: &PoolConfig,
 ) -> destination::DestinationConfig {
     let mut cfg = defaults.clone();
-    if let Some(ms) = pool.server_timeout_ms {
+    if let Some(ms) = pool.server_timeout_ms() {
         cfg.reply_timeout = Some(Duration::from_millis(ms));
         cfg.connect_timeout = Some(Duration::from_millis(ms));
     }
-    if let Some(ms) = pool.connect_timeout_ms {
+    if let Some(ms) = pool.connect_timeout_ms() {
         cfg.connect_timeout = Some(Duration::from_millis(ms));
     }
     cfg
@@ -420,8 +417,9 @@ mod tests {
         let d = defaults();
         let layout = RoutingMetricsLayout::new(cfg.pool_names().map(str::to_owned));
         let mut builder = RouteBuilder::new(&cfg, &factory, &d, &layout);
-        let d1 = builder.get_or_build_destinations("P").unwrap();
-        let d2 = builder.get_or_build_destinations("P").unwrap();
+        let pool = cfg.pool_id("P").unwrap();
+        let d1 = builder.get_or_build_destinations(pool).unwrap();
+        let d2 = builder.get_or_build_destinations(pool).unwrap();
         assert!(
             Rc::ptr_eq(&d1[0], &d2[0]),
             "destinations should be shared across references"
@@ -435,7 +433,7 @@ mod tests {
             r#"{{"pools":{{"test":{json}}},"route":"NullRoute"}}"#
         ))
         .unwrap();
-        document.pool("test").unwrap().clone()
+        document.pool_by_name("test").unwrap().clone()
     }
 
     /// The D2 guardrail: a pool server_timeout drags connect_timeout down

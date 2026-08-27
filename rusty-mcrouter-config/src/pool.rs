@@ -5,16 +5,43 @@ use crate::{server::RawServerConfig, ConfigError, ServerConfig};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PoolConfig {
-    pub servers: Vec<ServerConfig>,
-    pub server_timeout_ms: Option<u64>,
-    pub connect_timeout_ms: Option<u64>,
-    pub tko_tracker: Option<PoolTkoTrackerConfig>,
-    pub extra: Map<String, Value>,
+    name: String,
+    servers: Vec<ServerConfig>,
+    server_timeout_ms: Option<u64>,
+    connect_timeout_ms: Option<u64>,
+    tko_tracker: Option<PoolTkoTrackerConfig>,
+    extra: Map<String, Value>,
+}
+
+impl PoolConfig {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn servers(&self) -> &[ServerConfig] {
+        &self.servers
+    }
+
+    pub fn server_timeout_ms(&self) -> Option<u64> {
+        self.server_timeout_ms
+    }
+
+    pub fn connect_timeout_ms(&self) -> Option<u64> {
+        self.connect_timeout_ms
+    }
+
+    pub fn tko_tracker(&self) -> Option<PoolTkoTrackerConfig> {
+        self.tko_tracker
+    }
+
+    pub fn extra(&self) -> &Map<String, Value> {
+        &self.extra
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawPoolConfig {
-    pub servers: Vec<RawServerConfig>,
+    servers: Vec<RawServerConfig>,
     #[serde(default, rename = "server_timeout")]
     server_timeout_ms: Option<u64>,
     #[serde(default, rename = "connect_timeout")]
@@ -68,6 +95,7 @@ impl RawPoolConfig {
             .transpose()?;
 
         Ok(PoolConfig {
+            name: name.to_string(),
             servers,
             server_timeout_ms: self.server_timeout_ms,
             connect_timeout_ms: self.connect_timeout_ms,
