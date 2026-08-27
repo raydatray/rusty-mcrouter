@@ -332,6 +332,7 @@ pub fn parse(input: &str) -> ConfigResult<ConfigDocument> {
                 _ => ConfigError::Json(source),
             }
         })?;
+    deserializer.end().map_err(ConfigError::Json)?;
 
     ConfigDocument::try_from(raw)
 }
@@ -639,6 +640,16 @@ mod tests {
             parse_err(r#"{ "route": "NullRoute", "route": "ErrorRoute" }"#),
             ConfigError::Schema { .. }
         ));
+    }
+
+    #[test]
+    fn rejects_trailing_input() {
+        for json in [
+            r#"{ "route": "NullRoute" } {}"#,
+            r#"{ "route": "NullRoute" } garbage"#,
+        ] {
+            assert!(matches!(parse_err(json), ConfigError::Json(_)));
+        }
     }
 
     #[test]
