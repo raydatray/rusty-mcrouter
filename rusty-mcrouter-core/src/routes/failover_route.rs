@@ -155,6 +155,7 @@ mod tests {
     use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_backend::error::{ConnectError, LocalError, RequestError, SendError};
     use rusty_mcrouter_backend::test_support::MockBackend;
+    use rusty_mcrouter_config::PoolId;
     use rusty_mcrouter_observability_primitives::test_support::{
         noop_sink, recording_sink, EventLog,
     };
@@ -163,15 +164,15 @@ mod tests {
     };
 
     use crate::context::test_routing_state;
-    use crate::metrics::test_metrics_layout;
+    use crate::metrics::{test_metrics_layout, test_pool_id};
     use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
 
     fn dest(backend: MockBackend) -> Rc<dyn DynRoute> {
         DestinationRoute::new(backend).into_dyn()
     }
 
-    fn pooled_dest(backend: MockBackend, pool_index: usize) -> Rc<dyn DynRoute> {
-        DestinationRoute::for_pool(backend, pool_index).into_dyn()
+    fn pooled_dest(backend: MockBackend, pool: PoolId) -> Rc<dyn DynRoute> {
+        DestinationRoute::for_pool(backend, pool).into_dyn()
     }
 
     fn timeout() -> SendError {
@@ -370,11 +371,13 @@ mod tests {
 
     #[tokio::test]
     async fn real_primary_error_claims_final_attribution() {
-        let route = in_order(vec![
-            pooled_dest(MockBackend::failing(timeout()), 0),
-            pooled_dest(MockBackend::replying(get_hit(b"1")), 1),
-        ]);
         let layout = test_metrics_layout(&["primary", "backup"]);
+        let primary = test_pool_id(&layout, "primary");
+        let backup = test_pool_id(&layout, "backup");
+        let route = in_order(vec![
+            pooled_dest(MockBackend::failing(timeout()), primary),
+            pooled_dest(MockBackend::replying(get_hit(b"1")), backup),
+        ]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
@@ -383,21 +386,23 @@ mod tests {
         assert_eq!(result.as_ref().unwrap(), &get_hit(b"1"));
         context.finish(&result);
 
-        assert_eq!(metrics.pools[0].requests.load(), 1);
-        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
-        assert_eq!(metrics.pools[0].final_errors.load(), 0);
-        assert_eq!(metrics.pools[1].requests.load(), 1);
-        assert_eq!(metrics.pools[1].completed_requests.load(), 0);
-        assert_eq!(metrics.pools[1].final_errors.load(), 0);
+        assert_eq!(metrics.pool(primary).requests.load(), 1);
+        assert_eq!(metrics.pool(primary).completed_requests.load(), 1);
+        assert_eq!(metrics.pool(primary).final_errors.load(), 0);
+        assert_eq!(metrics.pool(backup).requests.load(), 1);
+        assert_eq!(metrics.pool(backup).completed_requests.load(), 0);
+        assert_eq!(metrics.pool(backup).final_errors.load(), 0);
     }
 
     #[tokio::test]
     async fn final_error_is_attributed_once_to_first_sendable_pool() {
-        let route = in_order(vec![
-            pooled_dest(MockBackend::failing(timeout()), 0),
-            pooled_dest(MockBackend::failing(timeout()), 1),
-        ]);
         let layout = test_metrics_layout(&["primary", "backup"]);
+        let primary = test_pool_id(&layout, "primary");
+        let backup = test_pool_id(&layout, "backup");
+        let route = in_order(vec![
+            pooled_dest(MockBackend::failing(timeout()), primary),
+            pooled_dest(MockBackend::failing(timeout()), backup),
+        ]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
@@ -406,19 +411,21 @@ mod tests {
         assert!(result.is_err());
         context.finish(&result);
 
-        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
-        assert_eq!(metrics.pools[0].final_errors.load(), 1);
-        assert_eq!(metrics.pools[1].completed_requests.load(), 0);
-        assert_eq!(metrics.pools[1].final_errors.load(), 0);
+        assert_eq!(metrics.pool(primary).completed_requests.load(), 1);
+        assert_eq!(metrics.pool(primary).final_errors.load(), 1);
+        assert_eq!(metrics.pool(backup).completed_requests.load(), 0);
+        assert_eq!(metrics.pool(backup).final_errors.load(), 0);
     }
 
     #[tokio::test]
     async fn tko_primary_does_not_claim_final_attribution() {
-        let route = in_order(vec![
-            pooled_dest(MockBackend::failing(tko()), 0),
-            pooled_dest(MockBackend::replying(get_hit(b"1")), 1),
-        ]);
         let layout = test_metrics_layout(&["primary", "backup"]);
+        let primary = test_pool_id(&layout, "primary");
+        let backup = test_pool_id(&layout, "backup");
+        let route = in_order(vec![
+            pooled_dest(MockBackend::failing(tko()), primary),
+            pooled_dest(MockBackend::replying(get_hit(b"1")), backup),
+        ]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
@@ -427,20 +434,22 @@ mod tests {
         assert_eq!(result.as_ref().unwrap(), &get_hit(b"1"));
         context.finish(&result);
 
-        assert_eq!(metrics.pools[0].requests.load(), 1);
-        assert_eq!(metrics.pools[0].duration_us_sum.load(), 0);
-        assert_eq!(metrics.pools[0].completed_requests.load(), 0);
-        assert_eq!(metrics.pools[1].requests.load(), 1);
-        assert_eq!(metrics.pools[1].completed_requests.load(), 1);
+        assert_eq!(metrics.pool(primary).requests.load(), 1);
+        assert_eq!(metrics.pool(primary).duration_us_sum.load(), 0);
+        assert_eq!(metrics.pool(primary).completed_requests.load(), 0);
+        assert_eq!(metrics.pool(backup).requests.load(), 1);
+        assert_eq!(metrics.pool(backup).completed_requests.load(), 1);
     }
 
     #[tokio::test]
     async fn all_tko_attempts_have_no_final_pool_attribution() {
-        let route = in_order(vec![
-            pooled_dest(MockBackend::failing(tko()), 0),
-            pooled_dest(MockBackend::failing(tko()), 1),
-        ]);
         let layout = test_metrics_layout(&["primary", "backup"]);
+        let primary = test_pool_id(&layout, "primary");
+        let backup = test_pool_id(&layout, "backup");
+        let route = in_order(vec![
+            pooled_dest(MockBackend::failing(tko()), primary),
+            pooled_dest(MockBackend::failing(tko()), backup),
+        ]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
@@ -449,10 +458,10 @@ mod tests {
         assert!(result.is_err());
         context.finish(&result);
 
-        assert_eq!(metrics.pools[0].requests.load(), 1);
-        assert_eq!(metrics.pools[1].requests.load(), 1);
-        assert_eq!(metrics.pools[0].completed_requests.load(), 0);
-        assert_eq!(metrics.pools[1].completed_requests.load(), 0);
+        assert_eq!(metrics.pool(primary).requests.load(), 1);
+        assert_eq!(metrics.pool(backup).requests.load(), 1);
+        assert_eq!(metrics.pool(primary).completed_requests.load(), 0);
+        assert_eq!(metrics.pool(backup).completed_requests.load(), 0);
     }
 
     #[tokio::test]

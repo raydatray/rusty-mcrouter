@@ -81,11 +81,7 @@ where
 
             RouteConfig::PoolRoute { pool, hash } => {
                 let destinations = self.get_or_build_destinations(*pool)?;
-                Ok(build_pool_handle(
-                    self.config.pool(*pool).name(),
-                    hash,
-                    destinations,
-                ))
+                Ok(build_pool_handle(hash, destinations))
             }
 
             RouteConfig::FailoverRoute {
@@ -115,12 +111,11 @@ where
         let pool_config = self.config.pool(pool_id);
         let pool_name = pool_config.name();
 
-        let pool_index = self
-            .metrics_layout
-            .pool_metrics_index(pool_id, pool_name)
-            .ok_or_else(|| BuildError::PoolMissingFromMetricsLayout {
+        if self.metrics_layout.pool_name(pool_id) != Some(pool_name) {
+            return Err(BuildError::PoolMissingFromMetricsLayout {
                 name: pool_name.to_string(),
-            })?;
+            });
+        }
 
         let dest_cfg = pool_destination_config(self.defaults, pool_config);
         let pool_health = PoolHealth {
@@ -136,7 +131,7 @@ where
         for server in pool_config.servers() {
             let backend = self.factory.make(server, &dest_cfg, &pool_health);
             destinations.push(Rc::new(DestinationRoute::<F::Backend>::for_pool(
-                backend, pool_index,
+                backend, pool_id,
             )));
         }
 
@@ -169,7 +164,6 @@ fn pool_destination_config(
 }
 
 fn build_pool_handle<B>(
-    pool_name: &str,
     hash: &HashConfig,
     destinations: Vec<Rc<DestinationRoute<B>>>,
 ) -> Rc<dyn DynRoute>
@@ -177,7 +171,7 @@ where
     B: Backend,
 {
     let selector = build_selector(hash, destinations.len());
-    let route = PoolRoute::new(pool_name, destinations, selector);
+    let route = PoolRoute::new(destinations, selector);
 
     route.into_dyn()
 }

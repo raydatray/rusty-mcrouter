@@ -1,4 +1,5 @@
 use rusty_mcrouter_backend::Backend;
+use rusty_mcrouter_config::PoolId;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::time::Instant;
 
@@ -10,7 +11,7 @@ where
     B: Backend,
 {
     backend: B,
-    pool_index: Option<usize>,
+    pool: Option<PoolId>,
 }
 
 impl<B> DestinationRoute<B>
@@ -20,14 +21,14 @@ where
     pub fn new(backend: B) -> Self {
         Self {
             backend,
-            pool_index: None,
+            pool: None,
         }
     }
 
-    pub(crate) fn for_pool(backend: B, pool_index: usize) -> Self {
+    pub(crate) fn for_pool(backend: B, pool: PoolId) -> Self {
         Self {
             backend,
-            pool_index: Some(pool_index),
+            pool: Some(pool),
         }
     }
 }
@@ -41,14 +42,16 @@ where
         let result = match self.backend.prepare_send(request) {
             Err(rejection) => Err(rejection.into()),
             Ok(prepared) => {
-                if let Some(pool_index) = self.pool_index {
-                    context.select_pool(pool_index);
+                if let Some(pool) = self.pool {
+                    context.select_pool(pool);
                 }
 
                 let result = prepared.send().await;
 
-                if let Some(pool_index) = self.pool_index {
-                    context.metrics().pools[pool_index]
+                if let Some(pool) = self.pool {
+                    context
+                        .metrics()
+                        .pool(pool)
                         .duration_us_sum
                         .add(started.elapsed().as_micros() as u64);
                 }
@@ -57,8 +60,8 @@ where
             }
         };
 
-        if let Some(pool_index) = self.pool_index {
-            context.metrics().pools[pool_index].requests.inc();
+        if let Some(pool) = self.pool {
+            context.metrics().pool(pool).requests.inc();
         }
 
         result.map_err(RouteError::from)
@@ -82,7 +85,7 @@ mod tests {
     };
 
     use crate::context::test_routing_state;
-    use crate::metrics::test_metrics_layout;
+    use crate::metrics::{test_metrics_layout, test_pool_id};
     use crate::{RoutingMetricsShard, RoutingState};
 
     struct DelayedBackend;
@@ -114,60 +117,64 @@ mod tests {
     #[tokio::test]
     async fn attributed_send_records_attempt_and_final_metrics() {
         let layout = test_metrics_layout(&["pool"]);
+        let pool = test_pool_id(&layout, "pool");
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
-        let route = DestinationRoute::for_pool(MockBackend::miss(), 0);
+        let route = DestinationRoute::for_pool(MockBackend::miss(), pool);
         let context = state.context();
 
         let result = route.route(&context, get(b"foo")).await;
         context.finish(&result);
 
-        assert_eq!(metrics.pools[0].requests.load(), 1);
-        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
-        assert_eq!(metrics.pools[0].final_errors.load(), 0);
+        assert_eq!(metrics.pool(pool).requests.load(), 1);
+        assert_eq!(metrics.pool(pool).completed_requests.load(), 1);
+        assert_eq!(metrics.pool(pool).final_errors.load(), 0);
     }
 
     #[tokio::test]
     async fn sendable_attempt_records_elapsed_duration() {
         let layout = test_metrics_layout(&["pool"]);
+        let pool = test_pool_id(&layout, "pool");
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
-        let route = DestinationRoute::for_pool(DelayedBackend, 0);
+        let route = DestinationRoute::for_pool(DelayedBackend, pool);
         let context = state.context();
 
         let result = route.route(&context, get(b"foo")).await;
         context.finish(&result);
 
-        assert!(metrics.pools[0].duration_us_sum.load() >= 1_000);
-        assert!(metrics.pools[0].total_duration_us_sum.load() >= 1_000);
+        assert!(metrics.pool(pool).duration_us_sum.load() >= 1_000);
+        assert!(metrics.pool(pool).total_duration_us_sum.load() >= 1_000);
     }
 
     #[tokio::test]
     async fn attributed_error_counts_as_final_error() {
         let layout = test_metrics_layout(&["pool"]);
+        let pool = test_pool_id(&layout, "pool");
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
-        let route = DestinationRoute::for_pool(MockBackend::replying(bare_server_error()), 0);
+        let route = DestinationRoute::for_pool(MockBackend::replying(bare_server_error()), pool);
         let context = state.context();
 
         let result = route.route(&context, get(b"foo")).await;
         context.finish(&result);
 
-        assert_eq!(metrics.pools[0].requests.load(), 1);
-        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
-        assert_eq!(metrics.pools[0].final_errors.load(), 1);
+        assert_eq!(metrics.pool(pool).requests.load(), 1);
+        assert_eq!(metrics.pool(pool).completed_requests.load(), 1);
+        assert_eq!(metrics.pool(pool).final_errors.load(), 1);
     }
 
     #[tokio::test]
     async fn tko_attempt_records_no_duration_or_final_attribution() {
         let layout = test_metrics_layout(&["pool"]);
+        let pool = test_pool_id(&layout, "pool");
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = DestinationRoute::for_pool(
             MockBackend::failing(SendError::Tko {
                 reason: rusty_mcrouter_backend::classify::ResultCode::Timeout,
             }),
-            0,
+            pool,
         );
         let context = state.context();
 
@@ -175,10 +182,10 @@ mod tests {
         context.finish(&result);
 
         assert!(result.is_err());
-        assert_eq!(metrics.pools[0].requests.load(), 1);
-        assert_eq!(metrics.pools[0].duration_us_sum.load(), 0);
-        assert_eq!(metrics.pools[0].completed_requests.load(), 0);
-        assert_eq!(metrics.pools[0].final_errors.load(), 0);
+        assert_eq!(metrics.pool(pool).requests.load(), 1);
+        assert_eq!(metrics.pool(pool).duration_us_sum.load(), 0);
+        assert_eq!(metrics.pool(pool).completed_requests.load(), 0);
+        assert_eq!(metrics.pool(pool).final_errors.load(), 0);
     }
 
     #[tokio::test]

@@ -79,6 +79,7 @@ mod tests {
         let config =
             parse(r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#)
                 .unwrap();
+        let pool = config.pool_id("pool").unwrap();
         let layout = RoutingMetricsLayout::new(&config);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
@@ -92,8 +93,8 @@ mod tests {
 
         route_request(route, state, get(b"foo")).await;
 
-        assert_eq!(metrics.pools[0].requests.load(), 1);
-        assert_eq!(metrics.pools[0].completed_requests.load(), 1);
-        assert_eq!(metrics.pools[0].final_errors.load(), 0);
+        assert_eq!(metrics.pool(pool).requests.load(), 1);
+        assert_eq!(metrics.pool(pool).completed_requests.load(), 1);
+        assert_eq!(metrics.pool(pool).final_errors.load(), 0);
     }
 }
