@@ -6,7 +6,7 @@ use rusty_mcrouter_backend::{
 };
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
-    RouteEntry, RouteHandleConfig,
+    RouteConfig,
 };
 use thiserror::Error;
 
@@ -52,12 +52,8 @@ pub fn build_route<F>(
 where
     F: BackendFactory,
 {
-    let RouteEntry::Single(entry) = &config.route else {
-        unreachable!("config parsing rejects prefixed routes")
-    };
-
     let mut route_builder = RouteBuilder::new(config, factory, defaults, metrics_layout);
-    route_builder.build_handle(entry)
+    route_builder.build_handle(config.route())
 }
 
 struct RouteBuilder<'a, F>
@@ -90,20 +86,18 @@ where
         }
     }
 
-    fn build_handle(&mut self, handle: &RouteHandleConfig) -> Result<Rc<dyn DynRoute>> {
+    fn build_handle(&mut self, handle: &RouteConfig) -> Result<Rc<dyn DynRoute>> {
         match handle {
-            RouteHandleConfig::NullRoute => Ok(NullRoute.into_dyn()),
+            RouteConfig::NullRoute => Ok(NullRoute.into_dyn()),
 
-            RouteHandleConfig::ErrorRoute { message } => {
-                Ok(ErrorRoute::new(message.clone()).into_dyn())
-            }
+            RouteConfig::ErrorRoute { message } => Ok(ErrorRoute::new(message.clone()).into_dyn()),
 
-            RouteHandleConfig::PoolRoute { pool, hash } => {
+            RouteConfig::PoolRoute { pool, hash } => {
                 let destinations = self.get_or_build_destinations(pool)?;
                 build_pool_handle(pool, hash, destinations)
             }
 
-            RouteHandleConfig::FailoverRoute {
+            RouteConfig::FailoverRoute {
                 children,
                 failover_errors,
                 failover_policy,
@@ -118,12 +112,6 @@ where
                     .map(Route::into_dyn)
                     .ok_or_else(|| unreachable!("config parsing rejects empty failovers"))
             }
-
-            RouteHandleConfig::Reference(_)
-            | RouteHandleConfig::Shorthand { .. }
-            | RouteHandleConfig::Unknown { .. } => {
-                unreachable!("config parsing normalizes executable routes")
-            }
         }
     }
 
@@ -137,8 +125,7 @@ where
 
         let pool_config = self
             .config
-            .pools
-            .get(pool_name)
+            .pool(pool_name)
             .expect("config parsing resolves pool references");
         debug_assert!(!pool_config.servers.is_empty());
 
@@ -292,7 +279,7 @@ mod tests {
     where
         F: BackendFactory,
     {
-        let layout = RoutingMetricsLayout::new(cfg.pools.keys().cloned());
+        let layout = RoutingMetricsLayout::new(cfg.pool_names().map(str::to_owned));
         let route = build_route(cfg, factory, &defaults(), &layout)?;
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
@@ -431,7 +418,7 @@ mod tests {
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
         let cfg = parse(json).unwrap();
         let d = defaults();
-        let layout = RoutingMetricsLayout::new(cfg.pools.keys().cloned());
+        let layout = RoutingMetricsLayout::new(cfg.pool_names().map(str::to_owned));
         let mut builder = RouteBuilder::new(&cfg, &factory, &d, &layout);
         let d1 = builder.get_or_build_destinations("P").unwrap();
         let d2 = builder.get_or_build_destinations("P").unwrap();
@@ -448,7 +435,7 @@ mod tests {
             r#"{{"pools":{{"test":{json}}},"route":"NullRoute"}}"#
         ))
         .unwrap();
-        document.pools["test"].clone()
+        document.pool("test").unwrap().clone()
     }
 
     /// The D2 guardrail: a pool server_timeout drags connect_timeout down

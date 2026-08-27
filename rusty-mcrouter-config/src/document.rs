@@ -6,7 +6,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::{pool::RawPoolConfig, HashConfig, HashFunc, PoolConfig, RouteHandleConfig};
+use crate::{
+    pool::RawPoolConfig, route::RawRouteConfig, HashConfig, HashFunc, PoolConfig, RouteConfig,
+};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -64,21 +66,32 @@ type ConfigResult<T> = std::result::Result<T, ConfigError>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigDocument {
-    pub pools: BTreeMap<String, PoolConfig>,
-    pub named_handles: BTreeMap<String, RouteHandleConfig>,
-    pub route: RouteEntry,
+    pools: BTreeMap<String, PoolConfig>,
+    route: RouteConfig,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum RouteEntry {
-    Single(RouteHandleConfig),
-    Prefixed(Vec<PrefixedRoute>),
+struct RawPrefixedRoute {
+    aliases: Vec<String>,
+    route: RawRouteConfig,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct PrefixedRoute {
-    pub aliases: Vec<String>,
-    pub route: RouteHandleConfig,
+impl ConfigDocument {
+    pub fn pools(&self) -> &BTreeMap<String, PoolConfig> {
+        &self.pools
+    }
+
+    pub fn pool(&self, name: &str) -> Option<&PoolConfig> {
+        self.pools.get(name)
+    }
+
+    pub fn pool_names(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.pools.keys().map(String::as_str)
+    }
+
+    pub fn route(&self) -> &RouteConfig {
+        &self.route
+    }
 }
 
 #[derive(Deserialize)]
@@ -93,7 +106,7 @@ struct RawConfigDocument {
     route: Option<RouteHandleConfig>,
 
     #[serde(default, deserialize_with = "deserialize_routes_field")]
-    routes: Option<Vec<PrefixedRoute>>,
+    routes: Option<Vec<RawPrefixedRoute>>,
 }
 
 impl TryFrom<RawConfigDocument> for ConfigDocument {
@@ -120,21 +133,17 @@ impl TryFrom<RawConfigDocument> for ConfigDocument {
             .collect::<ConfigResult<_>>()?;
 
         let mut validator = RouteValidator::new(&pools, named_handles);
-        let route = RouteEntry::Single(validator.validate(root)?);
-        let named_handles = validator.validate_all_named_handles()?;
+        let route = validator.validate(root)?;
+        validator.validate_all_named_handles()?;
 
-        Ok(ConfigDocument {
-            pools,
-            named_handles,
-            route,
-        })
+        Ok(ConfigDocument { pools, route })
     }
 }
 
 struct RouteValidator<'a> {
     pools: &'a BTreeMap<String, PoolConfig>,
     definitions: BTreeMap<String, RawRouteConfig>,
-    resolved: BTreeMap<String, RouteHandleConfig>,
+    resolved: BTreeMap<String, RouteConfig>,
     resolving: Vec<String>,
 }
 
@@ -151,17 +160,17 @@ impl<'a> RouteValidator<'a> {
         }
     }
 
-    fn validate_all_named_handles(&mut self) -> ConfigResult<BTreeMap<String, RouteHandleConfig>> {
+    fn validate_all_named_handles(&mut self) -> ConfigResult<()> {
         let names = self.definitions.keys().cloned().collect::<Vec<_>>();
 
         for name in names {
             self.resolve_named(&name)?;
         }
 
-        Ok(self.resolved.clone())
+        Ok(())
     }
 
-    fn resolve_named(&mut self, name: &str) -> ConfigResult<RouteHandleConfig> {
+    fn resolve_named(&mut self, name: &str) -> ConfigResult<RouteConfig> {
         if let Some(route) = self.resolved.get(name) {
             return Ok(route.clone());
         }
@@ -190,11 +199,11 @@ impl<'a> RouteValidator<'a> {
         Ok(route)
     }
 
-    fn validate(&mut self, route: RouteHandleConfig) -> ConfigResult<RouteHandleConfig> {
+    fn validate(&mut self, route: RawRouteConfig) -> ConfigResult<RouteConfig> {
         match route {
             RawRouteConfig::Reference(name) => match name.as_str() {
-                "NullRoute" => Ok(RouteHandleConfig::NullRoute),
-                "ErrorRoute" => Ok(RouteHandleConfig::ErrorRoute { message: None }),
+                "NullRoute" => Ok(RouteConfig::NullRoute),
+                "ErrorRoute" => Ok(RouteConfig::ErrorRoute { message: None }),
                 _ => self.resolve_named(&name),
             },
             RawRouteConfig::Shorthand { kind, args } => self.validate_shorthand(kind, args),
@@ -215,7 +224,7 @@ impl<'a> RouteValidator<'a> {
                     });
                 }
 
-                Ok(RouteHandleConfig::PoolRoute { pool, hash })
+                Ok(RouteConfig::PoolRoute { pool, hash })
             }
             RawRouteConfig::FailoverRoute {
                 children,
@@ -231,32 +240,29 @@ impl<'a> RouteValidator<'a> {
                     .map(|child| self.validate(child))
                     .collect::<ConfigResult<_>>()?;
 
-                Ok(RouteHandleConfig::FailoverRoute {
+                Ok(RouteConfig::FailoverRoute {
                     children,
                     failover_errors,
                     failover_policy,
                 })
             }
-            RouteHandleConfig::NullRoute | RouteHandleConfig::ErrorRoute { .. } => Ok(route),
+            RouteHandleConfig::NullRoute => Ok(RouteConfig::NullRoute),
+            RouteHandleConfig::ErrorRoute { message } => Ok(RouteConfig::ErrorRoute { message }),
             RouteHandleConfig::Unknown { kind, .. } => {
                 Err(ConfigError::UnsupportedRouteType { kind })
             }
         }
     }
 
-    fn validate_shorthand(
-        &mut self,
-        kind: String,
-        args: Vec<String>,
-    ) -> ConfigResult<RouteHandleConfig> {
+    fn validate_shorthand(&mut self, kind: String, args: Vec<String>) -> ConfigResult<RouteConfig> {
         match kind.as_str() {
-            "NullRoute" if args.is_empty() => Ok(RouteHandleConfig::NullRoute),
+            "NullRoute" if args.is_empty() => Ok(RouteConfig::NullRoute),
             "NullRoute" => Err(ConfigError::InvalidShorthandArity {
                 kind,
                 expected: "no",
                 actual: args.len(),
             }),
-            "ErrorRoute" if args.len() <= 1 => Ok(RouteHandleConfig::ErrorRoute {
+            "ErrorRoute" if args.len() <= 1 => Ok(RouteConfig::ErrorRoute {
                 message: args.into_iter().next(),
             }),
             "ErrorRoute" => Err(ConfigError::InvalidShorthandArity {
@@ -341,22 +347,24 @@ where
 }
 
 #[derive(Deserialize)]
-struct PrefixedRouteRaw {
+struct RawPrefixedRouteEntry {
     aliases: Vec<String>,
     route: RouteHandleConfig,
 }
 
-fn deserialize_routes_field<'de, D>(deserializer: D) -> Result<Option<Vec<PrefixedRoute>>, D::Error>
+fn deserialize_routes_field<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<RawPrefixedRoute>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = Value::deserialize(deserializer)?;
-    let entries: Result<Vec<PrefixedRoute>, D::Error> = match value {
+    let entries: Result<Vec<RawPrefixedRoute>, D::Error> = match value {
         Value::Object(map) => map
             .into_iter()
             .map(|(prefix, val)| {
                 let route = serde_json::from_value(val).map_err(de::Error::custom)?;
-                Ok(PrefixedRoute {
+                Ok(RawPrefixedRoute {
                     aliases: vec![prefix],
                     route,
                 })
@@ -365,9 +373,9 @@ where
         Value::Array(items) => items
             .into_iter()
             .map(|item| {
-                let entry: PrefixedRouteRaw =
+                let entry: RawPrefixedRouteEntry =
                     serde_json::from_value(item).map_err(de::Error::custom)?;
-                Ok(PrefixedRoute {
+                Ok(RawPrefixedRoute {
                     aliases: entry.aliases,
                     route: entry.route,
                 })
@@ -385,8 +393,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::HashConfig;
-
     use super::*;
 
     fn parse_ok(json: &str) -> ConfigDocument {
@@ -400,26 +406,25 @@ mod tests {
     #[test]
     fn smallest_valid_config_only_has_route() {
         let doc = parse_ok(r#"{ "route": "NullRoute" }"#);
-        assert!(doc.pools.is_empty());
-        assert!(doc.named_handles.is_empty());
-        assert_eq!(doc.route, RouteEntry::Single(RouteHandleConfig::NullRoute));
+        assert!(doc.pools().is_empty());
+        assert_eq!(doc.route(), &RouteConfig::NullRoute);
     }
 
     #[test]
     fn pools_and_route_round_trip() {
         let doc =
             parse_ok(r#"{ "pools": { "foo": { "servers": ["a:1"] } }, "route": "PoolRoute|foo" }"#);
-        assert_eq!(doc.pools.len(), 1);
-        assert_eq!(doc.pools["foo"].servers[0].access_point(), "a:1");
+        assert_eq!(doc.pools().len(), 1);
+        assert_eq!(doc.pool("foo").unwrap().servers[0].access_point(), "a:1");
         assert!(matches!(
-            doc.route,
-            RouteEntry::Single(RouteHandleConfig::PoolRoute { ref pool, .. })
+            doc.route(),
+            RouteConfig::PoolRoute { pool, .. }
                 if pool == "foo"
         ));
     }
 
     #[test]
-    fn named_handles_object_form_indexes_by_key() {
+    fn named_handles_object_form_resolves_root() {
         let doc = parse_ok(
             r#"{
                 "pools": {
@@ -433,22 +438,14 @@ mod tests {
                 "route": "route:A"
             }"#,
         );
-        assert_eq!(doc.named_handles.len(), 2);
-        assert_eq!(
-            doc.named_handles["route:A"],
-            RouteHandleConfig::PoolRoute {
-                pool: "A".into(),
-                hash: HashConfig::default()
-            }
-        );
         assert!(matches!(
-            doc.named_handles["route:B"],
-            RouteHandleConfig::PoolRoute { ref pool, .. } if pool == "B"
+            doc.route(),
+            RouteConfig::PoolRoute { pool, .. } if pool == "A"
         ));
     }
 
     #[test]
-    fn named_handles_list_form_uses_name_field() {
+    fn named_handles_list_form_resolves_root() {
         let doc = parse_ok(
             r#"{
                 "pools": { "A": { "servers": ["a:1"] } },
@@ -459,15 +456,10 @@ mod tests {
                 "route": "route:A"
             }"#,
         );
-        assert_eq!(doc.named_handles.len(), 2);
-        assert_eq!(
-            doc.named_handles["route:A"],
-            RouteHandleConfig::PoolRoute {
-                pool: "A".into(),
-                hash: HashConfig::default()
-            }
-        );
-        assert_eq!(doc.named_handles["n"], RouteHandleConfig::NullRoute);
+        assert!(matches!(
+            doc.route(),
+            RouteConfig::PoolRoute { pool, .. } if pool == "A"
+        ));
     }
 
     #[test]
@@ -549,12 +541,8 @@ mod tests {
             }"#,
         );
         assert!(matches!(
-            document.route,
-            RouteEntry::Single(RouteHandleConfig::PoolRoute { ref pool, .. }) if pool == "A"
-        ));
-        assert!(matches!(
-            document.named_handles["first"],
-            RouteHandleConfig::PoolRoute { ref pool, .. } if pool == "A"
+            document.route(),
+            RouteConfig::PoolRoute { pool, .. } if pool == "A"
         ));
 
         assert!(matches!(
@@ -575,6 +563,6 @@ mod tests {
     fn permits_unreferenced_empty_pools() {
         let document =
             parse_ok(r#"{ "pools": { "empty": { "servers": [] } }, "route": "NullRoute" }"#);
-        assert!(document.pools["empty"].servers.is_empty());
+        assert!(document.pool("empty").unwrap().servers.is_empty());
     }
 }
