@@ -58,6 +58,13 @@ pub enum ConfigError {
     #[error("server object at `pools.{pool}.servers[{index}]` is not implemented")]
     UnsupportedServerObject { pool: String, index: usize },
 
+    #[error("invalid server `{address}` at `pools.{pool}.servers[{index}]`")]
+    InvalidServerAddress {
+        pool: String,
+        index: usize,
+        address: String,
+    },
+
     #[error("`routes` (with prefix aliases) is not implemented")]
     PrefixRoutingNotImplemented,
 

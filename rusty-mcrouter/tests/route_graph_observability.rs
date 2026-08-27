@@ -4,8 +4,8 @@ use std::sync::Arc;
 use rusty_mcrouter_backend::destination;
 use rusty_mcrouter_backend::error::{RequestError, SendError};
 use rusty_mcrouter_backend::test_support::MockBackend;
-use rusty_mcrouter_backend::{BackendFactory, BackendFactoryError, PoolHealth};
-use rusty_mcrouter_config::{parse, ConfigDocument};
+use rusty_mcrouter_backend::{BackendFactory, PoolHealth};
+use rusty_mcrouter_config::{parse, ConfigDocument, ServerConfig};
 use rusty_mcrouter_core::{
     build_route, DynRoute, RoutingMetricsLayout, RoutingMetricsShard, RoutingState,
 };
@@ -36,16 +36,14 @@ impl BackendFactory for Factory {
 
     fn make(
         &self,
-        server: &str,
+        server: &ServerConfig,
         _cfg: &destination::DestinationConfig,
         _pool: &PoolHealth<'_>,
-    ) -> Result<Self::Backend, BackendFactoryError> {
+    ) -> Self::Backend {
         self.backends
-            .get(server)
+            .get(server.access_point())
             .cloned()
-            .ok_or_else(|| BackendFactoryError::InvalidAddress {
-                addr: server.to_string(),
-            })
+            .expect("test backend must exist for every configured server")
     }
 }
 

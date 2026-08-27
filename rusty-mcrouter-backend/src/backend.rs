@@ -2,8 +2,8 @@ use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use rusty_mcrouter_config::ServerConfig;
 use rusty_mcrouter_protocol::{Reply, Request};
-use thiserror::Error;
 
 use crate::classify::ResultCode;
 use crate::destination::{self, Destination, DestinationKey, Map};
@@ -67,27 +67,21 @@ impl PoolHealth<'_> {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum BackendFactoryError {
-    #[error("invalid server address {addr:?}")]
-    InvalidAddress { addr: String },
-}
-
 /// Constructs a [`Backend`] for a server address — the seam that lets the
 /// route builder run over mock backends without opening sockets.
 ///
 /// SYNC and I/O-free: connections are lazy, so building a route graph over a
 /// dead server succeeds — the server just starts life failing (and TKOs).
-/// Address shape is the only thing that can fail at build time.
+/// Address shape is validated by `rusty-mcrouter-config`.
 pub trait BackendFactory {
     type Backend: Backend;
 
     fn make(
         &self,
-        server: &str,
+        server: &ServerConfig,
         cfg: &destination::DestinationConfig,
         pool: &PoolHealth<'_>,
-    ) -> Result<Self::Backend, BackendFactoryError>;
+    ) -> Self::Backend;
 }
 
 /// Production factory: one per proxy thread, deduping through the thread's
@@ -107,34 +101,26 @@ impl BackendFactory for DestinationFactory {
 
     fn make(
         &self,
-        server: &str,
+        server: &ServerConfig,
         cfg: &destination::DestinationConfig,
         pool: &PoolHealth<'_>,
-    ) -> Result<Rc<Destination>, BackendFactoryError> {
-        let valid = server
-            .rsplit_once(':')
-            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
-        if !valid {
-            return Err(BackendFactoryError::InvalidAddress {
-                addr: server.into(),
-            });
-        }
-
+    ) -> Rc<Destination> {
         let gate = pool.fail_open.map(|thresholds| {
             self.map
                 .tko_map()
                 .pool_tracker_for(pool.pool_name, thresholds)
         });
         let key = DestinationKey {
-            addr: Arc::from(server),
+            addr: Arc::from(server.access_point()),
             reply_timeout: cfg.reply_timeout,
         };
-        Ok(self.map.destination(key, cfg, gate))
+        self.map.destination(key, cfg, gate)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rusty_mcrouter_config::{parse, ServerConfig};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss};
 
@@ -153,6 +139,14 @@ mod tests {
             DestinationMetricsRegistry::new(),
         ));
         (tko, factory)
+    }
+
+    fn server(access_point: &str) -> ServerConfig {
+        let config = parse(&format!(
+            r#"{{"pools":{{"test":{{"servers":["{access_point}"]}}}},"route":"NullRoute"}}"#
+        ))
+        .unwrap();
+        config.pool_by_name("test").unwrap().servers()[0].clone()
     }
 
     /// Route-shaped consumption: a generic fn constrained on Backend driving
@@ -175,27 +169,10 @@ mod tests {
             let pool = PoolHealth::ungated("pool");
 
             // no listener at this addr: make still succeeds (lazy)
-            let a = factory.make("127.0.0.1:9", &cfg, &pool).unwrap();
-            let b = factory.make("127.0.0.1:9", &cfg, &pool).unwrap();
+            let server = server("127.0.0.1:9");
+            let a = factory.make(&server, &cfg, &pool);
+            let b = factory.make(&server, &cfg, &pool);
             assert!(Rc::ptr_eq(&a, &b), "factory must dedup through the map");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn invalid_addresses_fail_at_build_time() {
-        run_local(async {
-            let (_tko, factory) = factory();
-            let cfg = destination::DestinationConfig::default();
-            let pool = PoolHealth::ungated("pool");
-
-            for addr in ["localhost", "host:notaport", "host:99999", ":11211", ""] {
-                let result = factory.make(addr, &cfg, &pool);
-                assert!(
-                    matches!(result, Err(BackendFactoryError::InvalidAddress { .. })),
-                    "{addr:?} must be rejected"
-                );
-            }
         })
         .await;
     }
@@ -213,8 +190,8 @@ mod tests {
                 fail_open: Some(FailOpenThresholds { enter: 1, exit: 1 }),
             };
 
-            let a = factory.make("127.0.0.1:9", &cfg, &pool).unwrap();
-            let b = factory.make("127.0.0.1:10", &cfg, &pool).unwrap();
+            let a = factory.make(&server("127.0.0.1:9"), &cfg, &pool);
+            let b = factory.make(&server("127.0.0.1:10"), &cfg, &pool);
 
             assert!(a
                 .tracker()
@@ -235,13 +212,11 @@ mod tests {
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]])
                     .await;
             let (_tko, factory) = factory();
-            let backend = factory
-                .make(
-                    &server.addr.to_string(),
-                    &destination::DestinationConfig::default(),
-                    &PoolHealth::ungated("pool"),
-                )
-                .unwrap();
+            let backend = factory.make(
+                &self::server(&server.addr.to_string()),
+                &destination::DestinationConfig::default(),
+                &PoolHealth::ungated("pool"),
+            );
 
             let reply = through_trait(&backend, get(b"key")).await.unwrap();
             assert_eq!(reply, get_miss());

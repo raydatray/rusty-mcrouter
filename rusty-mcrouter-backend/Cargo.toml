@@ -13,6 +13,7 @@ testing = ["rusty-mcrouter-protocol/testing"]
 
 [dependencies]
 bytes.workspace = true
+rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
 rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
 thiserror.workspace = true

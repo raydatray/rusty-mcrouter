@@ -24,7 +24,16 @@ pub(crate) enum RawServerConfig {
 impl RawServerConfig {
     pub(crate) fn validate(self, pool: &str, index: usize) -> Result<ServerConfig, ConfigError> {
         match self {
-            RawServerConfig::AccessPoint(access_point) => Ok(ServerConfig { access_point }),
+            RawServerConfig::AccessPoint(access_point) => {
+                if !validate_access_point(&access_point) {
+                    return Err(ConfigError::InvalidServerAddress {
+                        pool: pool.to_string(),
+                        index,
+                        address: access_point,
+                    });
+                }
+                Ok(ServerConfig { access_point })
+            }
             RawServerConfig::Route(fields) => {
                 drop(fields);
                 Err(ConfigError::UnsupportedServerObject {
@@ -32,6 +41,38 @@ impl RawServerConfig {
                     index,
                 })
             }
+        }
+    }
+}
+
+fn validate_access_point(access_point: &str) -> bool {
+    access_point
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate(access_point: &str) -> Result<ServerConfig, ConfigError> {
+        RawServerConfig::AccessPoint(access_point.to_string()).validate("test", 0)
+    }
+
+    #[test]
+    fn validates_supported_access_points() {
+        for access_point in ["localhost:11211", "127.0.0.1:11211", "[::1]:11211"] {
+            assert!(validate(access_point).is_ok(), "got: {access_point}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_access_points() {
+        for access_point in ["", "localhost", ":11211", "host:notaport", "host:65536"] {
+            assert!(matches!(
+                validate(access_point),
+                Err(ConfigError::InvalidServerAddress { .. })
+            ));
         }
     }
 }
