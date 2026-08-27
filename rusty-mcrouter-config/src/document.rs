@@ -70,6 +70,9 @@ pub enum ConfigError {
     #[error("named route handle cycle: {chain}")]
     NamedHandleCycle { chain: String },
 
+    #[error("route nesting exceeds the maximum depth of {limit}")]
+    RouteDepthExceeded { limit: usize },
+
     #[error("pool `{name}` is referenced by a route but not defined in `pools`")]
     PoolNotFound { name: String },
 
@@ -91,6 +94,7 @@ pub enum ConfigError {
 }
 
 type ConfigResult<T> = std::result::Result<T, ConfigError>;
+const MAX_ROUTE_DEPTH: usize = 128;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigDocument {
@@ -176,7 +180,7 @@ impl TryFrom<RawConfigDocument> for ConfigDocument {
         }
 
         let mut validator = RouteValidator::new(&pools, &pool_ids, named_handles);
-        let route = validator.validate(root)?;
+        let route = validator.validate(root, 0)?;
         validator.validate_all_named_handles()?;
 
         Ok(ConfigDocument {
@@ -214,14 +218,17 @@ impl<'a> RouteValidator<'a> {
         let names = self.definitions.keys().cloned().collect::<Vec<_>>();
 
         for name in names {
-            self.resolve_named(&name)?;
+            self.resolve_named(&name, 0)?;
         }
 
         Ok(())
     }
 
-    fn resolve_named(&mut self, name: &str) -> ConfigResult<RouteConfig> {
+    fn resolve_named(&mut self, name: &str, depth: usize) -> ConfigResult<RouteConfig> {
+        check_route_depth(depth)?;
+
         if let Some(route) = self.resolved.get(name) {
+            check_validated_route_depth(route, depth)?;
             return Ok(route.clone());
         }
 
@@ -241,7 +248,7 @@ impl<'a> RouteValidator<'a> {
 
         self.resolving.push(name.to_string());
 
-        let route = self.validate(route)?;
+        let route = self.validate(route, depth)?;
 
         self.resolving.pop();
         self.resolved.insert(name.to_string(), route.clone());
@@ -249,14 +256,16 @@ impl<'a> RouteValidator<'a> {
         Ok(route)
     }
 
-    fn validate(&mut self, route: RawRouteConfig) -> ConfigResult<RouteConfig> {
+    fn validate(&mut self, route: RawRouteConfig, depth: usize) -> ConfigResult<RouteConfig> {
+        check_route_depth(depth)?;
+
         match route {
             RawRouteConfig::Reference(name) => match name.as_str() {
                 "NullRoute" => Ok(RouteConfig::NullRoute),
                 "ErrorRoute" => Ok(RouteConfig::ErrorRoute { message: None }),
-                _ => self.resolve_named(&name),
+                _ => self.resolve_named(&name, depth + 1),
             },
-            RawRouteConfig::Shorthand { kind, args } => self.validate_shorthand(kind, args),
+            RawRouteConfig::Shorthand { kind, args } => self.validate_shorthand(kind, args, depth),
             RawRouteConfig::PoolRoute { pool, hash } => {
                 let id = self
                     .pool_ids
@@ -289,7 +298,7 @@ impl<'a> RouteValidator<'a> {
 
                 let children = children
                     .into_iter()
-                    .map(|child| self.validate(child))
+                    .map(|child| self.validate(child, depth + 1))
                     .collect::<ConfigResult<_>>()?;
 
                 Ok(RouteConfig::FailoverRoute {
@@ -304,7 +313,12 @@ impl<'a> RouteValidator<'a> {
         }
     }
 
-    fn validate_shorthand(&mut self, kind: String, args: Vec<String>) -> ConfigResult<RouteConfig> {
+    fn validate_shorthand(
+        &mut self,
+        kind: String,
+        args: Vec<String>,
+        depth: usize,
+    ) -> ConfigResult<RouteConfig> {
         match kind.as_str() {
             "NullRoute" if args.is_empty() => Ok(RouteConfig::NullRoute),
             "NullRoute" => Err(ConfigError::InvalidShorthandArity {
@@ -320,10 +334,13 @@ impl<'a> RouteValidator<'a> {
                 expected: "at most 1",
                 actual: args.len(),
             }),
-            "PoolRoute" if args.len() == 1 => self.validate(RawRouteConfig::PoolRoute {
-                pool: args.into_iter().next().expect("one argument"),
-                hash: HashConfig::default(),
-            }),
+            "PoolRoute" if args.len() == 1 => self.validate(
+                RawRouteConfig::PoolRoute {
+                    pool: args.into_iter().next().expect("one argument"),
+                    hash: HashConfig::default(),
+                },
+                depth,
+            ),
             "PoolRoute" => Err(ConfigError::InvalidShorthandArity {
                 kind,
                 expected: "exactly 1",
@@ -332,6 +349,25 @@ impl<'a> RouteValidator<'a> {
             _ => Err(ConfigError::UnsupportedRouteType { kind }),
         }
     }
+}
+
+fn check_route_depth(depth: usize) -> ConfigResult<()> {
+    if depth >= MAX_ROUTE_DEPTH {
+        return Err(ConfigError::RouteDepthExceeded {
+            limit: MAX_ROUTE_DEPTH,
+        });
+    }
+    Ok(())
+}
+
+fn check_validated_route_depth(route: &RouteConfig, depth: usize) -> ConfigResult<()> {
+    check_route_depth(depth)?;
+    if let RouteConfig::FailoverRoute { children, .. } = route {
+        for child in children {
+            check_validated_route_depth(child, depth + 1)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn parse(input: &str) -> ConfigResult<ConfigDocument> {
@@ -651,6 +687,63 @@ mod tests {
                 }"#
             ),
             ConfigError::NamedHandleCycle { .. }
+        ));
+
+        assert!(matches!(
+            parse_err(
+                r#"{
+                    "named_handles": { "self": "self" },
+                    "route": "self"
+                }"#
+            ),
+            ConfigError::NamedHandleCycle { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_excessive_named_handle_depth() {
+        let mut handles = serde_json::Map::new();
+        for index in 0..=MAX_ROUTE_DEPTH {
+            let target = if index == MAX_ROUTE_DEPTH {
+                "NullRoute".to_string()
+            } else {
+                format!("route:{}", index + 1)
+            };
+            handles.insert(format!("route:{index}"), Value::String(target));
+        }
+        let json = serde_json::json!({
+            "named_handles": handles,
+            "route": "route:0",
+        })
+        .to_string();
+
+        assert!(matches!(
+            parse_err(&json),
+            ConfigError::RouteDepthExceeded {
+                limit: MAX_ROUTE_DEPTH
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_excessive_nested_route_depth() {
+        let mut route = RawRouteConfig::NullRoute;
+        for _ in 0..=MAX_ROUTE_DEPTH {
+            route = RawRouteConfig::FailoverRoute {
+                children: vec![route],
+                failover_errors: crate::FailoverErrorsConfig::Default,
+                failover_policy: crate::FailoverPolicyConfig::InOrder,
+            };
+        }
+
+        let pools = Vec::new();
+        let pool_ids = BTreeMap::new();
+        let mut validator = RouteValidator::new(&pools, &pool_ids, BTreeMap::new());
+        assert!(matches!(
+            validator.validate(route, 0),
+            Err(ConfigError::RouteDepthExceeded {
+                limit: MAX_ROUTE_DEPTH
+            })
         ));
     }
 
