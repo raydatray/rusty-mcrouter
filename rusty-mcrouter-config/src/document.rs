@@ -11,7 +11,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    pool::RawPoolConfig, route::RawRouteConfig, HashConfig, HashFunc, PoolConfig, RouteConfig,
+    pool::RawPoolConfig,
+    route::{RawNamedHandle, RawRouteConfig},
+    HashConfig, HashFunc, PoolConfig, RouteConfig,
 };
 
 #[derive(Debug, Error)]
@@ -452,28 +454,7 @@ where
             S: SeqAccess<'de>,
         {
             let mut handles = BTreeMap::new();
-            while let Some(item) = sequence.next_element::<Value>()? {
-                let mut object = match item {
-                    Value::Object(object) => object,
-                    other => {
-                        return Err(de::Error::custom(format!(
-                            "named_handles list item must be an object, got {other}"
-                        )))
-                    }
-                };
-
-                let name = match object.remove("name") {
-                    Some(Value::String(name)) => name,
-                    Some(_) => return Err(de::Error::custom("`name` must be a string")),
-                    None => {
-                        return Err(de::Error::custom(
-                            "named_handles list item missing `name` field",
-                        ))
-                    }
-                };
-
-                let route =
-                    serde_json::from_value(Value::Object(object)).map_err(de::Error::custom)?;
+            while let Some(RawNamedHandle { name, route }) = sequence.next_element()? {
                 if handles.insert(name.clone(), route).is_some() {
                     return Err(de::Error::custom(format!(
                         "duplicate named handle `{name}`"
@@ -801,7 +782,29 @@ mod tests {
                     "route": "same"
                 }"#
             ),
-            ConfigError::Schema { ref path, .. } if path == "named_handles"
+            ConfigError::Schema { ref path, .. } if path.starts_with("named_handles")
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_route_fields_in_list_form_named_handles() {
+        assert!(matches!(
+            parse_err(
+                r#"{
+                    "pools": {
+                        "A": { "servers": ["a:1"] },
+                        "B": { "servers": ["b:1"] }
+                    },
+                    "named_handles": [{
+                        "name": "same",
+                        "type": "PoolRoute",
+                        "pool": "A",
+                        "pool": "B"
+                    }],
+                    "route": "same"
+                }"#
+            ),
+            ConfigError::Schema { ref path, .. } if path.starts_with("named_handles")
         ));
     }
 

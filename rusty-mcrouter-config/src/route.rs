@@ -1,7 +1,7 @@
-use std::{fmt, str::FromStr};
+use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
-use serde_json::{Map, Value};
+use serde_json::{value::RawValue, Map, Value};
 
 use crate::PoolId;
 
@@ -32,6 +32,13 @@ pub(crate) enum RawRouteConfig {
         fields: Map<String, Value>,
     },
 }
+
+pub(crate) struct RawNamedHandle {
+    pub(crate) name: String,
+    pub(crate) route: RawRouteConfig,
+}
+
+type RawRouteFields = BTreeMap<String, Box<RawValue>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RouteConfig {
@@ -123,45 +130,91 @@ impl<'de> Deserialize<'de> for RawRouteConfig {
     where
         D: Deserializer<'de>,
     {
-        struct RawRouteConfigVisitor;
+        deserializer.deserialize_any(RawRouteConfigVisitor)
+    }
+}
 
-        impl<'de> Visitor<'de> for RawRouteConfigVisitor {
-            type Value = RawRouteConfig;
+struct RawRouteConfigVisitor;
+
+impl<'de> Visitor<'de> for RawRouteConfigVisitor {
+    type Value = RawRouteConfig;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a route string or object")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(parse_string_form(value))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(parse_string_form(&value))
+    }
+
+    fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        let fields = collect_route_fields(map)?;
+        parse_object_form(fields).map_err(de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for RawNamedHandle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawNamedHandleVisitor;
+
+        impl<'de> Visitor<'de> for RawNamedHandleVisitor {
+            type Value = RawNamedHandle;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a route string or object")
+                formatter.write_str("a named handle object")
             }
 
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(parse_string_form(value))
-            }
-
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(parse_string_form(&value))
-            }
-
-            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
             where
                 M: MapAccess<'de>,
             {
-                let mut fields = Map::new();
-                while let Some((key, value)) = map.next_entry::<String, Value>()? {
-                    if fields.insert(key.clone(), value).is_some() {
-                        return Err(de::Error::custom(format!("duplicate route field `{key}`")));
+                let mut fields = collect_route_fields(map)?;
+                let name = match take_json_field(&mut fields, "name").map_err(de::Error::custom)? {
+                    Some(Value::String(name)) => name,
+                    Some(_) => return Err(de::Error::custom("`name` must be a string")),
+                    None => {
+                        return Err(de::Error::custom(
+                            "named_handles list item missing `name` field",
+                        ))
                     }
-                }
-                parse_object_form(fields).map_err(de::Error::custom)
+                };
+                let route = parse_object_form(fields).map_err(de::Error::custom)?;
+                Ok(RawNamedHandle { name, route })
             }
         }
 
-        deserializer.deserialize_any(RawRouteConfigVisitor)
+        deserializer.deserialize_map(RawNamedHandleVisitor)
     }
+}
+
+fn collect_route_fields<'de, M>(mut map: M) -> Result<RawRouteFields, M::Error>
+where
+    M: MapAccess<'de>,
+{
+    let mut fields = RawRouteFields::new();
+    while let Some(key) = map.next_key::<String>()? {
+        if fields.contains_key(&key) {
+            return Err(de::Error::custom(format!("duplicate route field `{key}`")));
+        }
+        fields.insert(key, map.next_value()?);
+    }
+    Ok(fields)
 }
 
 fn parse_string_form(s: &str) -> RawRouteConfig {
@@ -174,8 +227,8 @@ fn parse_string_form(s: &str) -> RawRouteConfig {
     }
 }
 
-fn parse_object_form(mut map: Map<String, Value>) -> Result<RawRouteConfig, String> {
-    let kind = match map.remove("type") {
+fn parse_object_form(mut map: RawRouteFields) -> Result<RawRouteConfig, String> {
+    let kind = match take_json_field(&mut map, "type")? {
         Some(Value::String(s)) => s,
         Some(other) => return Err(format!("`type` must be a string, got {}", other)),
         None => return Err("route object missing required field `type`".to_string()),
@@ -184,7 +237,7 @@ fn parse_object_form(mut map: Map<String, Value>) -> Result<RawRouteConfig, Stri
     match kind.as_str() {
         "NullRoute" => Ok(RawRouteConfig::NullRoute),
         "ErrorRoute" => {
-            let message = match map.remove("message") {
+            let message = match take_json_field(&mut map, "message")? {
                 Some(Value::String(s)) => Some(s),
                 Some(other) => {
                     return Err(format!(
@@ -197,7 +250,7 @@ fn parse_object_form(mut map: Map<String, Value>) -> Result<RawRouteConfig, Stri
             Ok(RawRouteConfig::ErrorRoute { message })
         }
         "PoolRoute" => {
-            let pool = match map.remove("pool") {
+            let pool = match take_json_field(&mut map, "pool")? {
                 Some(Value::String(s)) => s,
                 Some(Value::Object(mut obj)) => match obj.remove("name") {
                     Some(Value::String(s)) => s,
@@ -231,12 +284,31 @@ fn parse_object_form(mut map: Map<String, Value>) -> Result<RawRouteConfig, Stri
                 failover_policy,
             })
         }
-        _ => Ok(RawRouteConfig::Unknown { kind, fields: map }),
+        _ => Ok(RawRouteConfig::Unknown {
+            kind,
+            fields: into_json_fields(map)?,
+        }),
     }
 }
 
-fn parse_hash(map: &mut Map<String, Value>) -> Result<HashConfig, String> {
-    match map.remove("hash") {
+fn take_json_field(map: &mut RawRouteFields, name: &str) -> Result<Option<Value>, String> {
+    map.remove(name)
+        .map(|value| serde_json::from_str(value.get()).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+fn into_json_fields(map: RawRouteFields) -> Result<Map<String, Value>, String> {
+    map.into_iter()
+        .map(|(key, value)| {
+            serde_json::from_str(value.get())
+                .map(|value| (key, value))
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+fn parse_hash(map: &mut RawRouteFields) -> Result<HashConfig, String> {
+    match take_json_field(map, "hash")? {
         Some(Value::String(name)) => Ok(HashConfig {
             func: parse_hash_func(&name)?,
             salt: None,
@@ -267,22 +339,16 @@ fn parse_hash_func(name: &str) -> Result<HashFunc, String> {
     }
 }
 
-fn parse_failover_children(map: &mut Map<String, Value>) -> Result<Vec<RawRouteConfig>, String> {
+fn parse_failover_children(map: &mut RawRouteFields) -> Result<Vec<RawRouteConfig>, String> {
     match map.remove("children") {
-        Some(Value::Array(items)) => items
-            .into_iter()
-            .map(|item| serde_json::from_value(item).map_err(|e| e.to_string()))
-            .collect(),
-        Some(other) => Err(format!(
-            "FailoverRoute `children` must be an array, got {}",
-            other
-        )),
+        Some(children) => serde_json::from_str(children.get())
+            .map_err(|error| format!("invalid FailoverRoute `children`: {error}")),
         None => Err("FailoverRoute missing required field `children`".to_string()),
     }
 }
 
-fn parse_failover_errors(map: &mut Map<String, Value>) -> Result<FailoverErrorsConfig, String> {
-    match map.remove("failover_errors") {
+fn parse_failover_errors(map: &mut RawRouteFields) -> Result<FailoverErrorsConfig, String> {
+    match take_json_field(map, "failover_errors")? {
         None => Ok(FailoverErrorsConfig::Default),
         Some(Value::Array(names)) => Ok(FailoverErrorsConfig::All(parse_error_names(names)?)),
         Some(Value::Object(mut obj)) => Ok(FailoverErrorsConfig::PerOp {
@@ -324,8 +390,8 @@ fn parse_error_names(names: Vec<Value>) -> Result<Vec<FailoverErrorKind>, String
         .collect()
 }
 
-fn parse_failover_policy(map: &mut Map<String, Value>) -> Result<FailoverPolicyConfig, String> {
-    let mut obj = match map.remove("failover_policy") {
+fn parse_failover_policy(map: &mut RawRouteFields) -> Result<FailoverPolicyConfig, String> {
+    let mut obj = match take_json_field(map, "failover_policy")? {
         None => return Ok(FailoverPolicyConfig::InOrder),
         Some(Value::Object(obj)) => obj,
         Some(other) => {
@@ -564,6 +630,14 @@ mod tests {
             r#"{ "type": "PoolRoute", "type": "NullRoute", "pool": "A" }"#,
             r#"{ "type": "PoolRoute", "pool": "A", "pool": "B" }"#,
             r#"{ "type": "PoolRoute", "pool": "A", "hash": "Ch3", "hash": "Crc32" }"#,
+            r#"{
+                "type": "FailoverRoute",
+                "children": [{
+                    "type": "PoolRoute",
+                    "pool": "A",
+                    "pool": "B"
+                }]
+            }"#,
         ] {
             let error = serde_json::from_str::<RawRouteConfig>(json).unwrap_err();
             assert!(error.to_string().contains("duplicate route field"));
