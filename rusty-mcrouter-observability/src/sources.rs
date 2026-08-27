@@ -143,37 +143,33 @@ impl MetricsSource for RoutingSource {
             .iter()
             .all(|shard| Arc::ptr_eq(first.layout(), shard.layout())));
 
-        for index in 0..first.layout().pools_len() {
-            let pool = first
-                .layout()
-                .pool_name(index)
-                .expect("index came from layout length");
-            let labels = &[("pool", pool)];
+        for (pool, name) in first.layout().pools() {
+            let labels = &[("pool", name)];
 
             out.counter(
                 "rusty_mcrouter_pool_requests_total",
                 labels,
-                self.sum(|shard| shard.pools[index].requests.load()),
+                self.sum(|shard| shard.pool(pool).requests.load()),
             );
             out.counter(
                 "rusty_mcrouter_pool_duration_us_sum_total",
                 labels,
-                self.sum(|shard| shard.pools[index].duration_us_sum.load()),
+                self.sum(|shard| shard.pool(pool).duration_us_sum.load()),
             );
             out.counter(
                 "rusty_mcrouter_pool_completed_requests_total",
                 labels,
-                self.sum(|shard| shard.pools[index].completed_requests.load()),
+                self.sum(|shard| shard.pool(pool).completed_requests.load()),
             );
             out.counter(
                 "rusty_mcrouter_pool_requests_failed_total",
                 labels,
-                self.sum(|shard| shard.pools[index].final_errors.load()),
+                self.sum(|shard| shard.pool(pool).final_errors.load()),
             );
             out.counter(
                 "rusty_mcrouter_pool_total_duration_us_sum_total",
                 labels,
-                self.sum(|shard| shard.pools[index].total_duration_us_sum.load()),
+                self.sum(|shard| shard.pool(pool).total_duration_us_sum.load()),
             );
         }
     }
@@ -392,8 +388,8 @@ mod tests {
     fn routing_source_sums_shards_and_pool_metrics() {
         let layout = routing_layout(&["primary", "backup"]);
         let primary = layout
-            .pool_names()
-            .position(|name| name == "primary")
+            .pools()
+            .find_map(|(id, name)| (name == "primary").then_some(id))
             .unwrap();
         let s1 = RoutingMetricsShard::new(Arc::clone(&layout));
         let s2 = RoutingMetricsShard::new(layout);
@@ -403,9 +399,9 @@ mod tests {
         s1.failover[FailoverPolicyKind::InOrder as usize].inc();
         s2.failover_exhausted[FailoverPolicyKind::InOrder as usize].inc();
         s2.failover_policy_errors[FailoverErrorClass::Tko as usize].add(3);
-        s1.pools[primary].requests.add(4);
-        s2.pools[primary].requests.add(5);
-        s2.pools[primary].final_errors.inc();
+        s1.pool(primary).requests.add(4);
+        s2.pool(primary).requests.add(5);
+        s2.pool(primary).final_errors.inc();
 
         let text = render(RoutingSource {
             shards: vec![s1, s2],

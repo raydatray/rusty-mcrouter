@@ -9,16 +9,11 @@ use crate::selectors::Selector;
 use crate::RouteContext;
 
 pub struct PoolRoute {
-    pool_name: String,
     inner: SelectionRoute,
 }
 
 impl PoolRoute {
-    pub fn new<B>(
-        pool_name: impl Into<String>,
-        destinations: Vec<Rc<DestinationRoute<B>>>,
-        selector: Box<dyn Selector>,
-    ) -> Self
+    pub fn new<B>(destinations: Vec<Rc<DestinationRoute<B>>>, selector: Box<dyn Selector>) -> Self
     where
         B: Backend,
     {
@@ -28,13 +23,8 @@ impl PoolRoute {
             .collect();
 
         Self {
-            pool_name: pool_name.into(),
             inner: SelectionRoute::new(children, selector),
         }
-    }
-
-    pub fn pool_name(&self) -> &str {
-        &self.pool_name
     }
 }
 

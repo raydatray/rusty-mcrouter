@@ -68,23 +68,19 @@ impl RoutingMetricsLayout {
         Arc::new(Self { pools: Vec::new() })
     }
 
-    pub fn pool_metrics_index(&self, id: PoolId, expected_name: &str) -> Option<usize> {
+    pub fn pool_name(&self, id: PoolId) -> Option<&str> {
         self.pools
             .get(id.index())
-            .filter(|pool| pool.id == id && pool.name == expected_name)
-            .map(|_| id.index())
-    }
-
-    pub fn pool_name(&self, index: usize) -> Option<&str> {
-        self.pools.get(index).map(|pool| pool.name.as_str())
+            .filter(|pool| pool.id == id)
+            .map(|pool| pool.name.as_str())
     }
 
     pub fn pools_len(&self) -> usize {
         self.pools.len()
     }
 
-    pub fn pool_names(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.pools.iter().map(|pool| pool.name.as_str())
+    pub fn pools(&self) -> impl ExactSizeIterator<Item = (PoolId, &str)> {
+        self.pools.iter().map(|pool| (pool.id, pool.name.as_str()))
     }
 }
 
@@ -106,6 +102,14 @@ pub(crate) fn test_metrics_layout(names: &[&str]) -> Arc<RoutingMetricsLayout> {
     RoutingMetricsLayout::new(&config)
 }
 
+#[cfg(test)]
+pub(crate) fn test_pool_id(layout: &RoutingMetricsLayout, name: &str) -> PoolId {
+    layout
+        .pools()
+        .find_map(|(id, candidate)| (candidate == name).then_some(id))
+        .unwrap()
+}
+
 #[derive(Default)]
 pub struct PoolMetrics {
     pub requests: Counter,
@@ -118,7 +122,7 @@ pub struct PoolMetrics {
 #[repr(align(64))]
 pub struct RoutingMetricsShard {
     layout: Arc<RoutingMetricsLayout>,
-    pub pools: Vec<PoolMetrics>,
+    pools: Vec<PoolMetrics>,
     pub dev_null_requests: Counter,
     pub failover: [Counter; FAILOVER_POLICY_COUNT],
     pub failover_exhausted: [Counter; FAILOVER_POLICY_COUNT],
@@ -145,8 +149,14 @@ impl RoutingMetricsShard {
         &self.layout
     }
 
-    pub fn pool(&self, index: usize) -> Option<&PoolMetrics> {
-        self.pools.get(index)
+    pub fn pool(&self, id: PoolId) -> &PoolMetrics {
+        &self.pools[id.index()]
+    }
+
+    pub fn pools(&self) -> impl ExactSizeIterator<Item = (PoolId, &PoolMetrics)> {
+        self.layout
+            .pools()
+            .map(|(id, _)| (id, &self.pools[id.index()]))
     }
 }
 
@@ -185,28 +195,27 @@ mod tests {
         let primary = config.pool_id("primary").unwrap();
         let backup = config.pool_id("backup").unwrap();
 
-        assert_eq!(layout.pool_metrics_index(primary, "primary"), Some(1));
-        assert_eq!(layout.pool_metrics_index(backup, "backup"), Some(0));
-        assert_eq!(layout.pool_metrics_index(primary, "wrong"), None);
-        assert_eq!(layout.pool_name(backup.index()), Some("backup"));
+        assert_eq!(layout.pool_name(primary), Some("primary"));
+        assert_eq!(layout.pool_name(backup), Some("backup"));
     }
 
     #[test]
     fn shard_has_one_pool_block_per_layout_entry() {
         let layout = layout();
         let shard = RoutingMetricsShard::new(layout);
-        assert_eq!(shard.pools.len(), 2);
+        assert_eq!(shard.pools().len(), 2);
     }
 
     #[test]
     fn distinct_shards_do_not_share_pool_counters() {
         let layout = layout();
+        let pool = test_pool_id(&layout, "backup");
         let first = RoutingMetricsShard::new(Arc::clone(&layout));
         let second = RoutingMetricsShard::new(layout);
-        first.pools[0].requests.inc();
+        first.pool(pool).requests.inc();
 
-        assert_eq!(first.pools[0].requests.load(), 1);
-        assert_eq!(second.pools[0].requests.load(), 0);
+        assert_eq!(first.pool(pool).requests.load(), 1);
+        assert_eq!(second.pool(pool).requests.load(), 0);
     }
 
     #[test]
