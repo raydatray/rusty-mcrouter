@@ -27,4 +27,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
 rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives", features = ["testing"] }
+serde_json.workspace = true

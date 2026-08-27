@@ -54,7 +54,7 @@ mod tests {
 
     async fn boundary_reply(error: SendError) -> Reply {
         let route = DestinationRoute::new(MockBackend::failing(error)).into_dyn();
-        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+        let layout = RoutingMetricsLayout::empty();
         let state = RoutingState::new(RoutingMetricsShard::new(layout), noop_sink());
         route_request(route, state, get(b"foo")).await
     }
@@ -79,7 +79,7 @@ mod tests {
         let config =
             parse(r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#)
                 .unwrap();
-        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let layout = RoutingMetricsLayout::new(&config);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = build_route(

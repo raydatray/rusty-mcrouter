@@ -75,7 +75,7 @@ impl RoutingState {
 
 #[cfg(test)]
 pub(crate) fn test_routing_state() -> Rc<RoutingState> {
-    let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+    let layout = RoutingMetricsLayout::empty();
     RoutingState::new(
         RoutingMetricsShard::new(layout),
         rusty_mcrouter_observability_primitives::test_support::noop_sink(),
@@ -91,6 +91,7 @@ mod tests {
     use rusty_mcrouter_protocol::{Reply, Request};
 
     use super::*;
+    use crate::metrics::test_metrics_layout;
     use crate::{DynRoute, Route, RouteError};
 
     struct InspectContext {
@@ -119,7 +120,7 @@ mod tests {
     }
 
     fn state() -> (Rc<RoutingState>, Arc<RoutingMetricsShard>) {
-        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+        let layout = RoutingMetricsLayout::empty();
         let metrics = RoutingMetricsShard::new(layout);
         (
             RoutingState::new(Arc::clone(&metrics), noop_sink()),
@@ -185,7 +186,7 @@ mod tests {
 
     #[test]
     fn first_sendable_pool_wins_within_one_context() {
-        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let layout = test_metrics_layout(&["primary", "backup"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
@@ -200,7 +201,7 @@ mod tests {
 
     #[test]
     fn concurrent_contexts_keep_selected_pools_isolated() {
-        let layout = RoutingMetricsLayout::new(["first".to_string(), "second".to_string()]);
+        let layout = test_metrics_layout(&["first", "second"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let first = state.context();
@@ -217,7 +218,7 @@ mod tests {
 
     #[test]
     fn request_without_selected_pool_has_no_final_pool_metrics() {
-        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let layout = test_metrics_layout(&["pool"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
 

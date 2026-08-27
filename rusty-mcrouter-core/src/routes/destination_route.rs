@@ -82,7 +82,8 @@ mod tests {
     };
 
     use crate::context::test_routing_state;
-    use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
+    use crate::metrics::test_metrics_layout;
+    use crate::{RoutingMetricsShard, RoutingState};
 
     struct DelayedBackend;
 
@@ -112,7 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn attributed_send_records_attempt_and_final_metrics() {
-        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let layout = test_metrics_layout(&["pool"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = DestinationRoute::for_pool(MockBackend::miss(), 0);
@@ -128,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn sendable_attempt_records_elapsed_duration() {
-        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let layout = test_metrics_layout(&["pool"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = DestinationRoute::for_pool(DelayedBackend, 0);
@@ -143,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn attributed_error_counts_as_final_error() {
-        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let layout = test_metrics_layout(&["pool"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = DestinationRoute::for_pool(MockBackend::replying(bare_server_error()), 0);
@@ -159,7 +160,7 @@ mod tests {
 
     #[tokio::test]
     async fn tko_attempt_records_no_duration_or_final_attribution() {
-        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let layout = test_metrics_layout(&["pool"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let route = DestinationRoute::for_pool(

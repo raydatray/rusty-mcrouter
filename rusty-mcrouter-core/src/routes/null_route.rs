@@ -80,7 +80,7 @@ mod tests {
 
     #[tokio::test]
     async fn counts_each_invocation() {
-        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+        let layout = RoutingMetricsLayout::empty();
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
 

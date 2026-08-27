@@ -38,7 +38,7 @@ fn main() {
         let read_context_route = NullRoute.into_dyn();
         let deep_route = forwarding_chain(Rc::clone(&read_context_route));
         let request = get(b"routing-context-smoke");
-        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+        let layout = RoutingMetricsLayout::empty();
         let routing_state = RoutingState::new(RoutingMetricsShard::new(layout), noop_sink());
         let context = routing_state.context();
 
