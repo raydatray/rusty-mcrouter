@@ -66,9 +66,13 @@ type ConfigResult<T> = std::result::Result<T, ConfigError>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigDocument {
-    pools: BTreeMap<String, PoolConfig>,
+    pools: Vec<PoolConfig>,
+    pool_ids: BTreeMap<String, PoolId>,
     route: RouteConfig,
 }
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PoolId(usize);
 
 #[derive(Clone, Debug, PartialEq)]
 struct RawPrefixedRoute {
@@ -77,16 +81,27 @@ struct RawPrefixedRoute {
 }
 
 impl ConfigDocument {
-    pub fn pools(&self) -> &BTreeMap<String, PoolConfig> {
-        &self.pools
+    pub fn pools(&self) -> impl ExactSizeIterator<Item = (PoolId, &PoolConfig)> {
+        self.pools
+            .iter()
+            .enumerate()
+            .map(|(index, pool)| (PoolId(index), pool))
     }
 
-    pub fn pool(&self, name: &str) -> Option<&PoolConfig> {
-        self.pools.get(name)
+    pub fn pool(&self, id: PoolId) -> &PoolConfig {
+        &self.pools[id.0]
+    }
+
+    pub fn pool_by_name(&self, name: &str) -> Option<&PoolConfig> {
+        self.pool_ids.get(name).map(|id| self.pool(*id))
+    }
+
+    pub fn pool_id(&self, name: &str) -> Option<PoolId> {
+        self.pool_ids.get(name).copied()
     }
 
     pub fn pool_names(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.pools.keys().map(String::as_str)
+        self.pools.iter().map(PoolConfig::name)
     }
 
     pub fn route(&self) -> &RouteConfig {
@@ -127,21 +142,29 @@ impl TryFrom<RawConfigDocument> for ConfigDocument {
             (None, Some(_)) => return Err(ConfigError::PrefixRoutingNotImplemented),
         };
 
-        let pools = raw_pools
-            .into_iter()
-            .map(|(name, pool)| pool.validate(&name).map(|pool| (name, pool)))
-            .collect::<ConfigResult<_>>()?;
+        let mut pools = Vec::with_capacity(raw_pools.len());
+        let mut pool_ids = BTreeMap::new();
+        for (name, raw_pool) in raw_pools {
+            let id = PoolId(pools.len());
+            pools.push(raw_pool.validate(&name)?);
+            pool_ids.insert(name, id);
+        }
 
-        let mut validator = RouteValidator::new(&pools, named_handles);
+        let mut validator = RouteValidator::new(&pools, &pool_ids, named_handles);
         let route = validator.validate(root)?;
         validator.validate_all_named_handles()?;
 
-        Ok(ConfigDocument { pools, route })
+        Ok(ConfigDocument {
+            pools,
+            pool_ids,
+            route,
+        })
     }
 }
 
 struct RouteValidator<'a> {
-    pools: &'a BTreeMap<String, PoolConfig>,
+    pools: &'a [PoolConfig],
+    pool_ids: &'a BTreeMap<String, PoolId>,
     definitions: BTreeMap<String, RawRouteConfig>,
     resolved: BTreeMap<String, RouteConfig>,
     resolving: Vec<String>,
@@ -149,11 +172,13 @@ struct RouteValidator<'a> {
 
 impl<'a> RouteValidator<'a> {
     fn new(
-        pools: &'a BTreeMap<String, PoolConfig>,
+        pools: &'a [PoolConfig],
+        pool_ids: &'a BTreeMap<String, PoolId>,
         definitions: BTreeMap<String, RawRouteConfig>,
     ) -> Self {
         Self {
             pools,
+            pool_ids,
             definitions,
             resolved: BTreeMap::new(),
             resolving: Vec::new(),
@@ -208,23 +233,25 @@ impl<'a> RouteValidator<'a> {
             },
             RawRouteConfig::Shorthand { kind, args } => self.validate_shorthand(kind, args),
             RawRouteConfig::PoolRoute { pool, hash } => {
-                let config = self
-                    .pools
+                let id = self
+                    .pool_ids
                     .get(&pool)
+                    .copied()
                     .ok_or_else(|| ConfigError::PoolNotFound { name: pool.clone() })?;
 
-                if config.servers.is_empty() {
+                let config = &self.pools[id.0];
+                if config.servers().is_empty() {
                     return Err(ConfigError::EmptyPool { name: pool });
                 }
 
-                if hash.func == HashFunc::Ch3 && config.servers.len() > 1 << 23 {
+                if hash.func == HashFunc::Ch3 && config.servers().len() > 1 << 23 {
                     return Err(ConfigError::InvalidCh3PoolSize {
                         pool,
-                        size: config.servers.len(),
+                        size: config.servers().len(),
                     });
                 }
 
-                Ok(RouteConfig::PoolRoute { pool, hash })
+                Ok(RouteConfig::PoolRoute { pool: id, hash })
             }
             RawRouteConfig::FailoverRoute {
                 children,
@@ -406,7 +433,7 @@ mod tests {
     #[test]
     fn smallest_valid_config_only_has_route() {
         let doc = parse_ok(r#"{ "route": "NullRoute" }"#);
-        assert!(doc.pools().is_empty());
+        assert_eq!(doc.pools().len(), 0);
         assert_eq!(doc.route(), &RouteConfig::NullRoute);
     }
 
@@ -415,11 +442,14 @@ mod tests {
         let doc =
             parse_ok(r#"{ "pools": { "foo": { "servers": ["a:1"] } }, "route": "PoolRoute|foo" }"#);
         assert_eq!(doc.pools().len(), 1);
-        assert_eq!(doc.pool("foo").unwrap().servers[0].access_point(), "a:1");
+        assert_eq!(
+            doc.pool_by_name("foo").unwrap().servers()[0].access_point(),
+            "a:1"
+        );
         assert!(matches!(
             doc.route(),
             RouteConfig::PoolRoute { pool, .. }
-                if pool == "foo"
+                if doc.pool(*pool).name() == "foo"
         ));
     }
 
@@ -440,7 +470,7 @@ mod tests {
         );
         assert!(matches!(
             doc.route(),
-            RouteConfig::PoolRoute { pool, .. } if pool == "A"
+            RouteConfig::PoolRoute { pool, .. } if doc.pool(*pool).name() == "A"
         ));
     }
 
@@ -458,7 +488,7 @@ mod tests {
         );
         assert!(matches!(
             doc.route(),
-            RouteConfig::PoolRoute { pool, .. } if pool == "A"
+            RouteConfig::PoolRoute { pool, .. } if doc.pool(*pool).name() == "A"
         ));
     }
 
@@ -542,7 +572,7 @@ mod tests {
         );
         assert!(matches!(
             document.route(),
-            RouteConfig::PoolRoute { pool, .. } if pool == "A"
+            RouteConfig::PoolRoute { pool, .. } if document.pool(*pool).name() == "A"
         ));
 
         assert!(matches!(
@@ -563,6 +593,6 @@ mod tests {
     fn permits_unreferenced_empty_pools() {
         let document =
             parse_ok(r#"{ "pools": { "empty": { "servers": [] } }, "route": "NullRoute" }"#);
-        assert!(document.pool("empty").unwrap().servers.is_empty());
+        assert!(document.pool_by_name("empty").unwrap().servers().is_empty());
     }
 }
