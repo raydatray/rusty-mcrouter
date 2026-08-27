@@ -117,7 +117,7 @@ where
 
         let pool_index = self
             .metrics_layout
-            .pool_metrics_index(pool_name)
+            .pool_metrics_index(pool_id, pool_name)
             .ok_or_else(|| BuildError::PoolMissingFromMetricsLayout {
                 name: pool_name.to_string(),
             })?;
@@ -257,7 +257,7 @@ mod tests {
     where
         F: BackendFactory,
     {
-        let layout = RoutingMetricsLayout::new(cfg.pool_names().map(str::to_owned));
+        let layout = RoutingMetricsLayout::new(cfg);
         let route = build_route(cfg, factory, &defaults(), &layout)?;
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
@@ -329,7 +329,7 @@ mod tests {
     fn errors_when_pool_is_missing_from_metrics_layout() {
         let cfg = parse(r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#)
             .unwrap();
-        let layout = RoutingMetricsLayout::new(Vec::<String>::new());
+        let layout = RoutingMetricsLayout::empty();
         let err = build_route(&cfg, &MockBackendFactory::new(), &defaults(), &layout)
             .err()
             .expect("build should fail");
@@ -373,7 +373,7 @@ mod tests {
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
         let cfg = parse(json).unwrap();
         let d = defaults();
-        let layout = RoutingMetricsLayout::new(cfg.pool_names().map(str::to_owned));
+        let layout = RoutingMetricsLayout::new(&cfg);
         let mut builder = RouteBuilder::new(&cfg, &factory, &d, &layout);
         let pool = cfg.pool_id("P").unwrap();
         let d1 = builder.get_or_build_destinations(pool).unwrap();

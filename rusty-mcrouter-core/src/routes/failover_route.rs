@@ -163,6 +163,7 @@ mod tests {
     };
 
     use crate::context::test_routing_state;
+    use crate::metrics::test_metrics_layout;
     use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
 
     fn dest(backend: MockBackend) -> Rc<dyn DynRoute> {
@@ -205,7 +206,7 @@ mod tests {
         Arc<RoutingMetricsShard>,
         EventLog<RoutingEventRecord>,
     ) {
-        let metrics = RoutingMetricsShard::new(RoutingMetricsLayout::new(Vec::<String>::new()));
+        let metrics = RoutingMetricsShard::new(RoutingMetricsLayout::empty());
         let (sink, events) = recording_sink();
         (
             RoutingState::new(Arc::clone(&metrics), sink),
@@ -373,7 +374,7 @@ mod tests {
             pooled_dest(MockBackend::failing(timeout()), 0),
             pooled_dest(MockBackend::replying(get_hit(b"1")), 1),
         ]);
-        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let layout = test_metrics_layout(&["primary", "backup"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
@@ -396,7 +397,7 @@ mod tests {
             pooled_dest(MockBackend::failing(timeout()), 0),
             pooled_dest(MockBackend::failing(timeout()), 1),
         ]);
-        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let layout = test_metrics_layout(&["primary", "backup"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
@@ -417,7 +418,7 @@ mod tests {
             pooled_dest(MockBackend::failing(tko()), 0),
             pooled_dest(MockBackend::replying(get_hit(b"1")), 1),
         ]);
-        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let layout = test_metrics_layout(&["primary", "backup"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();
@@ -439,7 +440,7 @@ mod tests {
             pooled_dest(MockBackend::failing(tko()), 0),
             pooled_dest(MockBackend::failing(tko()), 1),
         ]);
-        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+        let layout = test_metrics_layout(&["primary", "backup"]);
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         let context = state.context();

@@ -55,7 +55,7 @@ fn build(
     std::rc::Rc<RoutingState>,
     std::rc::Rc<dyn DynRoute>,
 ) {
-    let layout = RoutingMetricsLayout::new(config.pool_names().map(str::to_owned));
+    let layout = RoutingMetricsLayout::new(config);
     let metrics = RoutingMetricsShard::new(layout);
     let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
     let route = build_route(

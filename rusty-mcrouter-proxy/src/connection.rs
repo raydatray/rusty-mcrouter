@@ -353,7 +353,7 @@ mod tests {
         let config =
             parse(r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#)
                 .unwrap();
-        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let layout = RoutingMetricsLayout::new(&config);
         let routing_metrics = RoutingMetricsShard::new(layout);
         let routing_state = RoutingState::new(Arc::clone(&routing_metrics), noop_sink());
         let route = build_route(

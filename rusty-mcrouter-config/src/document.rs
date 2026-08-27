@@ -110,8 +110,14 @@ pub struct ConfigDocument {
     route: RouteConfig,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PoolId(usize);
+
+impl PoolId {
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct RawPrefixedRoute {

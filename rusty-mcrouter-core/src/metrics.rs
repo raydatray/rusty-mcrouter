@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rusty_mcrouter_config::{ConfigDocument, PoolId};
 use rusty_mcrouter_observability_primitives::Counter;
 
 pub const FAILOVER_POLICY_COUNT: usize = 2;
@@ -41,35 +42,68 @@ impl FailoverErrorClass {
     }
 }
 
+struct PoolMetricsLayout {
+    id: PoolId,
+    name: String,
+}
+
 pub struct RoutingMetricsLayout {
-    pool_names: Vec<String>,
+    pools: Vec<PoolMetricsLayout>,
 }
 
 impl RoutingMetricsLayout {
-    pub fn new(pool_names: impl IntoIterator<Item = String>) -> Arc<Self> {
+    pub fn new(config: &ConfigDocument) -> Arc<Self> {
         Arc::new(Self {
-            pool_names: pool_names.into_iter().collect(),
+            pools: config
+                .pools()
+                .map(|(id, pool)| PoolMetricsLayout {
+                    id,
+                    name: pool.name().to_string(),
+                })
+                .collect(),
         })
     }
 
-    // used by route builder - not on hot path when routing
-    pub fn pool_metrics_index(&self, name: &str) -> Option<usize> {
-        self.pool_names
-            .iter()
-            .position(|candidate| candidate == name)
+    pub fn empty() -> Arc<Self> {
+        Arc::new(Self { pools: Vec::new() })
+    }
+
+    pub fn pool_metrics_index(&self, id: PoolId, expected_name: &str) -> Option<usize> {
+        self.pools
+            .get(id.index())
+            .filter(|pool| pool.id == id && pool.name == expected_name)
+            .map(|_| id.index())
     }
 
     pub fn pool_name(&self, index: usize) -> Option<&str> {
-        self.pool_names.get(index).map(String::as_str)
+        self.pools.get(index).map(|pool| pool.name.as_str())
     }
 
     pub fn pools_len(&self) -> usize {
-        self.pool_names.len()
+        self.pools.len()
     }
 
     pub fn pool_names(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.pool_names.iter().map(String::as_str)
+        self.pools.iter().map(|pool| pool.name.as_str())
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_metrics_layout(names: &[&str]) -> Arc<RoutingMetricsLayout> {
+    let pools = names
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_string(),
+                serde_json::json!({ "servers": [format!("{name}:1")] }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let config = rusty_mcrouter_config::parse(
+        &serde_json::json!({ "pools": pools, "route": "NullRoute" }).to_string(),
+    )
+    .unwrap();
+    RoutingMetricsLayout::new(&config)
 }
 
 #[derive(Default)]
@@ -119,27 +153,54 @@ impl RoutingMetricsShard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_mcrouter_config::parse;
+
+    fn layout() -> Arc<RoutingMetricsLayout> {
+        let config = parse(
+            r#"{
+                "pools": {
+                    "primary": { "servers": ["primary:1"] },
+                    "backup": { "servers": ["backup:1"] }
+                },
+                "route": "NullRoute"
+            }"#,
+        )
+        .unwrap();
+        RoutingMetricsLayout::new(&config)
+    }
 
     #[test]
-    fn layout_resolves_pool_names_to_stable_indexes() {
-        let layout = RoutingMetricsLayout::new(["primary".to_string(), "backup".to_string()]);
+    fn layout_resolves_pool_ids_to_stable_indexes() {
+        let config = parse(
+            r#"{
+                "pools": {
+                    "primary": { "servers": ["primary:1"] },
+                    "backup": { "servers": ["backup:1"] }
+                },
+                "route": "NullRoute"
+            }"#,
+        )
+        .unwrap();
+        let layout = RoutingMetricsLayout::new(&config);
+        let primary = config.pool_id("primary").unwrap();
+        let backup = config.pool_id("backup").unwrap();
 
-        assert_eq!(layout.pool_metrics_index("primary"), Some(0));
-        assert_eq!(layout.pool_metrics_index("backup"), Some(1));
-        assert_eq!(layout.pool_metrics_index("missing"), None);
-        assert_eq!(layout.pool_name(1), Some("backup"));
+        assert_eq!(layout.pool_metrics_index(primary, "primary"), Some(1));
+        assert_eq!(layout.pool_metrics_index(backup, "backup"), Some(0));
+        assert_eq!(layout.pool_metrics_index(primary, "wrong"), None);
+        assert_eq!(layout.pool_name(backup.index()), Some("backup"));
     }
 
     #[test]
     fn shard_has_one_pool_block_per_layout_entry() {
-        let layout = RoutingMetricsLayout::new(["a".to_string(), "b".to_string()]);
+        let layout = layout();
         let shard = RoutingMetricsShard::new(layout);
         assert_eq!(shard.pools.len(), 2);
     }
 
     #[test]
     fn distinct_shards_do_not_share_pool_counters() {
-        let layout = RoutingMetricsLayout::new(["pool".to_string()]);
+        let layout = layout();
         let first = RoutingMetricsShard::new(Arc::clone(&layout));
         let second = RoutingMetricsShard::new(layout);
         first.pools[0].requests.inc();

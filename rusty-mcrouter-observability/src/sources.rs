@@ -319,6 +319,8 @@ impl MetricsSource for SelfSource {
 #[cfg(test)]
 mod tests {
     use rusty_mcrouter_backend::tko::{DestToken, FailOpenThresholds};
+    use rusty_mcrouter_config::parse;
+    use rusty_mcrouter_core::RoutingMetricsLayout;
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
     use super::*;
@@ -328,6 +330,22 @@ mod tests {
         let mut registry = MetricsRegistry::new();
         registry.register(Box::new(source));
         registry.render()
+    }
+
+    fn routing_layout(names: &[&str]) -> Arc<RoutingMetricsLayout> {
+        let pools = names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    serde_json::json!({ "servers": [format!("{name}:1")] }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let config =
+            parse(&serde_json::json!({ "pools": pools, "route": "NullRoute" }).to_string())
+                .unwrap();
+        RoutingMetricsLayout::new(&config)
     }
 
     #[test]
@@ -372,10 +390,11 @@ mod tests {
 
     #[test]
     fn routing_source_sums_shards_and_pool_metrics() {
-        let layout = rusty_mcrouter_core::RoutingMetricsLayout::new([
-            "primary".to_string(),
-            "backup".to_string(),
-        ]);
+        let layout = routing_layout(&["primary", "backup"]);
+        let primary = layout
+            .pool_names()
+            .position(|name| name == "primary")
+            .unwrap();
         let s1 = RoutingMetricsShard::new(Arc::clone(&layout));
         let s2 = RoutingMetricsShard::new(layout);
 
@@ -384,9 +403,9 @@ mod tests {
         s1.failover[FailoverPolicyKind::InOrder as usize].inc();
         s2.failover_exhausted[FailoverPolicyKind::InOrder as usize].inc();
         s2.failover_policy_errors[FailoverErrorClass::Tko as usize].add(3);
-        s1.pools[0].requests.add(4);
-        s2.pools[0].requests.add(5);
-        s2.pools[0].final_errors.inc();
+        s1.pools[primary].requests.add(4);
+        s2.pools[primary].requests.add(5);
+        s2.pools[primary].final_errors.inc();
 
         let text = render(RoutingSource {
             shards: vec![s1, s2],
@@ -403,10 +422,7 @@ mod tests {
 
     #[test]
     fn routing_source_escapes_configured_pool_names() {
-        let layout =
-            rusty_mcrouter_core::RoutingMetricsLayout::new(
-                ["quoted\"pool\\line\nnext".to_string()],
-            );
+        let layout = routing_layout(&["quoted\"pool\\line\nnext"]);
         let shard = RoutingMetricsShard::new(layout);
 
         let text = render(RoutingSource {
