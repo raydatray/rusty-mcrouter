@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::{
     failover::{code_of_kind, FailoverErrors, FailoverPolicy, InOrderPolicy, LeastFailuresPolicy},
     routes::{DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, Route},
-    selectors::{Ch3, Crc32, Salted, Selector, SelectorBuildError},
+    selectors::{Ch3, Crc32, Salted, Selector},
     RoutingMetricsLayout,
 };
 
@@ -29,9 +29,6 @@ pub enum BuildError {
         #[source]
         source: BackendFactoryError,
     },
-
-    #[error(transparent)]
-    Selector(#[from] SelectorBuildError),
 }
 
 type Result<T> = std::result::Result<T, BuildError>;
@@ -94,7 +91,11 @@ where
 
             RouteConfig::PoolRoute { pool, hash } => {
                 let destinations = self.get_or_build_destinations(*pool)?;
-                build_pool_handle(self.config.pool(*pool).name(), hash, destinations)
+                Ok(build_pool_handle(
+                    self.config.pool(*pool).name(),
+                    hash,
+                    destinations,
+                ))
             }
 
             RouteConfig::FailoverRoute {
@@ -191,26 +192,26 @@ fn build_pool_handle<B>(
     pool_name: &str,
     hash: &HashConfig,
     destinations: Vec<Rc<DestinationRoute<B>>>,
-) -> Result<Rc<dyn DynRoute>>
+) -> Rc<dyn DynRoute>
 where
     B: Backend,
 {
-    let selector = build_selector(hash, destinations.len())?;
+    let selector = build_selector(hash, destinations.len());
     let route = PoolRoute::new(pool_name, destinations, selector);
 
-    Ok(route.into_dyn())
+    route.into_dyn()
 }
 
-fn build_selector(hash: &HashConfig, n: usize) -> Result<Box<dyn Selector>> {
+fn build_selector(hash: &HashConfig, n: usize) -> Box<dyn Selector> {
     let base: Box<dyn Selector> = match hash.func {
-        HashFunc::Ch3 => Box::new(Ch3::new(n)?),
+        HashFunc::Ch3 => Box::new(Ch3::new(n).expect("config parsing validates Ch3 pool size")),
         HashFunc::Crc32 => Box::new(Crc32::new(n)),
     };
 
-    Ok(match &hash.salt {
+    match &hash.salt {
         Some(salt) => Box::new(Salted::new(base, salt.clone().into_bytes())),
         None => base,
-    })
+    }
 }
 
 fn build_failover_errors(cfg: &FailoverErrorsConfig) -> FailoverErrors {
