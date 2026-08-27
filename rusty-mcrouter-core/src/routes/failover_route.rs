@@ -22,16 +22,16 @@ impl FailoverRoute {
         errors: FailoverErrors,
         policy: Box<dyn FailoverPolicy>,
         max_error_tries: usize,
-    ) -> Option<Self> {
-        if children.is_empty() {
-            return None;
-        }
-        Some(Self {
+    ) -> Self {
+        debug_assert!(!children.is_empty());
+        debug_assert!(max_error_tries > 0);
+
+        Self {
             children,
             errors,
             policy,
-            max_error_tries: max_error_tries.max(1),
-        })
+            max_error_tries,
+        }
     }
 }
 
@@ -191,7 +191,6 @@ mod tests {
             Box::new(InOrderPolicy),
             max_tries,
         )
-        .unwrap()
     }
 
     async fn execute(route: &FailoverRoute, request: Request) -> Result<Reply> {
@@ -352,8 +351,7 @@ mod tests {
             FailoverErrors::default(),
             Box::new(InOrderPolicy),
             1,
-        )
-        .unwrap();
+        );
         let (state, metrics, events) = instrumented_state();
         let context = state.context();
 
@@ -466,8 +464,7 @@ mod tests {
             FailoverErrors::default(),
             Box::new(LeastFailuresPolicy::new(2, 2)),
             usize::MAX,
-        )
-        .unwrap();
+        );
         let (state, metrics, _events) = instrumented_state();
         let context = state.context();
 
@@ -599,17 +596,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn empty_children_is_rejected() {
-        let route = FailoverRoute::new(
-            vec![],
-            FailoverErrors::default(),
-            Box::new(InOrderPolicy),
-            1,
-        );
-        assert!(route.is_none());
-    }
-
     #[tokio::test]
     async fn per_op_updates_empty_blocks_write_failover() {
         let primary = MockBackend::failing(timeout());
@@ -619,8 +605,7 @@ mod tests {
             FailoverErrors::new(None, Some(vec![]), None),
             Box::new(InOrderPolicy),
             2,
-        )
-        .unwrap();
+        );
 
         assert!(matches!(
             execute(&route, store(b"k", b"v")).await,
@@ -642,8 +627,7 @@ mod tests {
             FailoverErrors::default(),
             Box::new(InOrderPolicy),
             1,
-        )
-        .unwrap();
+        );
 
         assert!(execute(&route, get(b"k")).await.is_err());
         assert!(
@@ -664,8 +648,7 @@ mod tests {
             FailoverErrors::default(),
             Box::new(InOrderPolicy),
             1,
-        )
-        .unwrap();
+        );
 
         assert_eq!(execute(&route, get(b"k")).await.unwrap(), get_hit(b"1"));
     }
@@ -683,8 +666,7 @@ mod tests {
             FailoverErrors::default(),
             Box::new(InOrderPolicy),
             1,
-        )
-        .unwrap();
+        );
 
         assert_eq!(execute(&route, get(b"k")).await.unwrap(), get_hit(b"3"));
     }

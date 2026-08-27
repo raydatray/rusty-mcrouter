@@ -35,8 +35,8 @@ pub struct LeastFailuresPolicy {
 
 impl LeastFailuresPolicy {
     pub fn new(n: usize, max_tries: usize) -> Self {
-        assert!(n > 0, "least-failures requires at least one child");
-        assert!(max_tries > 0, "least-failures max_tries must be positive");
+        debug_assert!(n > 0);
+        debug_assert!(max_tries > 0);
         Self {
             failures: RefCell::new(vec![0; n]),
             max_tries: max_tries.min(n),
@@ -51,16 +51,16 @@ impl FailoverPolicy for LeastFailuresPolicy {
 
     fn failover_order(&self, _request: &Request, n: usize) -> Vec<usize> {
         let failures = self.failures.borrow();
+        debug_assert_eq!(n, failures.len());
         let mut backups: Vec<usize> = (1..n).collect();
-        backups.sort_by_key(|&i| failures.get(i).copied().unwrap_or(0));
-        backups.truncate(self.max_tries.saturating_sub(1));
+        backups.sort_by_key(|&i| failures[i]);
+        backups.truncate(self.max_tries - 1);
         backups
     }
 
     fn record_outcome(&self, child: usize, is_error: bool) {
-        if let Some(slot) = self.failures.borrow_mut().get_mut(child) {
-            *slot = if is_error { slot.saturating_add(1) } else { 0 };
-        }
+        let slot = &mut self.failures.borrow_mut()[child];
+        *slot = if is_error { slot.saturating_add(1) } else { 0 };
     }
 }
 

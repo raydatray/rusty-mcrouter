@@ -16,4 +16,3 @@ pub use crate::routes::{
     DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, Route, RouteError,
     RouteFuture,
 };
-pub use crate::selectors::SelectorBuildError;
