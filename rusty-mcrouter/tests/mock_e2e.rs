@@ -1,20 +1,15 @@
-use std::fmt::Write as _;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
 use rusty_mcrouter_backend::mock_memcached::{spawn_failing_mock_memcached, spawn_mock_memcached};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
-struct Stack {
-    router_addr: SocketAddr,
-    metrics_addr: SocketAddr,
-    _router: Child,
-    _config_path: PathBuf,
-}
+mod support;
+
+use support::{assert_series, exchange, scrape, RouterProcess};
+
+type Stack = RouterProcess;
 
 async fn start_router(config_body: &str, tag: u16) -> Stack {
     start_router_with_args(config_body, tag, 1, &[]).await
@@ -26,82 +21,7 @@ async fn start_router_with_args(
     num_proxies: usize,
     extra_args: &[&str],
 ) -> Stack {
-    let config_path = std::env::temp_dir().join(format!("rusty-mcrouter-mock-e2e-{tag}.json"));
-    std::fs::write(&config_path, config_body).unwrap();
-
-    let mut router = Command::new(env!("CARGO_BIN_EXE_rusty-mcrouter"))
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--num-proxies")
-        .arg(num_proxies.to_string())
-        .arg("--metrics-addr")
-        .arg("127.0.0.1:0")
-        .args(extra_args)
-        .env("RUSTY_MCROUTER_LISTEN", "127.0.0.1:0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-
-    let stdout = router.stdout.take().unwrap();
-    let mut lines = BufReader::new(stdout).lines();
-    let ready = lines
-        .next_line()
-        .await
-        .unwrap()
-        .expect("eof before READY line");
-    let router_addr: SocketAddr = ready
-        .strip_prefix("READY ")
-        .expect("expected READY prefix on stdout")
-        .parse()
-        .unwrap();
-    let metrics = lines
-        .next_line()
-        .await
-        .unwrap()
-        .expect("eof before METRICS line");
-    let metrics_addr: SocketAddr = metrics
-        .strip_prefix("METRICS ")
-        .expect("expected METRICS prefix on stdout")
-        .parse()
-        .unwrap();
-
-    Stack {
-        router_addr,
-        metrics_addr,
-        _router: router,
-        _config_path: config_path,
-    }
-}
-
-/// one GET /metrics scrape, returning the response body.
-async fn scrape(addr: SocketAddr) -> String {
-    let mut conn = TcpStream::connect(addr).await.unwrap();
-    conn.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
-        .await
-        .unwrap();
-    let mut response = Vec::new();
-    conn.read_to_end(&mut response).await.unwrap();
-    let response = String::from_utf8(response).unwrap();
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
-    response.split_once("\r\n\r\n").unwrap().1.to_string()
-}
-
-fn assert_series(body: &str, name: &str, labels: &[(&str, &str)], expected: u64) {
-    let mut rendered = String::from(name);
-    if !labels.is_empty() {
-        rendered.push('{');
-        for (index, (key, value)) in labels.iter().enumerate() {
-            if index != 0 {
-                rendered.push(',');
-            }
-            write!(rendered, "{key}=\"{value}\"").unwrap();
-        }
-        rendered.push('}');
-    }
-    writeln!(rendered, " {expected}").unwrap();
-    assert!(body.contains(&rendered), "missing {rendered:?} in:\n{body}");
+    RouterProcess::spawn(config_body, tag, num_proxies, extra_args).await
 }
 
 async fn start_stack() -> Stack {
@@ -114,32 +34,6 @@ async fn start_stack() -> Stack {
         backend_addr
     );
     start_router(&config_body, backend_addr.port()).await
-}
-
-/// Writes `request` and asserts the connection yields exactly `expected`,
-/// reassembling partial reads until the expected length arrives.
-async fn exchange(addr: SocketAddr, request: &[u8], expected: &[u8]) {
-    let mut conn = TcpStream::connect(addr).await.unwrap();
-    conn.write_all(request).await.unwrap();
-
-    let mut received = Vec::with_capacity(expected.len());
-    let deadline = tokio::time::timeout(Duration::from_secs(5), async {
-        let mut chunk = [0u8; 4096];
-        while received.len() < expected.len() {
-            let n = conn.read(&mut chunk).await.unwrap();
-            if n == 0 {
-                break;
-            }
-            received.extend_from_slice(&chunk[..n]);
-        }
-    });
-    deadline.await.expect("timed out waiting for reply bytes");
-    assert_eq!(
-        received,
-        expected,
-        "request {:?}",
-        String::from_utf8_lossy(request)
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -281,7 +175,7 @@ async fn null_route_sums_two_proxy_shards() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ctrl_c_stops_proxy_and_control_threads_cleanly() {
     let mut stack = start_router(r#"{ "route": "NullRoute" }"#, 60_003).await;
-    let pid = stack._router.id().expect("router process is running");
+    let pid = stack.pid();
     let status = Command::new("kill")
         .arg("-INT")
         .arg(pid.to_string())
@@ -290,10 +184,9 @@ async fn ctrl_c_stops_proxy_and_control_threads_cleanly() {
         .unwrap();
     assert!(status.success());
 
-    let status = tokio::time::timeout(Duration::from_secs(5), stack._router.wait())
+    let status = tokio::time::timeout(Duration::from_secs(5), stack.wait())
         .await
-        .expect("router did not stop after Ctrl-C")
-        .unwrap();
+        .expect("router did not stop after Ctrl-C");
     assert!(status.success(), "router exited with {status}");
 }
 

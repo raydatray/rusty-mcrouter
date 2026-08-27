@@ -2,24 +2,24 @@
 //! speaking the Meta protocol on both hops.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
 use testcontainers::{core::IntoContainerPort, runners::AsyncRunner, ContainerAsync, GenericImage};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::process::{Child, Command};
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
+
+mod support;
+
+use support::{exchange, RouterProcess};
 
 struct Fixture {
     router_addr: SocketAddr,
     // Held to keep the container/process alive for the entire test binary's
     // lifetime. Tests share one backend + one router instance via OnceCell.
     _backend: ContainerAsync<GenericImage>,
-    _router: Child,
-    _config_path: PathBuf,
+    _router: RouterProcess,
 }
 
 static FIXTURE: OnceCell<Fixture> = OnceCell::const_new();
@@ -63,44 +63,17 @@ async fn fixture() -> &'static Fixture {
                 }
             }
 
-            let config_path = std::env::temp_dir().join(format!(
-                "rusty-mcrouter-integration-{}.json",
-                std::process::id()
-            ));
             let config_body = format!(
                 r#"{{ "pools": {{ "memcached": {{ "servers": ["{}"] }} }}, "route": "PoolRoute|memcached" }}"#,
                 backend_addr
             );
-            std::fs::write(&config_path, &config_body).expect("write config file");
-
-            let mut router = Command::new(env!("CARGO_BIN_EXE_rusty-mcrouter"))
-                .arg("--config")
-                .arg(&config_path)
-                .env("RUSTY_MCROUTER_LISTEN", "127.0.0.1:0")
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .expect("spawn binary");
-
-            let stdout = router.stdout.take().expect("stdout pipe");
-            let mut lines = BufReader::new(stdout).lines();
-            let ready = lines
-                .next_line()
-                .await
-                .expect("read line")
-                .expect("eof before READY line");
-            let router_addr: SocketAddr = ready
-                .strip_prefix("READY ")
-                .expect("expected READY prefix on stdout")
-                .parse()
-                .expect("parse router addr");
+            let router = RouterProcess::spawn(&config_body, backend_port, 1, &[]).await;
+            let router_addr = router.router_addr;
 
             Fixture {
                 router_addr,
                 _backend: backend,
                 _router: router,
-                _config_path: config_path,
             }
         })
         .await
@@ -117,33 +90,6 @@ async fn wait_for_tcp(addr: SocketAddr, timeout: Duration) -> TcpStream {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-/// Writes `request` on a fresh connection and asserts it yields exactly
-/// `expected`, reassembling partial reads until the expected length arrives.
-async fn exchange(addr: SocketAddr, request: &[u8], expected: &[u8]) {
-    let mut conn = TcpStream::connect(addr).await.unwrap();
-    conn.write_all(request).await.unwrap();
-
-    let mut received = Vec::with_capacity(expected.len());
-    let read = tokio::time::timeout(Duration::from_secs(5), async {
-        let mut chunk = [0u8; 4096];
-        while received.len() < expected.len() {
-            let n = conn.read(&mut chunk).await.unwrap();
-            if n == 0 {
-                break;
-            }
-            received.extend_from_slice(&chunk[..n]);
-        }
-    });
-    read.await.expect("timed out waiting for reply bytes");
-    assert_eq!(
-        received,
-        expected,
-        "request {:?}: got {:?}",
-        String::from_utf8_lossy(request),
-        String::from_utf8_lossy(&received),
-    );
 }
 
 macro_rules! docker_test {
