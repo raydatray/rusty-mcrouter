@@ -48,6 +48,12 @@ pub enum ConfigError {
         value: u64,
     },
 
+    #[error("pool `{pool}` uses unsupported protocol `{protocol}`")]
+    UnsupportedPoolProtocol { pool: String, protocol: String },
+
+    #[error("pool `{pool}` option `{option}` is invalid")]
+    InvalidPoolOption { pool: String, option: &'static str },
+
     #[error("server object at `pools.{pool}.servers[{index}]` is not implemented")]
     UnsupportedServerObject { pool: String, index: usize },
 

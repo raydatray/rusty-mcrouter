@@ -1,0 +1,11 @@
+// source: mcrouter/test/test_basic_caret.json
+// expected rejection: the Caret destination protocol is not implemented.
+{
+  "pools": {
+    "foo": {
+      "servers": [ "localhost:12345" ],
+      "protocol": "caret"
+    }
+  },
+  "route": "PoolRoute|foo"
+}
