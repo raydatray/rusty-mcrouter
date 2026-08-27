@@ -3,13 +3,15 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+use rusty_mcrouter_config::PoolId;
+
 use crate::tko::{
     FailOpenThresholds, GlobalTkoMetrics, PoolTkoTracker, TkoEventRecord, TkoEventSink, TkoTracker,
 };
 
 pub struct TkoTrackerMap {
     trackers: Mutex<HashMap<Arc<str>, Weak<TkoTracker>>>,
-    pool_trackers: Mutex<HashMap<Arc<str>, Weak<PoolTkoTracker>>>,
+    pool_trackers: Mutex<HashMap<PoolId, Weak<PoolTkoTracker>>>,
     metrics: Arc<GlobalTkoMetrics>,
     sink: TkoEventSink,
 }
@@ -49,18 +51,20 @@ impl TkoTrackerMap {
 
     pub fn pool_tracker_for(
         self: &Arc<Self>,
+        id: PoolId,
         pool_name: &str,
         thresholds: FailOpenThresholds,
     ) -> Arc<PoolTkoTracker> {
         let mut pools = self.pool_trackers.lock().unwrap();
-        if let Some(existing) = pools.get(pool_name).and_then(Weak::upgrade) {
+        if let Some(existing) = pools.get(&id).and_then(Weak::upgrade) {
+            debug_assert_eq!(existing.name().as_ref(), pool_name);
             return existing;
         }
 
         let name: Arc<str> = Arc::from(pool_name);
         let tracker = Arc::new(PoolTkoTracker::new(Arc::clone(&name), thresholds));
 
-        pools.insert(name, Arc::downgrade(&tracker));
+        pools.insert(id, Arc::downgrade(&tracker));
 
         tracker
     }
@@ -120,6 +124,7 @@ mod tests {
 
     use super::*;
     use crate::classify::ResultCode;
+    use crate::test_support::{pool_id, pool_ids};
     use crate::tko::DestToken;
 
     #[test]
@@ -147,12 +152,13 @@ mod tests {
     }
 
     #[test]
-    fn pool_tracker_for_dedups_by_name() {
+    fn pool_tracker_for_dedups_by_id() {
         let map = TkoTrackerMap::new(noop_sink());
-        let a = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
-        let b = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
+        let ids = pool_ids(&["pool", "other"]);
+        let a = map.pool_tracker_for(ids[0], "pool", FailOpenThresholds { enter: 3, exit: 1 });
+        let b = map.pool_tracker_for(ids[0], "pool", FailOpenThresholds { enter: 3, exit: 1 });
         assert!(Arc::ptr_eq(&a, &b), "same pool must share one gate");
-        let c = map.pool_tracker_for("other", FailOpenThresholds { enter: 3, exit: 1 });
+        let c = map.pool_tracker_for(ids[1], "other", FailOpenThresholds { enter: 3, exit: 1 });
         assert!(!Arc::ptr_eq(&a, &c));
     }
 
@@ -161,8 +167,9 @@ mod tests {
     #[test]
     fn pool_snapshot_returns_live_and_prunes_dead() {
         let map = TkoTrackerMap::new(noop_sink());
-        let a = map.pool_tracker_for("pool_a", FailOpenThresholds { enter: 3, exit: 1 });
-        let _b = map.pool_tracker_for("pool_b", FailOpenThresholds { enter: 3, exit: 1 });
+        let ids = pool_ids(&["pool_a", "pool_b"]);
+        let a = map.pool_tracker_for(ids[0], "pool_a", FailOpenThresholds { enter: 3, exit: 1 });
+        let _b = map.pool_tracker_for(ids[1], "pool_b", FailOpenThresholds { enter: 3, exit: 1 });
 
         let snap = map.pool_snapshot();
         assert_eq!(snap.len(), 2);
@@ -243,7 +250,11 @@ mod tests {
     fn pool_reservation_undo_balances_under_contention() {
         let (sink, events) = recording_sink_with(|record: TkoEventRecord| record.event);
         let map = TkoTrackerMap::new(sink);
-        let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 8, exit: 1 });
+        let gate = map.pool_tracker_for(
+            pool_id("pool"),
+            "pool",
+            FailOpenThresholds { enter: 8, exit: 1 },
+        );
         let tracker = map.tracker_for("s:1", 1); // threshold 1: every attempt reserves
         tracker.set_pool_tracker(Arc::clone(&gate));
         let target_wins = 200u64;
@@ -289,7 +300,11 @@ mod tests {
     fn fail_open_hysteresis_emits_enter_and_exit_exactly_once() {
         let (sink, events) = recording_sink_with(|record: TkoEventRecord| record.event);
         let map = TkoTrackerMap::new(sink);
-        let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
+        let gate = map.pool_tracker_for(
+            pool_id("pool"),
+            "pool",
+            FailOpenThresholds { enter: 3, exit: 1 },
+        );
 
         let boxes: Vec<_> = (0..5)
             .map(|i| {

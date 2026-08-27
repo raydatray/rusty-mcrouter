@@ -344,6 +344,14 @@ mod tests {
         RoutingMetricsLayout::new(&config)
     }
 
+    fn pool_id(name: &str) -> rusty_mcrouter_config::PoolId {
+        let config = parse(&format!(
+            r#"{{"pools":{{"{name}":{{"servers":["{name}:1"]}}}},"route":"NullRoute"}}"#
+        ))
+        .unwrap();
+        config.pool_id(name).unwrap()
+    }
+
     #[test]
     fn backend_sources_sum_real_shards() {
         let s1 = BackendMetricsShard::new();
@@ -442,7 +450,11 @@ mod tests {
 
         // drive the gate directly into fail-open (enter=1: one slot
         // admitted, the next reservation flips the gate)
-        let gate = map.pool_tracker_for("pool_a", FailOpenThresholds { enter: 1, exit: 1 });
+        let gate = map.pool_tracker_for(
+            pool_id("pool_a"),
+            "pool_a",
+            FailOpenThresholds { enter: 1, exit: 1 },
+        );
         gate.inc_num_destinations_tko();
         gate.inc_num_destinations_tko();
 

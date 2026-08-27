@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusty_mcrouter_config::ServerConfig;
+use rusty_mcrouter_config::{parse, PoolId, ServerConfig};
 use rusty_mcrouter_protocol::test_support::get_miss;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,6 +48,23 @@ pub fn event_log() -> (Box<dyn Fn(ConnectionEvent)>, ConnectionEventLog) {
         Box::new(move |ev| log.borrow_mut().push(ev)) as Box<dyn Fn(ConnectionEvent)>
     };
     (sink, log)
+}
+
+pub fn pool_ids(names: &[&str]) -> Vec<PoolId> {
+    let pools = names
+        .iter()
+        .map(|name| format!(r#""{name}":{{"servers":["{name}:1"]}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let config = parse(&format!(r#"{{"pools":{{{pools}}},"route":"NullRoute"}}"#)).unwrap();
+    names
+        .iter()
+        .map(|name| config.pool_id(name).unwrap())
+        .collect()
+}
+
+pub fn pool_id(name: &str) -> PoolId {
+    pool_ids(&[name])[0]
 }
 
 /// Recording in-process `Backend` double: records every request, answers with
