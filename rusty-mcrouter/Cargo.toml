@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+docker-tests = ["dep:testcontainers"]
+
 [lints]
 workspace = true
 
@@ -18,10 +21,15 @@ rusty-mcrouter-observability = { path = "../rusty-mcrouter-observability" }
 rusty-mcrouter-proxy = { path = "../rusty-mcrouter-proxy" }
 tokio = { workspace = true, features = ["signal", "sync"] }
 tracing.workspace = true
+testcontainers = { workspace = true, optional = true }
 
 [dev-dependencies]
 rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend", features = ["testing"] }
 rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives", features = ["testing"] }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol", features = ["testing"] }
-testcontainers.workspace = true
 tokio = { workspace = true, features = ["full"] }
+
+[[test]]
+name = "memcached_compat"
+path = "tests/memcached_compat.rs"
+required-features = ["docker-tests"]
