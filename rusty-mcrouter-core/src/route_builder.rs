@@ -1,9 +1,7 @@
 use std::{collections::BTreeMap, rc::Rc, time::Duration};
 
 use rusty_mcrouter_backend::tko::FailOpenThresholds;
-use rusty_mcrouter_backend::{
-    destination, Backend, BackendFactory, BackendFactoryError, PoolHealth,
-};
+use rusty_mcrouter_backend::{destination, Backend, BackendFactory, PoolHealth};
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
     PoolId, RouteConfig,
@@ -21,14 +19,6 @@ use crate::{
 pub enum BuildError {
     #[error("pool `{name}` is missing from the routing metrics layout")]
     PoolMissingFromMetricsLayout { name: String },
-
-    #[error("invalid server `{server}` in pool `{pool}`: {source}")]
-    InvalidServer {
-        pool: String,
-        server: String,
-        #[source]
-        source: BackendFactoryError,
-    },
 }
 
 type Result<T> = std::result::Result<T, BuildError>;
@@ -147,14 +137,7 @@ where
         let mut destinations = Vec::with_capacity(pool_config.servers().len());
 
         for server in pool_config.servers() {
-            let backend = self
-                .factory
-                .make(server.access_point(), &dest_cfg, &pool_health)
-                .map_err(|source| BuildError::InvalidServer {
-                    pool: pool_name.to_string(),
-                    server: server.access_point().to_string(),
-                    source,
-                })?;
+            let backend = self.factory.make(server, &dest_cfg, &pool_health);
             destinations.push(Rc::new(DestinationRoute::<F::Backend>::for_pool(
                 backend, pool_index,
             )));
@@ -288,16 +271,6 @@ mod tests {
         })
     }
 
-    fn expect_err<F>(cfg: &ConfigDocument, factory: &F) -> BuildError
-    where
-        F: BackendFactory,
-    {
-        match build(cfg, factory) {
-            Err(e) => e,
-            Ok(_) => panic!("expected build_route to fail, but it succeeded"),
-        }
-    }
-
     async fn execute(fixture: &BuiltRoute, request: Request) -> crate::routes::Result<Reply> {
         let context = fixture.state.context();
         let result = fixture.route.route_dyn(&context, request).await;
@@ -395,19 +368,6 @@ mod tests {
         let route = build(&cfg, &factory).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(reply, server_error(b"down"));
-    }
-
-    #[test]
-    fn errors_on_invalid_server_with_clear_message() {
-        let cfg =
-            parse(r#"{"pools": {"P": {"servers": ["127.0.0.1:1"]}}, "route": "PoolRoute|P"}"#)
-                .unwrap();
-        let err = expect_err(&cfg, &MockBackendFactory::failing("127.0.0.1:1"));
-        let BuildError::InvalidServer { pool, server, .. } = &err else {
-            panic!("expected InvalidServer, got {err:?}");
-        };
-        assert_eq!(pool, "P");
-        assert_eq!(server, "127.0.0.1:1");
     }
 
     #[test]

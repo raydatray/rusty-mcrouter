@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rusty_mcrouter_config::ServerConfig;
 use rusty_mcrouter_protocol::test_support::get_miss;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -21,7 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub use crate::connection::{ConnectionEvent, DownReason};
 
 use crate::error::SendError;
-use crate::{Backend, BackendFactory, BackendFactoryError, PoolHealth, PreparedSend, TkoRejection};
+use crate::{Backend, BackendFactory, PoolHealth, PreparedSend, TkoRejection};
 
 /// Runs a future inside a fresh `LocalSet`. The backend connection actor is
 /// spawned via
@@ -116,16 +117,11 @@ impl Backend for MockBackend {
 
 /// A [`BackendFactory`] handing out [`MockBackend`]s without opening sockets.
 ///
-/// Two DIFFERENT failure knobs for two different layers:
-/// - `failing(addr)`: `make()` errors for that address — drives the route
-///   BUILDER's invalid-server path
-/// - `MockBackend::failing(SendError)`: `send()` errors — drives
-///   failover/route BEHAVIOR tests (in the lazy world, a dead server still
-///   builds successfully)
+/// `MockBackend::failing(SendError)` drives failover and route behavior tests;
+/// in the lazy world, a dead server still builds successfully.
 #[derive(Clone, Default)]
 pub struct MockBackendFactory {
     reply: Option<Reply>,
-    fail_addr: Option<String>,
     made: Arc<Mutex<Vec<String>>>,
 }
 
@@ -141,13 +137,6 @@ impl MockBackendFactory {
         }
     }
 
-    pub fn failing(addr: impl Into<String>) -> Self {
-        Self {
-            fail_addr: Some(addr.into()),
-            ..Self::default()
-        }
-    }
-
     /// Every address a backend was made for, in order.
     pub fn made(&self) -> Vec<String> {
         self.made.lock().unwrap().clone()
@@ -159,19 +148,15 @@ impl BackendFactory for MockBackendFactory {
 
     fn make(
         &self,
-        server: &str,
+        server: &ServerConfig,
         _cfg: &crate::destination::DestinationConfig,
         _pool: &PoolHealth<'_>,
-    ) -> Result<MockBackend, BackendFactoryError> {
-        if self.fail_addr.as_deref() == Some(server) {
-            return Err(BackendFactoryError::InvalidAddress {
-                addr: server.to_string(),
-            });
-        }
-        self.made.lock().unwrap().push(server.to_string());
-        Ok(MockBackend::replying(
-            self.reply.clone().unwrap_or_else(get_miss),
-        ))
+    ) -> MockBackend {
+        self.made
+            .lock()
+            .unwrap()
+            .push(server.access_point().to_string());
+        MockBackend::replying(self.reply.clone().unwrap_or_else(get_miss))
     }
 }
 

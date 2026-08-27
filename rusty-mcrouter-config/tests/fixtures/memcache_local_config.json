@@ -1,8 +1,9 @@
 // source: mcrouter/test/cpp_unit_tests/files/memcache_local_config.json
+// adapted: replace the test harness's PORT token with a concrete port.
 {
   "pools": {
     "A": {
-      "servers": [ "localhost:PORT" ]
+      "servers": [ "localhost:11211" ]
     }
   },
   "route": "PoolRoute|A"
