@@ -99,9 +99,7 @@ where
                 }
                 let errors = build_failover_errors(failover_errors);
                 let (policy, max_error_tries) = build_failover_policy(failover_policy, built.len());
-                FailoverRoute::new(built, errors, policy, max_error_tries)
-                    .map(Route::into_dyn)
-                    .ok_or_else(|| unreachable!("config parsing rejects empty failovers"))
+                Ok(FailoverRoute::new(built, errors, policy, max_error_tries).into_dyn())
             }
         }
     }
@@ -116,7 +114,6 @@ where
 
         let pool_config = self.config.pool(pool_id);
         let pool_name = pool_config.name();
-        debug_assert!(!pool_config.servers().is_empty());
 
         let pool_index = self
             .metrics_layout
@@ -187,7 +184,7 @@ where
 
 fn build_selector(hash: &HashConfig, n: usize) -> Box<dyn Selector> {
     let base: Box<dyn Selector> = match hash.func {
-        HashFunc::Ch3 => Box::new(Ch3::new(n).expect("config parsing validates Ch3 pool size")),
+        HashFunc::Ch3 => Box::new(Ch3::new(n)),
         HashFunc::Crc32 => Box::new(Crc32::new(n)),
     };
 

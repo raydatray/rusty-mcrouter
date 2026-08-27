@@ -32,14 +32,14 @@ mod tests {
     use crate::selectors::Ch3;
 
     fn boxed_ch3(n: usize) -> Box<dyn Selector> {
-        Box::new(Ch3::new(n).unwrap())
+        Box::new(Ch3::new(n))
     }
 
     #[test]
     fn empty_salt_matches_unsalted() {
         let n = 128;
         let salted = Salted::new(boxed_ch3(n), Vec::new());
-        let plain = Ch3::new(n).unwrap();
+        let plain = Ch3::new(n);
         for i in 0..500u32 {
             let key = format!("k{i}");
             assert_eq!(salted.select(key.as_bytes()), plain.select(key.as_bytes()));
