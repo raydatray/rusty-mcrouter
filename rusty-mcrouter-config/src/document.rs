@@ -24,6 +24,9 @@ pub enum ConfigError {
 
     #[error("invalid tko_tracker for pool `{pool}`: {reason}")]
     InvalidPoolTkoTracker { pool: String, reason: &'static str },
+
+    #[error("server object at `pools.{pool}.servers[{index}]` is not implemented")]
+    UnsupportedServerObject { pool: String, index: usize },
 }
 
 type ConfigResult<T> = std::result::Result<T, ConfigError>;
@@ -222,7 +225,7 @@ mod tests {
         let doc =
             parse_ok(r#"{ "pools": { "foo": { "servers": ["a:1"] } }, "route": "PoolRoute|foo" }"#);
         assert_eq!(doc.pools.len(), 1);
-        assert_eq!(doc.pools["foo"].servers, vec!["a:1"]);
+        assert_eq!(doc.pools["foo"].servers[0].access_point(), "a:1");
         assert!(matches!(
             doc.route,
             RouteEntry::Single(RouteHandleConfig::Shorthand { ref kind, ref args })

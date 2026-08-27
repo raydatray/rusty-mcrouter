@@ -37,7 +37,10 @@ fn nullroute_minimal_config() {
 fn basic_1_1_1_canonical_pool_and_route() {
     let doc = parse_ok("basic_1_1_1.json");
     assert_eq!(doc.pools.len(), 1);
-    assert_eq!(doc.pools["foo"].servers, vec!["localhost:12345"]);
+    assert_eq!(
+        doc.pools["foo"].servers[0].access_point(),
+        "localhost:12345"
+    );
 
     let RouteEntry::Single(RouteHandleConfig::Shorthand { kind, args }) = &doc.route else {
         panic!("expected Shorthand, got {:?}", doc.route);
@@ -137,7 +140,10 @@ fn duplicate_servers_uses_routes_plural_with_aliases() {
 #[test]
 fn comments_in_jsonc_are_stripped() {
     let doc = parse_ok("with_comments.json");
-    assert_eq!(doc.pools["foo"].servers, vec!["localhost:11211"]);
+    assert_eq!(
+        doc.pools["foo"].servers[0].access_point(),
+        "localhost:11211"
+    );
     assert!(matches!(
         doc.route,
         RouteEntry::Single(RouteHandleConfig::Shorthand { ref kind, .. }) if kind == "PoolRoute"
