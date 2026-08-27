@@ -41,6 +41,13 @@ pub enum ConfigError {
     #[error("invalid tko_tracker for pool `{pool}`: {reason}")]
     InvalidPoolTkoTracker { pool: String, reason: &'static str },
 
+    #[error("{field} for pool `{pool}` must be in 1..=1000000 ms, got {value}")]
+    InvalidPoolTimeout {
+        pool: String,
+        field: &'static str,
+        value: u64,
+    },
+
     #[error("server object at `pools.{pool}.servers[{index}]` is not implemented")]
     UnsupportedServerObject { pool: String, index: usize },
 
