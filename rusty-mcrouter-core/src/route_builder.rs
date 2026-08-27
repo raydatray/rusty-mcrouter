@@ -215,10 +215,10 @@ where
         for server in &pool_config.servers {
             let backend = self
                 .factory
-                .make(server.as_str(), &dest_cfg, &pool_health)
+                .make(server.access_point(), &dest_cfg, &pool_health)
                 .map_err(|source| BuildError::InvalidServer {
                     pool: pool_name.to_string(),
-                    server: server.clone(),
+                    server: server.access_point().to_string(),
                     source,
                 })?;
             destinations.push(Rc::new(DestinationRoute::<F::Backend>::for_pool(

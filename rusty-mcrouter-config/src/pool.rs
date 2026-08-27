@@ -1,9 +1,11 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::{server::RawServerConfig, ConfigError, ServerConfig};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PoolConfig {
-    pub servers: Vec<String>,
+    pub servers: Vec<ServerConfig>,
     pub server_timeout_ms: Option<u64>,
     pub connect_timeout_ms: Option<u64>,
     pub tko_tracker: Option<PoolTkoTrackerConfig>,
@@ -12,7 +14,7 @@ pub struct PoolConfig {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawPoolConfig {
-    pub servers: Vec<String>,
+    pub servers: Vec<RawServerConfig>,
     #[serde(default, rename = "server_timeout")]
     server_timeout_ms: Option<u64>,
     #[serde(default, rename = "connect_timeout")]
@@ -53,13 +55,20 @@ struct RawPoolTkoTrackerConfig {
 
 impl RawPoolConfig {
     pub(crate) fn validate(self, name: &str) -> Result<PoolConfig, ConfigError> {
+        let servers = self
+            .servers
+            .into_iter()
+            .enumerate()
+            .map(|(index, server)| server.validate(name, index))
+            .collect::<Result<Vec<_>, _>>()?;
+
         let tko_tracker = self
             .tko_tracker
-            .map(|config| config.validate(name, self.servers.len()))
+            .map(|config| config.validate(name, servers.len()))
             .transpose()?;
 
         Ok(PoolConfig {
-            servers: self.servers,
+            servers,
             server_timeout_ms: self.server_timeout_ms,
             connect_timeout_ms: self.connect_timeout_ms,
             tko_tracker,
@@ -139,7 +148,7 @@ mod tests {
     fn parse_pool_with_one_server() {
         let pool = pool(r#"{ "servers": ["localhost:11211"] }"#);
 
-        assert_eq!(pool.servers, vec!["localhost:11211".to_string()]);
+        assert_eq!(pool.servers[0].access_point(), "localhost:11211");
         assert!(pool.extra.is_empty())
     }
 
@@ -225,6 +234,18 @@ mod tests {
         let json = r#"{ "servers": "localhost:1" }"#;
 
         assert!(serde_json::from_str::<RawPoolConfig>(json).is_err());
+    }
+
+    #[test]
+    fn rejects_server_objects_until_route_servers_are_supported() {
+        let raw =
+            serde_json::from_str::<RawPoolConfig>(r#"{ "servers": [{ "type": "ErrorRoute" }] }"#)
+                .unwrap();
+
+        assert!(matches!(
+            raw.validate("test"),
+            Err(ConfigError::UnsupportedServerObject { .. })
+        ));
     }
 
     #[test]
