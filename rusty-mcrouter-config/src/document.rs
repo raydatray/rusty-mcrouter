@@ -1,10 +1,11 @@
 use std::{
     collections::BTreeMap,
+    fmt,
     path::{Path, PathBuf},
 };
 
 use json_comments::StripComments;
-use serde::de::{self, Deserializer};
+use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -372,21 +373,39 @@ fn deserialize_named_handles<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    let value = Value::deserialize(deserializer)?;
-    match value {
-        Value::Object(map) => map
-            .into_iter()
-            .map(|(name, val)| {
-                let route = serde_json::from_value(val).map_err(de::Error::custom)?;
+    struct NamedHandlesVisitor;
 
-                Ok((name, route))
-            })
-            .collect(),
-        Value::Array(items) => {
+    impl<'de> Visitor<'de> for NamedHandlesVisitor {
+        type Value = BTreeMap<String, RawRouteConfig>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a named_handles object or array")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
             let mut handles = BTreeMap::new();
-            for item in items {
-                let mut obj = match item {
-                    Value::Object(o) => o,
+            while let Some(name) = map.next_key::<String>()? {
+                if handles.contains_key(&name) {
+                    return Err(de::Error::custom(format!(
+                        "duplicate named handle `{name}`"
+                    )));
+                }
+                handles.insert(name, map.next_value()?);
+            }
+            Ok(handles)
+        }
+
+        fn visit_seq<S>(self, mut sequence: S) -> Result<Self::Value, S::Error>
+        where
+            S: SeqAccess<'de>,
+        {
+            let mut handles = BTreeMap::new();
+            while let Some(item) = sequence.next_element::<Value>()? {
+                let mut object = match item {
+                    Value::Object(object) => object,
                     other => {
                         return Err(de::Error::custom(format!(
                             "named_handles list item must be an object, got {other}"
@@ -394,8 +413,8 @@ where
                     }
                 };
 
-                let name = match obj.remove("name") {
-                    Some(Value::String(s)) => s,
+                let name = match object.remove("name") {
+                    Some(Value::String(name)) => name,
                     Some(_) => return Err(de::Error::custom("`name` must be a string")),
                     None => {
                         return Err(de::Error::custom(
@@ -404,8 +423,8 @@ where
                     }
                 };
 
-                let route: RawRouteConfig =
-                    serde_json::from_value(Value::Object(obj)).map_err(de::Error::custom)?;
+                let route =
+                    serde_json::from_value(Value::Object(object)).map_err(de::Error::custom)?;
                 if handles.insert(name.clone(), route).is_some() {
                     return Err(de::Error::custom(format!(
                         "duplicate named handle `{name}`"
@@ -414,10 +433,9 @@ where
             }
             Ok(handles)
         }
-        other => Err(de::Error::custom(format!(
-            "named_handles must be an object or array, got {other}"
-        ))),
     }
+
+    deserializer.deserialize_any(NamedHandlesVisitor)
 }
 
 #[derive(Deserialize)]
@@ -674,6 +692,22 @@ mod tests {
                         { "name": "same", "type": "NullRoute" },
                         { "name": "same", "type": "ErrorRoute" }
                     ],
+                    "route": "same"
+                }"#
+            ),
+            ConfigError::Schema { ref path, .. } if path == "named_handles"
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_object_form_named_handles() {
+        assert!(matches!(
+            parse_err(
+                r#"{
+                    "named_handles": {
+                        "same": { "type": "NullRoute" },
+                        "same": { "type": "ErrorRoute" }
+                    },
                     "route": "same"
                 }"#
             ),
