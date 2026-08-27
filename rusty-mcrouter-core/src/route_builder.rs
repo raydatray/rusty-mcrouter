@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, rc::Rc, time::Duration};
 
 use rusty_mcrouter_backend::tko::FailOpenThresholds;
-use rusty_mcrouter_backend::{destination, Backend, BackendFactory, PoolHealth};
+use rusty_mcrouter_backend::{destination, Backend, BackendFactory, PoolFailOpen, PoolHealth};
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
     PoolId, RouteConfig,
@@ -119,10 +119,13 @@ where
 
         let dest_cfg = pool_destination_config(self.defaults, pool_config);
         let pool_health = PoolHealth {
-            pool_name,
-            fail_open: pool_config.tko_tracker().map(|config| FailOpenThresholds {
-                enter: config.enter(),
-                exit: config.exit(),
+            fail_open: pool_config.tko_tracker().map(|config| PoolFailOpen {
+                id: pool_id,
+                name: pool_name,
+                thresholds: FailOpenThresholds {
+                    enter: config.enter(),
+                    exit: config.exit(),
+                },
             }),
         };
 

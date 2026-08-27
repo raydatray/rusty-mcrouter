@@ -121,7 +121,7 @@ mod tests {
     use super::*;
     use crate::classify::ResultCode;
     use crate::error::{RequestError, SendError};
-    use crate::test_support::{run_local, scripted_backend_serial, Step};
+    use crate::test_support::{pool_id, run_local, scripted_backend_serial, Step};
     use crate::tko::{DestToken, FailOpenThresholds};
     use crate::Backend;
 
@@ -222,7 +222,11 @@ mod tests {
                 BackendMetricsShard::new(),
                 DestinationMetricsRegistry::new(),
             );
-            let gate = tko.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
+            let gate = tko.pool_tracker_for(
+                pool_id("pool"),
+                "pool",
+                FailOpenThresholds { enter: 1, exit: 1 },
+            );
 
             let a1 = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             let a2 = map.destination(

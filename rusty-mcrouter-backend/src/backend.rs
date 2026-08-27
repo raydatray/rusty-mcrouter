@@ -1,14 +1,16 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rusty_mcrouter_config::ServerConfig;
+use rusty_mcrouter_config::{PoolId, ServerConfig};
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::classify::ResultCode;
 use crate::destination::{self, Destination, DestinationKey, Map};
 use crate::error::SendError;
-use crate::tko::FailOpenThresholds;
+use crate::tko::{FailOpenThresholds, PoolTkoTracker};
 
 pub trait Backend: 'static {
     fn prepare_send(
@@ -48,22 +50,21 @@ where
     }
 }
 
-/// Pool identity the factory needs to resolve the fail-open gate.
+#[derive(Clone, Copy)]
+pub struct PoolFailOpen<'a> {
+    pub id: PoolId,
+    pub name: &'a str,
+    pub thresholds: FailOpenThresholds,
+}
+
+#[derive(Clone, Copy, Default)]
 pub struct PoolHealth<'a> {
-    pub pool_name: &'a str,
-    /// Resolved fail-open thresholds, if the pool configured a tko_tracker
-    /// block. None = no gate (the default). Threshold resolution (num vs
-    /// percent) is the route builder's job.
-    pub fail_open: Option<FailOpenThresholds>,
+    pub fail_open: Option<PoolFailOpen<'a>>,
 }
 
 impl PoolHealth<'_> {
-    /// The common case: a pool with no fail-open gate.
-    pub fn ungated(pool_name: &str) -> PoolHealth<'_> {
-        PoolHealth {
-            pool_name,
-            fail_open: None,
-        }
+    pub fn ungated() -> Self {
+        Self::default()
     }
 }
 
@@ -88,11 +89,31 @@ pub trait BackendFactory {
 /// destination map (and, transitively, sharing TKO trackers across threads).
 pub struct DestinationFactory {
     map: Rc<Map>,
+    pool_gates: RefCell<HashMap<PoolId, Arc<PoolTkoTracker>>>,
 }
 
 impl DestinationFactory {
     pub fn new(map: Rc<Map>) -> DestinationFactory {
-        DestinationFactory { map }
+        DestinationFactory {
+            map,
+            pool_gates: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn pool_gate(&self, pool: &PoolHealth<'_>) -> Option<Arc<PoolTkoTracker>> {
+        let config = pool.fail_open?;
+        if let Some(gate) = self.pool_gates.borrow().get(&config.id) {
+            return Some(Arc::clone(gate));
+        }
+
+        let gate = self
+            .map
+            .tko_map()
+            .pool_tracker_for(config.id, config.name, config.thresholds);
+        self.pool_gates
+            .borrow_mut()
+            .insert(config.id, Arc::clone(&gate));
+        Some(gate)
     }
 }
 
@@ -105,16 +126,11 @@ impl BackendFactory for DestinationFactory {
         cfg: &destination::DestinationConfig,
         pool: &PoolHealth<'_>,
     ) -> Rc<Destination> {
-        let gate = pool.fail_open.map(|thresholds| {
-            self.map
-                .tko_map()
-                .pool_tracker_for(pool.pool_name, thresholds)
-        });
         let key = DestinationKey {
             addr: Arc::from(server.access_point()),
             reply_timeout: cfg.reply_timeout,
         };
-        self.map.destination(key, cfg, gate)
+        self.map.destination(key, cfg, self.pool_gate(pool))
     }
 }
 
@@ -166,7 +182,7 @@ mod tests {
         run_local(async {
             let (_tko, factory) = factory();
             let cfg = destination::DestinationConfig::default();
-            let pool = PoolHealth::ungated("pool");
+            let pool = PoolHealth::ungated();
 
             // no listener at this addr: make still succeeds (lazy)
             let server = server("127.0.0.1:9");
@@ -185,13 +201,20 @@ mod tests {
         run_local(async {
             let (_tko, factory) = factory();
             let cfg = destination::DestinationConfig::default();
+            let config =
+                parse(r#"{"pools":{"gated":{"servers":["gated:1"]}},"route":"NullRoute"}"#)
+                    .unwrap();
             let pool = PoolHealth {
-                pool_name: "gated",
-                fail_open: Some(FailOpenThresholds { enter: 1, exit: 1 }),
+                fail_open: Some(PoolFailOpen {
+                    id: config.pool_id("gated").unwrap(),
+                    name: "gated",
+                    thresholds: FailOpenThresholds { enter: 1, exit: 1 },
+                }),
             };
 
             let a = factory.make(&server("127.0.0.1:9"), &cfg, &pool);
             let b = factory.make(&server("127.0.0.1:10"), &cfg, &pool);
+            assert_eq!(factory.pool_gates.borrow().len(), 1);
 
             assert!(a
                 .tracker()
@@ -215,7 +238,7 @@ mod tests {
             let backend = factory.make(
                 &self::server(&server.addr.to_string()),
                 &destination::DestinationConfig::default(),
-                &PoolHealth::ungated("pool"),
+                &PoolHealth::ungated(),
             );
 
             let reply = through_trait(&backend, get(b"key")).await.unwrap();
