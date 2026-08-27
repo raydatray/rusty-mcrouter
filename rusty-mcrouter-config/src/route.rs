@@ -1,6 +1,6 @@
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
-use serde::de::{self, Deserialize, Deserializer};
+use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value};
 
 use crate::PoolId;
@@ -123,15 +123,44 @@ impl<'de> Deserialize<'de> for RawRouteConfig {
     where
         D: Deserializer<'de>,
     {
-        let value = Value::deserialize(deserializer)?;
-        match value {
-            Value::String(s) => Ok(parse_string_form(&s)),
-            Value::Object(map) => parse_object_form(map).map_err(de::Error::custom),
-            other => Err(de::Error::custom(format!(
-                "route handle must be a string or obejct, got {}",
-                other
-            ))),
+        struct RawRouteConfigVisitor;
+
+        impl<'de> Visitor<'de> for RawRouteConfigVisitor {
+            type Value = RawRouteConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a route string or object")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(parse_string_form(value))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(parse_string_form(&value))
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut fields = Map::new();
+                while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                    if fields.insert(key.clone(), value).is_some() {
+                        return Err(de::Error::custom(format!("duplicate route field `{key}`")));
+                    }
+                }
+                parse_object_form(fields).map_err(de::Error::custom)
+            }
         }
+
+        deserializer.deserialize_any(RawRouteConfigVisitor)
     }
 }
 
@@ -527,6 +556,18 @@ mod tests {
     fn rejects_object_without_type() {
         let err = serde_json::from_str::<RawRouteConfig>(r#"{ "pool": "A" }"#).unwrap_err();
         assert!(err.to_string().contains("type"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_route_fields() {
+        for json in [
+            r#"{ "type": "PoolRoute", "type": "NullRoute", "pool": "A" }"#,
+            r#"{ "type": "PoolRoute", "pool": "A", "pool": "B" }"#,
+            r#"{ "type": "PoolRoute", "pool": "A", "hash": "Ch3", "hash": "Crc32" }"#,
+        ] {
+            let error = serde_json::from_str::<RawRouteConfig>(json).unwrap_err();
+            assert!(error.to_string().contains("duplicate route field"));
+        }
     }
 
     #[test]
