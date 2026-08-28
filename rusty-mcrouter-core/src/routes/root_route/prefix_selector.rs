@@ -1,9 +1,8 @@
 use std::rc::Rc;
 
-use crate::{
-    lower_bound_prefix_map::{LowerBoundPrefixMap, PrefixValue},
-    DynRoute,
-};
+use crate::DynRoute;
+
+use super::lower_bound_prefix_map::{LowerBoundPrefixMap, PrefixValue};
 
 pub(crate) struct PrefixPolicy {
     prefix: Vec<u8>,

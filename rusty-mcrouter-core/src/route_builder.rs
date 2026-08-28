@@ -15,12 +15,9 @@ use thiserror::Error;
 
 use crate::{
     failover::{code_of_kind, FailoverErrors, FailoverPolicy, InOrderPolicy, LeastFailuresPolicy},
-    prefix_selector::{PrefixPolicy, PrefixSelector},
-    route_policy_map::RoutePolicyMap,
-    route_target_map::{RootRouteOptions, RouteTargetMap},
     routes::{
-        DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, RootRoute,
-        Route,
+        DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, PrefixPolicy,
+        PrefixSelector, RootRoute, RootRouteOptions, Route, RoutePolicyMap, RouteTargetMap,
     },
     selectors::{Ch3, Crc32, Salted, Selector},
     RoutingMetricsLayout,
