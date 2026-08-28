@@ -2,7 +2,7 @@ use std::{collections::HashMap, rc::Rc};
 
 use rusty_mcrouter_config::RoutingPrefix;
 
-use crate::{route_pattern, route_policy_map::RoutePolicyMap, DynRoute};
+use crate::{route_policy_map::RoutePolicyMap, DynRoute};
 
 #[derive(Clone, Debug)]
 pub struct RootRouteOptions {
@@ -143,7 +143,7 @@ impl RouteTargetMap {
         let mut targets = Vec::new();
 
         for configured in &self.ordered_routes {
-            if route_pattern::matches(pattern, &configured.prefix) {
+            if matches_route_pattern(pattern, &configured.prefix) {
                 append_unique(&mut targets, configured.route_map.targets(routing_key));
             }
         }
@@ -173,5 +173,105 @@ fn append_unique(targets: &mut Vec<Rc<dyn DynRoute>>, candidates: &[Rc<dyn DynRo
         if !targets.iter().any(|target| Rc::ptr_eq(target, candidate)) {
             targets.push(Rc::clone(candidate));
         }
+    }
+}
+
+fn matches_route_pattern(pattern: &[u8], route: &[u8]) -> bool {
+    if pattern.is_empty() || route.is_empty() {
+        return pattern.is_empty() && route.is_empty();
+    }
+
+    let mut pattern_index = 0;
+    let mut route_index = 0;
+    let mut star_pattern = None;
+    let mut star_route = 0;
+
+    while route_index < route.len() {
+        if pattern_index < pattern.len()
+            && pattern[pattern_index] != b'*'
+            && pattern[pattern_index] == route[route_index]
+        {
+            pattern_index += 1;
+            route_index += 1;
+            continue;
+        }
+
+        if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+                pattern_index += 1;
+            }
+
+            if pattern_index == pattern.len() {
+                return !route[route_index..].contains(&b'/');
+            }
+
+            star_pattern = Some(pattern_index);
+            star_route = route_index;
+            continue;
+        }
+
+        let Some(retry_pattern) = star_pattern else {
+            return false;
+        };
+        if star_route == route.len() || route[star_route] == b'/' {
+            return false;
+        }
+
+        star_route += 1;
+        route_index = star_route;
+        pattern_index = retry_pattern;
+    }
+
+    pattern_index == pattern.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_upstream_route_patterns() {
+        for (pattern, route) in [
+            ("/a/b/", "/a/b/"),
+            ("/a/*/", "/a/b/"),
+            ("/a/a*c/", "/a/abc/"),
+            ("/a/a*c/", "/a/abbbbbbbbbbbbbbbc/"),
+            ("/a*c/d*f/", "/abbbbc/deeeeeeeeeeeef/"),
+            ("/a****/d*f/", "/abbbbc/deeeeeeeeeeeef/"),
+            ("/*/*/", "/aaa/bbb/"),
+            ("/*baf*/", "/aaabafggg/"),
+            ("/*1*2*3*4*5/", "/aaa1bbb2bbb3af4sdgfsdg5/"),
+            ("*", "a"),
+            ("/*a/a/", "/a/a/"),
+            ("/a/*a/", "/a/a/"),
+        ] {
+            assert!(
+                matches_route_pattern(pattern.as_bytes(), route.as_bytes()),
+                "{pattern} {route}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_upstream_route_non_matches() {
+        for (pattern, route) in [
+            ("*", ""),
+            ("*", "/"),
+            ("*/*/", "a/b"),
+            ("*", "a/b"),
+            ("****", "/b"),
+        ] {
+            assert!(
+                !matches_route_pattern(pattern.as_bytes(), route.as_bytes()),
+                "{pattern} {route}"
+            );
+        }
+    }
+
+    #[test]
+    fn matches_arbitrary_bytes_without_crossing_slashes() {
+        assert!(matches_route_pattern(b"/a\xff*/b/", b"/a\xffx/b/"));
+        assert!(!matches_route_pattern(b"/a*/b/", b"/a/x/b/"));
+        assert!(!matches_route_pattern(b"a*", b"a"));
     }
 }
