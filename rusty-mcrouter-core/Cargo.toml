@@ -15,7 +15,7 @@ rusty-mcrouter-backend = { path = "../rusty-mcrouter-backend" }
 rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives" }
 rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
 bytes.workspace = true
