@@ -116,9 +116,7 @@ where
                 let selector = self.build_prefix_selector(config, &mut HashMap::new())?;
                 BTreeMap::from([(options.default_route.clone(), selector)])
             }
-            RootRouteConfig::Routes(configs) => {
-                self.build_route_selectors(configs, &mut route_cache)?
-            }
+            RootRouteConfig::Routes(configs) => self.build_route_selectors(configs)?,
         };
         let default_selector = selectors
             .get(&options.default_route)
