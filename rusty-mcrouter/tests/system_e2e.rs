@@ -546,8 +546,11 @@ async fn wildcard_fanout_deduplicates_shared_aliases() {
     let config = format!(
         r#"{{
             "pools": {{ "shared": {{"servers": ["{backend}"]}} }},
+            "named_handles": {{
+                "shared-route": "PoolRoute|shared"
+            }},
             "routes": {{
-                "/us/a/": "PoolRoute|shared",
+                "/us/a/": "shared-route",
                 "/us/b/": "PoolRoute|shared"
             }}
         }}"#
@@ -557,4 +560,39 @@ async fn wildcard_fanout_deduplicates_shared_aliases() {
     exchange(stack.router_addr, b"ms /*/*/dedup 1 MA\r\ny\r\n", b"HD\r\n").await;
     eventually_gets(backend, b"dedup", b"xy").await;
     assert_stays_value(backend, b"dedup", b"xy").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wildcard_fanout_deduplicates_inline_named_routes() {
+    let backend = spawn_mock_memcached().await;
+    exchange(backend, b"ms named-dedup 1\r\nx\r\n", b"HD\r\n").await;
+    let config = format!(
+        r#"{{
+            "pools": {{ "shared": {{"servers": ["{backend}"]}} }},
+            "routes": [
+                {{
+                    "aliases": ["/us/a/"],
+                    "route": {{
+                        "name": "inline-shared",
+                        "type": "PoolRoute",
+                        "pool": "shared"
+                    }}
+                }},
+                {{
+                    "aliases": ["/us/b/"],
+                    "route": "inline-shared"
+                }}
+            ]
+        }}"#
+    );
+    let stack = start_router_with_args(&config, backend.port(), 1, &["-R", "/us/a/"]).await;
+
+    exchange(
+        stack.router_addr,
+        b"ms /*/*/named-dedup 1 MA\r\ny\r\n",
+        b"HD\r\n",
+    )
+    .await;
+    eventually_gets(backend, b"named-dedup", b"xy").await;
+    assert_stays_value(backend, b"named-dedup", b"xy").await;
 }

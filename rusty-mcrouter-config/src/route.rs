@@ -25,6 +25,10 @@ pub(crate) enum RawRouteConfig {
         policies: BTreeMap<String, RawRouteConfig>,
         wildcard: Option<Box<RawRouteConfig>>,
     },
+    Named {
+        name: String,
+        route: Box<RawRouteConfig>,
+    },
     NullRoute,
     ErrorRoute {
         message: Option<String>,
@@ -237,8 +241,13 @@ fn parse_object_form(mut map: RawRouteFields) -> Result<RawRouteConfig, String> 
         Some(other) => return Err(format!("`type` must be a string, got {}", other)),
         None => return Err("route object missing required field `type`".to_string()),
     };
+    let name = match take_json_field(&mut map, "name")? {
+        Some(Value::String(name)) => Some(name),
+        Some(other) => return Err(format!("`name` must be a string, got {other}")),
+        None => None,
+    };
 
-    match kind.as_str() {
+    let route = match kind.as_str() {
         "NullRoute" => Ok(RawRouteConfig::NullRoute),
         "ErrorRoute" => {
             let message = match take_json_field(&mut map, "message")? {
@@ -293,7 +302,19 @@ fn parse_object_form(mut map: RawRouteFields) -> Result<RawRouteConfig, String> 
             kind,
             fields: into_json_fields(map)?,
         }),
+    }?;
+
+    if matches!(route, RawRouteConfig::PrefixSelectorRoute { .. }) {
+        return Ok(route);
     }
+
+    Ok(match name {
+        Some(name) => RawRouteConfig::Named {
+            name,
+            route: Box::new(route),
+        },
+        None => route,
+    })
 }
 
 fn take_json_field(map: &mut RawRouteFields, name: &str) -> Result<Option<Value>, String> {
@@ -650,6 +671,30 @@ mod tests {
             }
             other => panic!("expected PrefixSelectorRoute, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn object_form_name_wraps_the_route() {
+        assert_eq!(
+            route_handle(r#"{ "name": "shared", "type": "PoolRoute", "pool": "A" }"#,),
+            RawRouteConfig::Named {
+                name: "shared".into(),
+                route: Box::new(RawRouteConfig::PoolRoute {
+                    pool: "A".into(),
+                    hash: HashConfig::default(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn prefix_selector_ignores_an_outer_name() {
+        assert!(matches!(
+            route_handle(
+                r#"{ "name": "ignored", "type": "PrefixSelectorRoute", "wildcard": "NullRoute" }"#,
+            ),
+            RawRouteConfig::PrefixSelectorRoute { .. }
+        ));
     }
 
     #[test]

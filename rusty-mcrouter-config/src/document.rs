@@ -257,6 +257,7 @@ impl TryFrom<RawConfigDocument> for ConfigDocument {
         }
 
         let mut validator = RouteValidator::new(&pools, &pool_ids, named_handles);
+        validator.register_inline_names(&root);
         let root = match root {
             RawRootRoute::Single(route) => {
                 RootRouteConfig::Single(validator.validate_selector(route, 0)?)
@@ -289,13 +290,28 @@ impl<'a> RouteValidator<'a> {
         pool_ids: &'a BTreeMap<String, PoolId>,
         definitions: BTreeMap<String, RawRouteConfig>,
     ) -> Self {
-        Self {
+        let definitions = definitions
+            .into_iter()
+            .map(|(name, route)| {
+                let route = match route {
+                    RawRouteConfig::Named { route, .. } => *route,
+                    route => route,
+                };
+                (name, route)
+            })
+            .collect();
+        let mut validator = Self {
             pools,
             pool_ids,
             definitions,
             resolved: BTreeMap::new(),
             resolving: Vec::new(),
+        };
+        let definitions = validator.definitions.values().cloned().collect::<Vec<_>>();
+        for route in &definitions {
+            validator.register_inline_route_names(route);
         }
+        validator
     }
 
     fn validate_all_named_handles(&mut self) -> ConfigResult<()> {
@@ -308,6 +324,47 @@ impl<'a> RouteValidator<'a> {
         Ok(())
     }
 
+    fn register_inline_names(&mut self, root: &RawRootRoute) {
+        match root {
+            RawRootRoute::Single(route) => self.register_inline_route_names(route),
+            RawRootRoute::Routes(routes) => {
+                for route in routes {
+                    self.register_inline_route_names(&route.route);
+                }
+            }
+        }
+    }
+
+    fn register_inline_route_names(&mut self, route: &RawRouteConfig) {
+        match route {
+            RawRouteConfig::Named { name, route } => {
+                self.definitions
+                    .entry(name.clone())
+                    .or_insert_with(|| (**route).clone());
+                self.register_inline_route_names(route);
+            }
+            RawRouteConfig::FailoverRoute { children, .. } => {
+                for child in children {
+                    self.register_inline_route_names(child);
+                }
+            }
+            RawRouteConfig::PrefixSelectorRoute { policies, wildcard } => {
+                for child in policies.values() {
+                    self.register_inline_route_names(child);
+                }
+                if let Some(child) = wildcard {
+                    self.register_inline_route_names(child);
+                }
+            }
+            RawRouteConfig::Reference(_)
+            | RawRouteConfig::Shorthand { .. }
+            | RawRouteConfig::PoolRoute { .. }
+            | RawRouteConfig::NullRoute
+            | RawRouteConfig::ErrorRoute { .. }
+            | RawRouteConfig::Unknown { .. } => {}
+        }
+    }
+
     fn validate_selector(
         &mut self,
         route: RawRouteConfig,
@@ -318,31 +375,54 @@ impl<'a> RouteValidator<'a> {
                 let policies = policies
                     .into_iter()
                     .map(|(prefix, child)| {
-                        let cache_key = child.cache_key();
-                        self.validate(child, depth + 1)
-                            .map(|route| (prefix, RouteDefinition { route, cache_key }))
+                        let source = child.clone();
+                        let route = self.validate(child, depth + 1)?;
+                        let cache_key = self.definition_cache_key(&source);
+                        Ok((prefix, RouteDefinition { route, cache_key }))
                     })
                     .collect::<ConfigResult<_>>()?;
                 let wildcard = wildcard
-                    .map(|child| {
-                        let cache_key = child.cache_key();
-                        self.validate(*child, depth + 1)
-                            .map(|route| RouteDefinition { route, cache_key })
+                    .map(|child| -> ConfigResult<RouteDefinition> {
+                        let source = (*child).clone();
+                        let route = self.validate(*child, depth + 1)?;
+                        let cache_key = self.definition_cache_key(&source);
+                        Ok(RouteDefinition { route, cache_key })
                     })
                     .transpose()?;
 
                 Ok(PrefixSelectorConfig { policies, wildcard })
             }
             route => {
-                let cache_key = route.cache_key();
+                let source = route.clone();
+                let route = self.validate(route, depth)?;
+                let cache_key = self.definition_cache_key(&source);
                 Ok(PrefixSelectorConfig {
                     policies: BTreeMap::new(),
-                    wildcard: Some(RouteDefinition {
-                        route: self.validate(route, depth)?,
-                        cache_key,
-                    }),
+                    wildcard: Some(RouteDefinition { route, cache_key }),
                 })
             }
+        }
+    }
+
+    fn definition_cache_key(&self, route: &RawRouteConfig) -> Option<String> {
+        match route {
+            RawRouteConfig::Named { name, .. } => Some(name.clone()),
+            RawRouteConfig::Reference(name) => match self.definitions.get(name) {
+                Some(RawRouteConfig::Reference(_) | RawRouteConfig::Shorthand { .. }) => self
+                    .definitions
+                    .get(name)
+                    .and_then(|definition| self.definition_cache_key(definition)),
+                Some(_) | None => Some(name.clone()),
+            },
+            RawRouteConfig::Shorthand { kind, args } => {
+                let mut key = kind.clone();
+                for argument in args {
+                    key.push('|');
+                    key.push_str(argument);
+                }
+                Some(key)
+            }
+            _ => None,
         }
     }
 
@@ -457,6 +537,7 @@ impl<'a> RouteValidator<'a> {
             RawRouteConfig::PrefixSelectorRoute { .. } => Err(ConfigError::UnsupportedRouteType {
                 kind: "PrefixSelectorRoute".into(),
             }),
+            RawRouteConfig::Named { name, .. } => self.resolve_named(&name, depth),
             RawRouteConfig::Unknown { kind, .. } => Err(ConfigError::UnsupportedRouteType { kind }),
         }
     }
@@ -812,6 +893,48 @@ mod tests {
                 }"#
             ),
             ConfigError::UnsupportedRouteType { ref kind } if kind == "PrefixSelectorRoute"
+        ));
+    }
+
+    #[test]
+    fn registered_named_handle_wins_over_inline_definition() {
+        let document = parse_ok(
+            r#"{
+                "named_handles": {
+                    "shared": "ErrorRoute|registered"
+                },
+                "route": {
+                    "name": "shared",
+                    "type": "ErrorRoute",
+                    "message": "inline"
+                }
+            }"#,
+        );
+
+        assert!(matches!(
+            single_wildcard(&document),
+            RouteConfig::ErrorRoute { message: Some(message) } if message == "registered"
+        ));
+    }
+
+    #[test]
+    fn registered_named_handle_ignores_its_inline_name_field() {
+        let document = parse_ok(
+            r#"{
+                "named_handles": {
+                    "registered": {
+                        "name": "ignored",
+                        "type": "ErrorRoute",
+                        "message": "ok"
+                    }
+                },
+                "route": "registered"
+            }"#,
+        );
+
+        assert!(matches!(
+            single_wildcard(&document),
+            RouteConfig::ErrorRoute { message: Some(message) } if message == "ok"
         ));
     }
 
