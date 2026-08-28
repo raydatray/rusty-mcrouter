@@ -8,7 +8,8 @@ use rusty_mcrouter_backend::tko::FailOpenThresholds;
 use rusty_mcrouter_backend::{destination, Backend, BackendFactory, PoolFailOpen, PoolHealth};
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
-    PoolId, PrefixSelectorConfig, RootRouteConfig, RouteConfig, RouteSelectorConfig,
+    PoolId, PrefixSelectorConfig, RootRouteConfig, RouteConfig, RouteDefinition,
+    RouteSelectorConfig, RoutingPrefix,
 };
 use thiserror::Error;
 
@@ -110,29 +111,63 @@ where
         root: &RootRouteConfig,
         options: &RootRouteOptions,
     ) -> Result<Rc<dyn DynRoute>> {
-        let selectors = match root {
+        let selectors: BTreeMap<RoutingPrefix, Rc<PrefixSelector>> = match root {
             RootRouteConfig::Single(config) => {
                 let selector = self.build_prefix_selector(config, &mut HashMap::new())?;
-                HashMap::from([(options.default_route.as_bytes().into(), selector)])
+                BTreeMap::from([(options.default_route.clone(), selector)])
             }
             RootRouteConfig::Routes(configs) => {
                 self.build_route_selectors(configs, &mut route_cache)?
             }
         };
+        let default_selector = selectors
+            .get(&options.default_route)
+            .cloned()
+            .ok_or_else(|| BuildError::DefaultRouteMissing {
+                prefix: options.default_route.to_string(),
+            })?;
+        let mut all_selectors = vec![Rc::clone(&default_selector)];
+        let mut region_selectors = BTreeMap::<Vec<u8>, Vec<Rc<PrefixSelector>>>::new();
+        region_selectors
+            .entry(options.default_route.region().to_vec())
+            .or_default()
+            .push(Rc::clone(&default_selector));
+
+        for (prefix, selector) in &selectors {
+            if prefix == &options.default_route {
+                continue;
+            }
+            all_selectors.push(Rc::clone(selector));
+            region_selectors
+                .entry(prefix.region().to_vec())
+                .or_default()
+                .push(Rc::clone(selector));
+        }
+
+        let all_routes = Rc::new(RoutePolicyMap::new(&all_selectors));
+        let by_region = region_selectors
+            .into_iter()
+            .map(|(region, selectors)| {
+                (
+                    region.into_boxed_slice(),
+                    Rc::new(RoutePolicyMap::new(&selectors)),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let by_route = selectors
             .into_iter()
             .map(|(prefix, selector)| {
-                let route_map = Rc::new(RoutePolicyMap::new(&[selector]));
-                (prefix, route_map)
+                (
+                    prefix.as_bytes().into(),
+                    Rc::new(RoutePolicyMap::new(&[selector])),
+                )
             })
             .collect::<HashMap<_, _>>();
         let route_map = by_route
             .get(options.default_route.as_bytes())
             .cloned()
-            .ok_or_else(|| BuildError::DefaultRouteMissing {
-                prefix: options.default_route.to_string(),
-            })?;
-        let targets = RouteTargetMap::new(options, route_map, by_route);
+            .expect("default selector was checked above");
+        let targets = RouteTargetMap::new(options, route_map, by_route, by_region, all_routes);
 
         Ok(RootRoute::new(targets).into_dyn())
     }
@@ -140,13 +175,13 @@ where
     fn build_route_selectors(
         &mut self,
         configs: &[RouteSelectorConfig],
-    ) -> Result<HashMap<Box<[u8]>, Rc<PrefixSelector>>> {
-        let mut selectors = HashMap::new();
+    ) -> Result<BTreeMap<RoutingPrefix, Rc<PrefixSelector>>> {
+        let (mut selectors, mut route_cache) = (BTreeMap::new(), HashMap::new());
 
         for config in configs {
             let selector = self.build_prefix_selector(config.selector(), &mut route_cache)?;
             for alias in config.aliases() {
-                selectors.insert(alias.as_bytes().into(), Rc::clone(&selector));
+                selectors.insert(alias.clone(), Rc::clone(&selector));
             }
         }
 
@@ -600,6 +635,52 @@ mod tests {
             execute(&fixture, get(b"/missing/route/key")).await.unwrap(),
             server_error(b"b")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fast_wildcards_keep_default_route_primary() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let cfg = parse(
+                    r#"{
+                        "routes": {
+                            "/us/a/": "ErrorRoute|primary",
+                            "/us/b/": "ErrorRoute|secondary",
+                            "/eu/c/": "ErrorRoute|remote"
+                        }
+                    }"#,
+                )
+                .unwrap();
+                let layout = RoutingMetricsLayout::new(&cfg);
+                let options = RootRouteOptions {
+                    default_route: "/us/a/".parse().unwrap(),
+                    send_invalid_to_default: false,
+                };
+                let route = build_route_with_options(
+                    &cfg,
+                    &MockBackendFactory::new(),
+                    &defaults(),
+                    &layout,
+                    &options,
+                )
+                .unwrap();
+                let metrics = RoutingMetricsShard::new(layout);
+                let fixture = BuiltRoute {
+                    route,
+                    state: RoutingState::new(Arc::clone(&metrics), noop_sink()),
+                    metrics,
+                };
+
+                assert_eq!(
+                    execute(&fixture, get(b"/us/*/key")).await.unwrap(),
+                    server_error(b"primary")
+                );
+                assert_eq!(
+                    execute(&fixture, get(b"/*/*/key")).await.unwrap(),
+                    server_error(b"primary")
+                );
+            })
+            .await;
     }
 
     #[tokio::test]
