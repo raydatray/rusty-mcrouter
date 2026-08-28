@@ -1,10 +1,14 @@
-use std::{collections::BTreeMap, rc::Rc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    rc::Rc,
+    time::Duration,
+};
 
 use rusty_mcrouter_backend::tko::FailOpenThresholds;
 use rusty_mcrouter_backend::{destination, Backend, BackendFactory, PoolFailOpen, PoolHealth};
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
-    PoolId, PrefixSelectorConfig, RootRouteConfig, RouteConfig,
+    PoolId, PrefixSelectorConfig, RootRouteConfig, RouteConfig, RouteSelectorConfig,
 };
 use thiserror::Error;
 
@@ -25,6 +29,9 @@ use crate::{
 pub enum BuildError {
     #[error("pool `{name}` is missing from the routing metrics layout")]
     PoolMissingFromMetricsLayout { name: String },
+
+    #[error("invalid default route: {prefix}")]
+    DefaultRouteMissing { prefix: String },
 }
 
 type Result<T> = std::result::Result<T, BuildError>;
@@ -84,12 +91,47 @@ where
         root: &RootRouteConfig,
         options: &RootRouteOptions,
     ) -> Result<Rc<dyn DynRoute>> {
-        let RootRouteConfig::Single(config) = root;
-        let selector = self.build_prefix_selector(config)?;
-        let route_map = Rc::new(RoutePolicyMap::new(&[selector]));
-        let targets = RouteTargetMap::new(options, route_map);
+        let selectors = match root {
+            RootRouteConfig::Single(config) => {
+                let selector = self.build_prefix_selector(config, &mut HashMap::new())?;
+                HashMap::from([(options.default_route.as_bytes().into(), selector)])
+            }
+            RootRouteConfig::Routes(configs) => {
+                self.build_route_selectors(configs, &mut route_cache)?
+            }
+        };
+        let by_route = selectors
+            .into_iter()
+            .map(|(prefix, selector)| {
+                let route_map = Rc::new(RoutePolicyMap::new(&[selector]));
+                (prefix, route_map)
+            })
+            .collect::<HashMap<_, _>>();
+        let route_map = by_route
+            .get(options.default_route.as_bytes())
+            .cloned()
+            .ok_or_else(|| BuildError::DefaultRouteMissing {
+                prefix: options.default_route.to_string(),
+            })?;
+        let targets = RouteTargetMap::new(options, route_map, by_route);
 
         Ok(RootRoute::new(targets).into_dyn())
+    }
+
+    fn build_route_selectors(
+        &mut self,
+        configs: &[RouteSelectorConfig],
+    ) -> Result<HashMap<Box<[u8]>, Rc<PrefixSelector>>> {
+        let mut selectors = HashMap::new();
+
+        for config in configs {
+            let selector = self.build_prefix_selector(config.selector(), &mut route_cache)?;
+            for alias in config.aliases() {
+                selectors.insert(alias.as_bytes().into(), Rc::clone(&selector));
+            }
+        }
+
+        Ok(selectors)
     }
 
     fn build_prefix_selector(
@@ -433,6 +475,66 @@ mod tests {
         assert!(matches!(
             execute(&route, get(b"unmatched:key")).await,
             Err(crate::RouteError::NoRoute)
+        ));
+    }
+
+    #[tokio::test]
+    async fn plural_routes_select_exact_aliases_and_default() {
+        let cfg = parse(
+            r#"{
+                "routes": {
+                    "/././": "ErrorRoute|default",
+                    "/other/cluster/": "ErrorRoute|other"
+                }
+            }"#,
+        )
+        .unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
+
+        assert_eq!(
+            execute(&route, get(b"key")).await.unwrap(),
+            server_error(b"default")
+        );
+        assert_eq!(
+            execute(&route, get(b"/other/cluster/key")).await.unwrap(),
+            server_error(b"other")
+        );
+        assert!(matches!(
+            execute(&route, get(b"/unknown/cluster/key")).await,
+            Err(crate::RouteError::NoRoute)
+        ));
+    }
+
+    #[tokio::test]
+    async fn later_duplicate_route_alias_wins() {
+        let cfg = parse(
+            r#"{
+                "routes": [
+                    { "aliases": ["/././"], "route": "ErrorRoute|first" },
+                    { "aliases": ["/././"], "route": "ErrorRoute|last" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
+
+        assert_eq!(
+            execute(&route, get(b"key")).await.unwrap(),
+            server_error(b"last")
+        );
+    }
+
+    #[test]
+    fn plural_routes_require_the_default_alias_at_build_time() {
+        let cfg = parse(r#"{ "routes": { "/other/cluster/": "NullRoute" } }"#).unwrap();
+        let layout = RoutingMetricsLayout::new(&cfg);
+        let error = build_route(&cfg, &MockBackendFactory::new(), &defaults(), &layout)
+            .err()
+            .expect("missing default route should fail the build");
+
+        assert!(matches!(
+            error,
+            BuildError::DefaultRouteMissing { ref prefix } if prefix == "/././"
         ));
     }
 

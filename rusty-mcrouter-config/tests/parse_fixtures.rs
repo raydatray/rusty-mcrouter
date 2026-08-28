@@ -22,8 +22,10 @@ fn parse_err(name: &str) -> ConfigError {
 }
 
 fn single_selector(document: &ConfigDocument) -> &PrefixSelectorConfig {
-    let RootRouteConfig::Single(selector) = document.root();
-    selector
+    match document.root() {
+        RootRouteConfig::Single(selector) => selector,
+        RootRouteConfig::Routes(_) => panic!("expected singular root route"),
+    }
 }
 
 fn single_wildcard(document: &ConfigDocument) -> &RouteConfig {
@@ -112,11 +114,15 @@ fn unsupported_all_sync_route_is_rejected() {
 }
 
 #[test]
-fn routes_plural_is_rejected_until_supported() {
-    assert!(matches!(
-        parse_err("duplicate_servers.json"),
-        ConfigError::PrefixRoutingNotImplemented
-    ));
+fn routes_plural_validates() {
+    let document = parse_ok("duplicate_servers.json");
+    let RootRouteConfig::Routes(routes) = document.root() else {
+        panic!("expected plural routes");
+    };
+
+    assert_eq!(routes.len(), 2);
+    assert_eq!(routes[0].aliases()[0].as_str(), "/a/a/");
+    assert_eq!(routes[1].aliases()[0].as_str(), "/b/b/");
 }
 
 #[test]

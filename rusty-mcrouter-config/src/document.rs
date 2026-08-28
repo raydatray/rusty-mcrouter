@@ -7,13 +7,12 @@ use std::{
 use json_comments::StripComments;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
-use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
     pool::RawPoolConfig,
     route::{RawNamedHandle, RawRouteConfig},
-    HashConfig, HashFunc, PoolConfig, RouteConfig,
+    HashConfig, HashFunc, PoolConfig, RouteConfig, RoutingPrefix, RoutingPrefixError,
 };
 
 #[derive(Debug, Error)]
@@ -67,8 +66,12 @@ pub enum ConfigError {
         address: String,
     },
 
-    #[error("`routes` (with prefix aliases) is not implemented")]
-    PrefixRoutingNotImplemented,
+    #[error("invalid route alias `{alias}`: {source}")]
+    InvalidRouteAlias {
+        alias: String,
+        #[source]
+        source: RoutingPrefixError,
+    },
 
     #[error("route type `{kind}` is not implemented")]
     UnsupportedRouteType { kind: String },
@@ -145,8 +148,25 @@ impl RouteDefinition {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct RouteSelectorConfig {
+    aliases: Vec<RoutingPrefix>,
+    selector: PrefixSelectorConfig,
+}
+
+impl RouteSelectorConfig {
+    pub fn aliases(&self) -> &[RoutingPrefix] {
+        &self.aliases
+    }
+
+    pub fn selector(&self) -> &PrefixSelectorConfig {
+        &self.selector
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum RootRouteConfig {
     Single(PrefixSelectorConfig),
+    Routes(Vec<RouteSelectorConfig>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -162,6 +182,11 @@ impl PoolId {
 struct RawPrefixedRoute {
     aliases: Vec<String>,
     route: RawRouteConfig,
+}
+
+enum RawRootRoute {
+    Single(RawRouteConfig),
+    Routes(Vec<RawPrefixedRoute>),
 }
 
 impl ConfigDocument {
@@ -219,8 +244,8 @@ impl TryFrom<RawConfigDocument> for ConfigDocument {
         let root = match (route, routes) {
             (Some(_), Some(_)) => return Err(ConfigError::BothRouteAndRoutes),
             (None, None) => return Err(ConfigError::MissingRoute),
-            (Some(single), None) => single,
-            (None, Some(_)) => return Err(ConfigError::PrefixRoutingNotImplemented),
+            (Some(single), None) => RawRootRoute::Single(single),
+            (None, Some(routes)) => RawRootRoute::Routes(routes),
         };
 
         let mut pools = Vec::with_capacity(raw_pools.len());
@@ -232,7 +257,14 @@ impl TryFrom<RawConfigDocument> for ConfigDocument {
         }
 
         let mut validator = RouteValidator::new(&pools, &pool_ids, named_handles);
-        let root = RootRouteConfig::Single(validator.validate_selector(root, 0)?);
+        let root = match root {
+            RawRootRoute::Single(route) => {
+                RootRouteConfig::Single(validator.validate_selector(route, 0)?)
+            }
+            RawRootRoute::Routes(routes) => {
+                RootRouteConfig::Routes(validator.validate_route_selectors(routes)?)
+            }
+        };
         validator.validate_all_named_handles()?;
 
         Ok(ConfigDocument {
@@ -312,6 +344,29 @@ impl<'a> RouteValidator<'a> {
                 })
             }
         }
+    }
+
+    fn validate_route_selectors(
+        &mut self,
+        routes: Vec<RawPrefixedRoute>,
+    ) -> ConfigResult<Vec<RouteSelectorConfig>> {
+        routes
+            .into_iter()
+            .map(|route| {
+                let aliases = route
+                    .aliases
+                    .into_iter()
+                    .map(|alias| {
+                        alias
+                            .parse()
+                            .map_err(|source| ConfigError::InvalidRouteAlias { alias, source })
+                    })
+                    .collect::<ConfigResult<_>>()?;
+                let selector = self.validate_selector(route.route, 0)?;
+
+                Ok(RouteSelectorConfig { aliases, selector })
+            })
+            .collect()
     }
 
     fn resolve_named(&mut self, name: &str, depth: usize) -> ConfigResult<RouteConfig> {
@@ -558,37 +613,45 @@ fn deserialize_routes_field<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    let value = Value::deserialize(deserializer)?;
-    let entries: Result<Vec<RawPrefixedRoute>, D::Error> = match value {
-        Value::Object(map) => map
-            .into_iter()
-            .map(|(prefix, val)| {
-                let route = serde_json::from_value(val).map_err(de::Error::custom)?;
-                Ok(RawPrefixedRoute {
+    struct RoutesVisitor;
+
+    impl<'de> Visitor<'de> for RoutesVisitor {
+        type Value = Vec<RawPrefixedRoute>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a routes object or array")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut routes = Vec::new();
+            while let Some(prefix) = map.next_key::<String>()? {
+                routes.push(RawPrefixedRoute {
                     aliases: vec![prefix],
-                    route,
-                })
-            })
-            .collect(),
-        Value::Array(items) => items
-            .into_iter()
-            .map(|item| {
-                let entry: RawPrefixedRouteEntry =
-                    serde_json::from_value(item).map_err(de::Error::custom)?;
-                Ok(RawPrefixedRoute {
+                    route: map.next_value()?,
+                });
+            }
+            Ok(routes)
+        }
+
+        fn visit_seq<S>(self, mut sequence: S) -> Result<Self::Value, S::Error>
+        where
+            S: SeqAccess<'de>,
+        {
+            let mut routes = Vec::new();
+            while let Some(entry) = sequence.next_element::<RawPrefixedRouteEntry>()? {
+                routes.push(RawPrefixedRoute {
                     aliases: entry.aliases,
                     route: entry.route,
-                })
-            })
-            .collect(),
-        other => {
-            return Err(de::Error::custom(format!(
-                "routes must be an object or array, got {other}"
-            )))
+                });
+            }
+            Ok(routes)
         }
-    };
+    }
 
-    entries.map(Some)
+    deserializer.deserialize_any(RoutesVisitor).map(Some)
 }
 
 #[cfg(test)]
@@ -604,8 +667,10 @@ mod tests {
     }
 
     fn single_selector(document: &ConfigDocument) -> &PrefixSelectorConfig {
-        let RootRouteConfig::Single(selector) = document.root();
-        selector
+        match document.root() {
+            RootRouteConfig::Single(selector) => selector,
+            RootRouteConfig::Routes(_) => panic!("expected singular root route"),
+        }
     }
 
     fn single_wildcard(document: &ConfigDocument) -> &RouteConfig {
@@ -678,8 +743,8 @@ mod tests {
     }
 
     #[test]
-    fn routes_plural_array_form_is_rejected_until_supported() {
-        let error = parse_err(
+    fn routes_plural_array_form_parses() {
+        let document = parse_ok(
             r#"{
                 "pools": { "A": { "servers": ["x:1"] }, "B": { "servers": ["y:1"] } },
                 "routes": [
@@ -688,7 +753,12 @@ mod tests {
                 ]
             }"#,
         );
-        assert!(matches!(error, ConfigError::PrefixRoutingNotImplemented));
+        let RootRouteConfig::Routes(routes) = document.root() else {
+            panic!("expected plural routes");
+        };
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].aliases()[0].as_str(), "/a/a/");
+        assert_eq!(routes[1].aliases()[0].as_str(), "/b/b/");
     }
 
     #[test]
@@ -746,14 +816,59 @@ mod tests {
     }
 
     #[test]
-    fn routes_plural_object_form_is_rejected_until_supported() {
-        let error = parse_err(
+    fn routes_plural_object_form_parses() {
+        let document = parse_ok(
             r#"{
                 "pools": { "A": { "servers": ["x:1"] } },
                 "routes": { "/foo/bar/": "PoolRoute|A" }
             }"#,
         );
-        assert!(matches!(error, ConfigError::PrefixRoutingNotImplemented));
+        let RootRouteConfig::Routes(routes) = document.root() else {
+            panic!("expected plural routes");
+        };
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].aliases()[0].as_str(), "/foo/bar/");
+    }
+
+    #[test]
+    fn routes_plural_normalizes_and_validates_aliases() {
+        let document = parse_ok(
+            r#"{
+                "pools": { "A": { "servers": ["x:1"] } },
+                "routes": { "foo/bar": "PoolRoute|A" }
+            }"#,
+        );
+        let RootRouteConfig::Routes(routes) = document.root() else {
+            panic!("expected plural routes");
+        };
+        assert_eq!(routes[0].aliases()[0].as_str(), "/foo/bar/");
+
+        assert!(matches!(
+            parse_err(r#"{ "routes": { "/one/": "NullRoute" } }"#),
+            ConfigError::InvalidRouteAlias { .. }
+        ));
+    }
+
+    #[test]
+    fn routes_plural_preserves_nested_duplicate_detection() {
+        assert!(matches!(
+            parse_err(
+                r#"{
+                    "pools": {
+                        "A": { "servers": ["a:1"] },
+                        "B": { "servers": ["b:1"] }
+                    },
+                    "routes": {
+                        "/././": {
+                            "type": "PoolRoute",
+                            "pool": "A",
+                            "pool": "B"
+                        }
+                    }
+                }"#
+            ),
+            ConfigError::Schema { .. }
+        ));
     }
 
     #[test]
@@ -847,7 +962,7 @@ mod tests {
             } else {
                 format!("route:{}", index + 1)
             };
-            handles.insert(format!("route:{index}"), Value::String(target));
+            handles.insert(format!("route:{index}"), serde_json::Value::String(target));
         }
         let json = serde_json::json!({
             "named_handles": handles,
