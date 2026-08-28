@@ -20,12 +20,22 @@ impl RootRoute {
 
 impl Route for RootRoute {
     async fn route(&self, context: &RouteContext, request: Request) -> Result<Reply> {
-        let targets = self
+        if let Some(targets) = self
             .route_targets
             .get_targets_fast(request.key().routing_prefix(), request.key().routing_key())
-            .ok_or(RouteError::NoRoute)?;
+        {
+            return route_to_all(context, targets, request).await;
+        }
 
-        route_to_all(context, targets, request).await
+        let targets = self.route_targets.get_targets_slow(
+            request
+                .key()
+                .routing_prefix()
+                .expect("slow path requires a routing prefix"),
+            request.key().routing_key(),
+        );
+
+        route_to_all(context, &targets, request).await
     }
 }
 
