@@ -1,9 +1,11 @@
+use std::rc::Rc;
+
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::{
     route_target_map::RouteTargetMap,
     routes::{Result, Route, RouteError},
-    RouteContext,
+    DynRoute, RouteContext,
 };
 
 pub struct RootRoute {
@@ -18,12 +20,25 @@ impl RootRoute {
 
 impl Route for RootRoute {
     async fn route(&self, context: &RouteContext, request: Request) -> Result<Reply> {
-        let target = self
+        let targets = self
             .route_targets
-            .resolve(request.key().routing_prefix(), request.key().routing_key())
-            .first()
+            .get_targets_fast(request.key().routing_prefix(), request.key().routing_key())
             .ok_or(RouteError::NoRoute)?;
 
-        target.route_dyn(context, request).await
+        route_to_all(context, targets, request).await
     }
+}
+
+async fn route_to_all(
+    context: &RouteContext,
+    targets: &[Rc<dyn DynRoute>],
+    request: Request,
+) -> Result<Reply> {
+    let (primary, secondaries) = targets.split_first().ok_or(RouteError::NoRoute)?;
+
+    for secondary in secondaries {
+        context.spawn_background(Rc::clone(secondary), request.clone());
+    }
+
+    primary.route_dyn(context, request).await
 }
