@@ -9,7 +9,7 @@ use tokio::process::Command;
 
 mod support;
 
-use support::{exchange, RouterProcess};
+use support::{assert_stays_missing, assert_stays_value, eventually_gets, exchange, RouterProcess};
 
 type Stack = RouterProcess;
 
@@ -375,4 +375,186 @@ async fn two_proxy_shards_sum_into_one_pool_series() {
         2,
     );
     assert_series(&body, "rusty_mcrouter_proxies", &[], 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prefix_routes_select_default_exact_and_invalid_fallback() {
+    let backend_a = spawn_mock_memcached().await;
+    let backend_b = spawn_mock_memcached().await;
+    exchange(backend_a, b"ms choice 1\r\na\r\n", b"HD\r\n").await;
+    exchange(backend_b, b"ms choice 1\r\nb\r\n", b"HD\r\n").await;
+    let config = format!(
+        r#"{{
+            "pools": {{
+                "a": {{"servers": ["{backend_a}"]}},
+                "b": {{"servers": ["{backend_b}"]}}
+            }},
+            "routes": {{
+                "/a/a/": "PoolRoute|a",
+                "/b/b/": "PoolRoute|b"
+            }}
+        }}"#
+    );
+    let stack = start_router_with_args(
+        &config,
+        backend_a.port(),
+        1,
+        &["-R", "/b/b/", "--send-invalid-route-to-default"],
+    )
+    .await;
+
+    exchange(stack.router_addr, b"mg choice v\r\n", b"VA 1\r\nb\r\n").await;
+    exchange(stack.router_addr, b"mg /a/a/choice v\r\n", b"VA 1\r\na\r\n").await;
+    exchange(
+        stack.router_addr,
+        b"mg /missing/route/choice v\r\n",
+        b"VA 1\r\nb\r\n",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prefix_selector_uses_longest_policy_and_wildcard() {
+    let users = spawn_mock_memcached().await;
+    let vip = spawn_mock_memcached().await;
+    let wildcard = spawn_mock_memcached().await;
+    exchange(users, b"ms user:1 1\r\nu\r\n", b"HD\r\n").await;
+    exchange(vip, b"ms user:vip:1 1\r\nv\r\n", b"HD\r\n").await;
+    exchange(wildcard, b"ms other:1 1\r\nw\r\n", b"HD\r\n").await;
+    let config = format!(
+        r#"{{
+            "pools": {{
+                "users": {{"servers": ["{users}"]}},
+                "vip": {{"servers": ["{vip}"]}},
+                "wildcard": {{"servers": ["{wildcard}"]}}
+            }},
+            "route": {{
+                "type": "PrefixSelectorRoute",
+                "policies": {{
+                    "user:": "PoolRoute|users",
+                    "user:vip:": "PoolRoute|vip"
+                }},
+                "wildcard": "PoolRoute|wildcard"
+            }}
+        }}"#
+    );
+    let stack = start_router(&config, users.port()).await;
+
+    exchange(stack.router_addr, b"mg user:vip:1 v\r\n", b"VA 1\r\nv\r\n").await;
+    exchange(stack.router_addr, b"mg user:1 v\r\n", b"VA 1\r\nu\r\n").await;
+    exchange(stack.router_addr, b"mg other:1 v\r\n", b"VA 1\r\nw\r\n").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn regional_and_global_wildcards_fan_out() {
+    let us_a = spawn_mock_memcached().await;
+    let us_b = spawn_mock_memcached().await;
+    let eu_a = spawn_mock_memcached().await;
+    let config = format!(
+        r#"{{
+            "pools": {{
+                "us_a": {{"servers": ["{us_a}"]}},
+                "us_b": {{"servers": ["{us_b}"]}},
+                "eu_a": {{"servers": ["{eu_a}"]}}
+            }},
+            "routes": {{
+                "/us/a/": "PoolRoute|us_a",
+                "/us/b/": "PoolRoute|us_b",
+                "/eu/a/": "PoolRoute|eu_a"
+            }}
+        }}"#
+    );
+    let stack = start_router_with_args(&config, us_a.port(), 1, &["-R", "/us/a/"]).await;
+
+    exchange(
+        stack.router_addr,
+        b"ms /us/*/regional 1\r\nr\r\n",
+        b"HD\r\n",
+    )
+    .await;
+    eventually_gets(us_a, b"regional", b"r").await;
+    eventually_gets(us_b, b"regional", b"r").await;
+    assert_stays_missing(eu_a, b"regional").await;
+
+    exchange(stack.router_addr, b"ms /*/*/global 1\r\ng\r\n", b"HD\r\n").await;
+    eventually_gets(us_a, b"global", b"g").await;
+    eventually_gets(us_b, b"global", b"g").await;
+    eventually_gets(eu_a, b"global", b"g").await;
+
+    let body = scrape(stack.metrics_addr()).await;
+    assert_series(
+        &body,
+        "rusty_mcrouter_pool_completed_requests_total",
+        &[("pool", "us_a")],
+        2,
+    );
+    for pool in ["us_b", "eu_a"] {
+        assert_series(
+            &body,
+            "rusty_mcrouter_pool_completed_requests_total",
+            &[("pool", pool)],
+            0,
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fallback_and_arbitrary_globs_match_mcrouter() {
+    let primary = spawn_mock_memcached().await;
+    let secondary = spawn_mock_memcached().await;
+    let fallback = spawn_mock_memcached().await;
+    let config = format!(
+        r#"{{
+            "pools": {{
+                "primary": {{"servers": ["{primary}"]}},
+                "secondary": {{"servers": ["{secondary}"]}},
+                "fallback": {{"servers": ["{fallback}"]}}
+            }},
+            "routes": {{
+                "/us/prod/": "PoolRoute|primary",
+                "/uk/preprod/": "PoolRoute|secondary",
+                "/us/fallback/": "PoolRoute|fallback"
+            }}
+        }}"#
+    );
+    let stack = start_router_with_args(&config, primary.port(), 1, &["-R", "/us/prod/"]).await;
+
+    exchange(
+        stack.router_addr,
+        b"ms /us/missing/fallback-key 1\r\nf\r\n",
+        b"HD\r\n",
+    )
+    .await;
+    eventually_gets(fallback, b"fallback-key", b"f").await;
+    assert_stays_missing(primary, b"fallback-key").await;
+
+    exchange(
+        stack.router_addr,
+        b"ms /u*/*prod/glob-key 1\r\nx\r\n",
+        b"HD\r\n",
+    )
+    .await;
+    eventually_gets(primary, b"glob-key", b"x").await;
+    eventually_gets(secondary, b"glob-key", b"x").await;
+    assert_stays_missing(fallback, b"glob-key").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wildcard_fanout_deduplicates_shared_aliases() {
+    let backend = spawn_mock_memcached().await;
+    exchange(backend, b"ms dedup 1\r\nx\r\n", b"HD\r\n").await;
+    let config = format!(
+        r#"{{
+            "pools": {{ "shared": {{"servers": ["{backend}"]}} }},
+            "routes": {{
+                "/us/a/": "PoolRoute|shared",
+                "/us/b/": "PoolRoute|shared"
+            }}
+        }}"#
+    );
+    let stack = start_router_with_args(&config, backend.port(), 1, &["-R", "/us/a/"]).await;
+
+    exchange(stack.router_addr, b"ms /*/*/dedup 1 MA\r\ny\r\n", b"HD\r\n").await;
+    eventually_gets(backend, b"dedup", b"xy").await;
+    assert_stays_value(backend, b"dedup", b"xy").await;
 }
