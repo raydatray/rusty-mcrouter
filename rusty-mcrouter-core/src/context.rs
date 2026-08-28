@@ -2,11 +2,12 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use rusty_mcrouter_backend::classify::reply_code;
 use rusty_mcrouter_config::PoolId;
-use rusty_mcrouter_protocol::Reply;
+use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::time::Instant;
 
 use crate::{
-    RouteError, RoutingEventRecord, RoutingEventSink, RoutingMetricsLayout, RoutingMetricsShard,
+    DynRoute, RouteError, RoutingEventRecord, RoutingEventSink, RoutingMetricsLayout,
+    RoutingMetricsShard,
 };
 
 pub struct RoutingState {
@@ -21,6 +22,22 @@ pub struct RouteContext {
 }
 
 impl RouteContext {
+    fn fork(&self) -> Self {
+        Self {
+            state: Rc::clone(&self.state),
+            selected_pool: Cell::new(None),
+            started: Instant::now(),
+        }
+    }
+
+    pub(crate) fn spawn_background(&self, route: Rc<dyn DynRoute>, request: Request) {
+        let context = self.fork();
+
+        drop(tokio::task::spawn_local(async move {
+            let _ = route.route_dyn(&context, request).await;
+        }));
+    }
+
     pub fn metrics(&self) -> &RoutingMetricsShard {
         &self.state.metrics
     }
@@ -95,6 +112,21 @@ mod tests {
     struct InspectContext {
         expected: Arc<RoutingMetricsShard>,
         observations: Rc<Cell<usize>>,
+    }
+
+    struct CountRoute {
+        calls: Rc<Cell<usize>>,
+    }
+
+    impl Route for CountRoute {
+        async fn route(
+            &self,
+            _context: &RouteContext,
+            _request: Request,
+        ) -> Result<Reply, RouteError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(get_miss())
+        }
     }
 
     impl Route for InspectContext {
@@ -180,6 +212,28 @@ mod tests {
         second_result.unwrap();
         assert_eq!(first_observations.get(), 2);
         assert_eq!(second_observations.get(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_route_runs_on_the_local_executor() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let (state, _) = state();
+                let context = state.context();
+                let calls = Rc::new(Cell::new(0));
+                let route = CountRoute {
+                    calls: Rc::clone(&calls),
+                }
+                .into_dyn();
+
+                context.spawn_background(route, get(b"key"));
+                tokio::task::yield_now().await;
+
+                assert_eq!(calls.get(), 1);
+            })
+            .await;
     }
 
     #[test]
