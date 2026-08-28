@@ -21,6 +21,10 @@ pub(crate) enum RawRouteConfig {
         failover_errors: FailoverErrorsConfig,
         failover_policy: FailoverPolicyConfig,
     },
+    PrefixSelectorRoute {
+        policies: BTreeMap<String, RawRouteConfig>,
+        wildcard: Option<Box<RawRouteConfig>>,
+    },
     NullRoute,
     ErrorRoute {
         message: Option<String>,
@@ -284,6 +288,7 @@ fn parse_object_form(mut map: RawRouteFields) -> Result<RawRouteConfig, String> 
                 failover_policy,
             })
         }
+        "PrefixSelectorRoute" => parse_prefix_selector(&mut map),
         _ => Ok(RawRouteConfig::Unknown {
             kind,
             fields: into_json_fields(map)?,
@@ -337,6 +342,29 @@ fn parse_hash_func(name: &str) -> Result<HashFunc, String> {
         "Crc32" => Ok(HashFunc::Crc32),
         other => Err(format!("unknown hash_func `{}`", other)),
     }
+}
+
+fn parse_prefix_selector(map: &mut RawRouteFields) -> Result<RawRouteConfig, String> {
+    let policies = map
+        .remove("policies")
+        .map(|raw| serde_json::from_str(raw.get()))
+        .transpose()
+        .map_err(|error| format!("invalid PrefixSelectorRoute policies: {error}"))?;
+
+    let wildcard = map
+        .remove("wildcard")
+        .map(|raw| serde_json::from_str(raw.get()).map(Box::new))
+        .transpose()
+        .map_err(|error| format!("invalid PrefixSelectorRoute wildcard: {error}"))?;
+
+    if policies.is_none() && wildcard.is_none() {
+        return Err("PrefixSelectorRoute requires policies or wildcard".into());
+    }
+
+    Ok(RawRouteConfig::PrefixSelectorRoute {
+        policies: policies.unwrap_or_default(),
+        wildcard,
+    })
 }
 
 fn parse_failover_children(map: &mut RawRouteFields) -> Result<Vec<RawRouteConfig>, String> {
@@ -603,15 +631,45 @@ mod tests {
     }
 
     #[test]
-    fn unknown_object_type_preserves_kind_and_all_fields() {
+    fn object_form_prefix_selector_route() {
         let r = route_handle(
             r#"{ "type": "PrefixSelectorRoute", "policies": { "good": "PoolRoute|A" }, "wildcard": "PoolRoute|B" }"#,
         );
         match r {
+            RawRouteConfig::PrefixSelectorRoute { policies, wildcard } => {
+                assert!(matches!(
+                    policies.get("good"),
+                    Some(RawRouteConfig::Shorthand { kind, args })
+                        if kind == "PoolRoute" && args == &["A"]
+                ));
+                assert!(matches!(
+                    wildcard.as_deref(),
+                    Some(RawRouteConfig::Shorthand { kind, args })
+                        if kind == "PoolRoute" && args == &["B"]
+                ));
+            }
+            other => panic!("expected PrefixSelectorRoute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefix_selector_accepts_explicit_empty_policies() {
+        assert_eq!(
+            route_handle(r#"{ "type": "PrefixSelectorRoute", "policies": {} }"#),
+            RawRouteConfig::PrefixSelectorRoute {
+                policies: BTreeMap::new(),
+                wildcard: None,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_object_type_preserves_kind_and_all_fields() {
+        let r = route_handle(r#"{ "type": "StillUnknownRoute", "field": 1 }"#);
+        match r {
             RawRouteConfig::Unknown { kind, fields } => {
-                assert_eq!(kind, "PrefixSelectorRoute");
-                assert!(fields.contains_key("policies"));
-                assert!(fields.contains_key("wildcard"));
+                assert_eq!(kind, "StillUnknownRoute");
+                assert_eq!(fields.get("field"), Some(&Value::from(1)));
                 assert!(!fields.contains_key("type"), "type should be consumed");
             }
             other => panic!("expected Unknown, got {other:?}"),

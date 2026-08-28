@@ -324,6 +324,9 @@ impl<'a> RouteValidator<'a> {
             }
             RawRouteConfig::NullRoute => Ok(RouteConfig::NullRoute),
             RawRouteConfig::ErrorRoute { message } => Ok(RouteConfig::ErrorRoute { message }),
+            RawRouteConfig::PrefixSelectorRoute { .. } => Err(ConfigError::UnsupportedRouteType {
+                kind: "PrefixSelectorRoute".into(),
+            }),
             RawRouteConfig::Unknown { kind, .. } => Err(ConfigError::UnsupportedRouteType { kind }),
         }
     }
