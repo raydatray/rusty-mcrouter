@@ -5,6 +5,7 @@ mod lower_bound_prefix_map;
 mod metrics;
 mod prefix_selector;
 mod route_builder;
+mod route_pattern;
 mod route_policy_map;
 mod route_target_map;
 mod routes;
