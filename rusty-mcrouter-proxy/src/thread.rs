@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, rc::Rc, sync::mpsc::SyncSender};
 
 use rusty_mcrouter_backend::{destination, DestinationFactory};
-use rusty_mcrouter_core::{build_route, RoutingState};
+use rusty_mcrouter_core::{build_route_with_options, RoutingState};
 use tokio::{runtime::Builder, task::LocalSet};
 
 use crate::runtime::ProxyRuntime;
@@ -39,6 +39,7 @@ pub fn proxy_thread_main(
             routing_events,
             events,
             defaults,
+            root_route_options,
             sweep_interval,
         } = cfg;
 
@@ -84,7 +85,13 @@ pub fn proxy_thread_main(
         let sweep_task = dest_map.spawn_idle_sweep(sweep_interval);
         let factory = DestinationFactory::new(Rc::clone(&dest_map));
         let routing_state = RoutingState::new(routing_metrics, routing_events);
-        let route = match build_route(&config, &factory, &defaults, routing_state.layout()) {
+        let route = match build_route_with_options(
+            &config,
+            &factory,
+            &defaults,
+            routing_state.layout(),
+            &root_route_options,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 let _ = ready_tx.send(Err(anyhow::anyhow!("build_route failed: {e}")));

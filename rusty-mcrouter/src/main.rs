@@ -7,8 +7,8 @@ use rusty_mcrouter_backend::{
     metrics::BackendMetricsShard,
     tko::TkoTrackerMap,
 };
-use rusty_mcrouter_config::parse_file;
-use rusty_mcrouter_core::{RoutingMetricsLayout, RoutingMetricsShard};
+use rusty_mcrouter_config::{parse_file, RoutingPrefix};
+use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsLayout, RoutingMetricsShard};
 use rusty_mcrouter_observability::{
     sources::{
         BackendRequestsSource, BackendScalarsSource, DestinationSource, FrontendRequestsSource,
@@ -88,6 +88,20 @@ struct Args {
 /// options, not config-file keys, and so do we.
 #[derive(clap::Args, Clone, Debug)]
 struct RouterOptions {
+    #[arg(
+        short = 'R',
+        long = "route-prefix",
+        default_value = "/././",
+        help = "default routing prefix"
+    )]
+    route_prefix: RoutingPrefix,
+
+    #[arg(
+        long,
+        help = "send requests with unknown routing prefixes to the default route"
+    )]
+    send_invalid_route_to_default: bool,
+
     #[arg(
         long,
         default_value_t = 1000,
@@ -188,6 +202,10 @@ fn main() -> anyhow::Result<()> {
     let tko_map = TkoTrackerMap::new(observability.events().sink());
     let metrics_registry = DestinationMetricsRegistry::new();
     let defaults = destination_defaults(&args.options);
+    let root_route_options = RootRouteOptions {
+        default_route: args.options.route_prefix.clone(),
+        send_invalid_to_default: args.options.send_invalid_route_to_default,
+    };
     let sweep_interval = Duration::from_millis(args.options.reset_inactive_connection_interval_ms);
 
     let (work_txs, work_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
@@ -266,6 +284,7 @@ fn main() -> anyhow::Result<()> {
             routing_events: observability.events().sink(),
             events: observability.events().sink(),
             defaults: defaults.clone(),
+            root_route_options: root_route_options.clone(),
             sweep_interval,
         };
 
@@ -385,4 +404,43 @@ fn shutdown_proxy_threads(proxy_threads: &mut Vec<ProxyThread>) -> Option<anyhow
         }
     }
     first_error
+}
+
+#[cfg(test)]
+mod args_tests {
+    use super::*;
+
+    fn parse_args(extra: &[&str]) -> Args {
+        let mut args = vec!["rusty-mcrouter", "--config", "config.json"];
+        args.extend_from_slice(extra);
+        Args::try_parse_from(args).unwrap()
+    }
+
+    #[test]
+    fn root_route_options_use_mcrouter_defaults() {
+        let args = parse_args(&[]);
+
+        assert_eq!(args.options.route_prefix.as_str(), "/././");
+        assert!(!args.options.send_invalid_route_to_default);
+    }
+
+    #[test]
+    fn root_route_options_accept_short_and_long_flags() {
+        let args = parse_args(&["-R", "/a/a/", "--send-invalid-route-to-default"]);
+
+        assert_eq!(args.options.route_prefix.as_str(), "/a/a/");
+        assert!(args.options.send_invalid_route_to_default);
+    }
+
+    #[test]
+    fn route_prefix_rejects_malformed_values() {
+        assert!(Args::try_parse_from([
+            "rusty-mcrouter",
+            "--config",
+            "config.json",
+            "--route-prefix",
+            "/invalid/",
+        ])
+        .is_err());
+    }
 }

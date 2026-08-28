@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use rusty_mcrouter_backend::{destination, metrics::BackendMetricsShard, tko::TkoTrackerMap};
 use rusty_mcrouter_config::ConfigDocument;
-use rusty_mcrouter_core::{RoutingEventSink, RoutingMetricsShard};
+use rusty_mcrouter_core::{RootRouteOptions, RoutingEventSink, RoutingMetricsShard};
 use tokio::sync::mpsc;
 
 use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, WorkerEventSink};
@@ -33,6 +33,7 @@ pub struct ProxyThreadConfig {
     /// Router-level destination defaults (derived from RouterOptions once in
     /// main); pools override via server_timeout/connect_timeout.
     pub defaults: destination::DestinationConfig,
+    pub root_route_options: RootRouteOptions,
     /// Idle-connection sweep interval; zero disables.
     pub sweep_interval: Duration,
 }

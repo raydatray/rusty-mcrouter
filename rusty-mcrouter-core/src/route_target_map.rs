@@ -5,9 +5,9 @@ use rusty_mcrouter_config::RoutingPrefix;
 use crate::{route_policy_map::RoutePolicyMap, DynRoute};
 
 #[derive(Clone, Debug)]
-pub(crate) struct RootRouteOptions {
-    pub(crate) default_route: RoutingPrefix,
-    pub(crate) send_invalid_to_default: bool,
+pub struct RootRouteOptions {
+    pub default_route: RoutingPrefix,
+    pub send_invalid_to_default: bool,
 }
 
 impl Default for RootRouteOptions {
