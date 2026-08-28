@@ -52,8 +52,27 @@ pub fn build_route<F>(
 where
     F: BackendFactory,
 {
+    build_route_with_options(
+        config,
+        factory,
+        defaults,
+        metrics_layout,
+        &RootRouteOptions::default(),
+    )
+}
+
+pub fn build_route_with_options<F>(
+    config: &ConfigDocument,
+    factory: &F,
+    defaults: &destination::DestinationConfig,
+    metrics_layout: &RoutingMetricsLayout,
+    root_options: &RootRouteOptions,
+) -> Result<Rc<dyn DynRoute>>
+where
+    F: BackendFactory,
+{
     let mut route_builder = RouteBuilder::new(config, factory, defaults, metrics_layout);
-    route_builder.build_root(config.root(), &RootRouteOptions::default())
+    route_builder.build_root(config.root(), root_options)
 }
 
 struct RouteBuilder<'a, F>
@@ -536,6 +555,51 @@ mod tests {
             error,
             BuildError::DefaultRouteMissing { ref prefix } if prefix == "/././"
         ));
+    }
+
+    #[tokio::test]
+    async fn custom_root_options_select_default_and_invalid_fallback() {
+        let cfg = parse(
+            r#"{
+                "routes": {
+                    "/a/a/": "ErrorRoute|a",
+                    "/b/b/": "ErrorRoute|b"
+                }
+            }"#,
+        )
+        .unwrap();
+        let layout = RoutingMetricsLayout::new(&cfg);
+        let options = RootRouteOptions {
+            default_route: "/b/b/".parse().unwrap(),
+            send_invalid_to_default: true,
+        };
+        let route = build_route_with_options(
+            &cfg,
+            &MockBackendFactory::new(),
+            &defaults(),
+            &layout,
+            &options,
+        )
+        .unwrap();
+        let metrics = RoutingMetricsShard::new(layout);
+        let fixture = BuiltRoute {
+            route,
+            state: RoutingState::new(Arc::clone(&metrics), noop_sink()),
+            metrics,
+        };
+
+        assert_eq!(
+            execute(&fixture, get(b"key")).await.unwrap(),
+            server_error(b"b")
+        );
+        assert_eq!(
+            execute(&fixture, get(b"/a/a/key")).await.unwrap(),
+            server_error(b"a")
+        );
+        assert_eq!(
+            execute(&fixture, get(b"/missing/route/key")).await.unwrap(),
+            server_error(b"b")
+        );
     }
 
     #[tokio::test]
