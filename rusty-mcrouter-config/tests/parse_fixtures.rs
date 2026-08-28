@@ -1,6 +1,6 @@
 use rusty_mcrouter_config::{
     parse_file, ConfigDocument, ConfigError, FailoverErrorKind, FailoverErrorsConfig,
-    FailoverPolicyConfig, RouteConfig,
+    FailoverPolicyConfig, PrefixSelectorConfig, RootRouteConfig, RouteConfig,
 };
 use std::path::PathBuf;
 
@@ -21,11 +21,23 @@ fn parse_err(name: &str) -> ConfigError {
         .unwrap_or_else(|| panic!("fixture {name} unexpectedly parsed successfully"))
 }
 
+fn single_selector(document: &ConfigDocument) -> &PrefixSelectorConfig {
+    let RootRouteConfig::Single(selector) = document.root();
+    selector
+}
+
+fn single_wildcard(document: &ConfigDocument) -> &RouteConfig {
+    single_selector(document)
+        .wildcard()
+        .expect("ordinary root route should normalize to wildcard")
+        .route()
+}
+
 #[test]
 fn nullroute_minimal_config() {
     let doc = parse_ok("nullroute.json");
     assert_eq!(doc.pools().len(), 0);
-    assert_eq!(doc.route(), &RouteConfig::NullRoute);
+    assert_eq!(single_wildcard(&doc), &RouteConfig::NullRoute);
 }
 
 #[test]
@@ -38,7 +50,7 @@ fn basic_1_1_1_canonical_pool_and_route() {
     );
 
     assert!(matches!(
-        doc.route(),
+        single_wildcard(&doc),
         RouteConfig::PoolRoute { pool, .. } if doc.pool(*pool).name() == "foo"
     ));
 }
@@ -68,10 +80,10 @@ fn unsupported_caret_protocol_is_rejected() {
 }
 
 #[test]
-fn unsupported_prefix_selector_route_is_rejected() {
+fn prefix_selector_route_validates_its_children() {
     assert!(matches!(
         parse_err("dev_null.json"),
-        ConfigError::UnsupportedRouteType { ref kind } if kind == "PrefixSelectorRoute"
+        ConfigError::UnresolvedReference { ref name } if name == "DevNullRoute"
     ));
 }
 
@@ -114,7 +126,10 @@ fn comments_in_jsonc_are_stripped() {
         doc.pool_by_name("foo").unwrap().servers()[0].access_point(),
         "localhost:11211"
     );
-    assert!(matches!(doc.route(), RouteConfig::PoolRoute { .. }));
+    assert!(matches!(
+        single_wildcard(&doc),
+        RouteConfig::PoolRoute { .. }
+    ));
 }
 
 #[test]
@@ -164,9 +179,9 @@ fn failover_least_failures_parses_children_and_policy() {
         children,
         failover_errors,
         failover_policy,
-    } = doc.route()
+    } = single_wildcard(&doc)
     else {
-        panic!("expected FailoverRoute, got {:?}", doc.route());
+        panic!("expected FailoverRoute, got {:?}", single_wildcard(&doc));
     };
     assert_eq!(children.len(), 4);
     assert_eq!(*failover_errors, FailoverErrorsConfig::Default);
@@ -181,9 +196,9 @@ fn failover_custom_errors_parses_per_op_lists() {
     let doc = parse_ok("failover_custom_errors.json");
     let RouteConfig::FailoverRoute {
         failover_errors, ..
-    } = doc.route()
+    } = single_wildcard(&doc)
     else {
-        panic!("expected FailoverRoute, got {:?}", doc.route());
+        panic!("expected FailoverRoute, got {:?}", single_wildcard(&doc));
     };
     assert_eq!(
         *failover_errors,

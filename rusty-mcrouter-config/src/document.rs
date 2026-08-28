@@ -109,7 +109,44 @@ const MAX_ROUTE_DEPTH: usize = 128;
 pub struct ConfigDocument {
     pools: Vec<PoolConfig>,
     pool_ids: BTreeMap<String, PoolId>,
+    root: RootRouteConfig,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrefixSelectorConfig {
+    policies: BTreeMap<String, RouteDefinition>,
+    wildcard: Option<RouteDefinition>,
+}
+
+impl PrefixSelectorConfig {
+    pub fn policies(&self) -> &BTreeMap<String, RouteDefinition> {
+        &self.policies
+    }
+
+    pub fn wildcard(&self) -> Option<&RouteDefinition> {
+        self.wildcard.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouteDefinition {
     route: RouteConfig,
+    cache_key: Option<String>,
+}
+
+impl RouteDefinition {
+    pub fn route(&self) -> &RouteConfig {
+        &self.route
+    }
+
+    pub fn cache_key(&self) -> Option<&str> {
+        self.cache_key.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RootRouteConfig {
+    Single(PrefixSelectorConfig),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -151,8 +188,8 @@ impl ConfigDocument {
         self.pools.iter().map(PoolConfig::name)
     }
 
-    pub fn route(&self) -> &RouteConfig {
-        &self.route
+    pub fn root(&self) -> &RootRouteConfig {
+        &self.root
     }
 }
 
@@ -195,13 +232,13 @@ impl TryFrom<RawConfigDocument> for ConfigDocument {
         }
 
         let mut validator = RouteValidator::new(&pools, &pool_ids, named_handles);
-        let route = validator.validate(root, 0)?;
+        let root = RootRouteConfig::Single(validator.validate_selector(root, 0)?);
         validator.validate_all_named_handles()?;
 
         Ok(ConfigDocument {
             pools,
             pool_ids,
-            route,
+            root,
         })
     }
 }
@@ -237,6 +274,44 @@ impl<'a> RouteValidator<'a> {
         }
 
         Ok(())
+    }
+
+    fn validate_selector(
+        &mut self,
+        route: RawRouteConfig,
+        depth: usize,
+    ) -> ConfigResult<PrefixSelectorConfig> {
+        match route {
+            RawRouteConfig::PrefixSelectorRoute { policies, wildcard } => {
+                let policies = policies
+                    .into_iter()
+                    .map(|(prefix, child)| {
+                        let cache_key = child.cache_key();
+                        self.validate(child, depth + 1)
+                            .map(|route| (prefix, RouteDefinition { route, cache_key }))
+                    })
+                    .collect::<ConfigResult<_>>()?;
+                let wildcard = wildcard
+                    .map(|child| {
+                        let cache_key = child.cache_key();
+                        self.validate(*child, depth + 1)
+                            .map(|route| RouteDefinition { route, cache_key })
+                    })
+                    .transpose()?;
+
+                Ok(PrefixSelectorConfig { policies, wildcard })
+            }
+            route => {
+                let cache_key = route.cache_key();
+                Ok(PrefixSelectorConfig {
+                    policies: BTreeMap::new(),
+                    wildcard: Some(RouteDefinition {
+                        route: self.validate(route, depth)?,
+                        cache_key,
+                    }),
+                })
+            }
+        }
     }
 
     fn resolve_named(&mut self, name: &str, depth: usize) -> ConfigResult<RouteConfig> {
@@ -528,11 +603,23 @@ mod tests {
         crate::parse(json).expect_err("expected parse to fail")
     }
 
+    fn single_selector(document: &ConfigDocument) -> &PrefixSelectorConfig {
+        let RootRouteConfig::Single(selector) = document.root();
+        selector
+    }
+
+    fn single_wildcard(document: &ConfigDocument) -> &RouteConfig {
+        single_selector(document)
+            .wildcard()
+            .expect("ordinary root route should normalize to wildcard")
+            .route()
+    }
+
     #[test]
     fn smallest_valid_config_only_has_route() {
         let doc = parse_ok(r#"{ "route": "NullRoute" }"#);
         assert_eq!(doc.pools().len(), 0);
-        assert_eq!(doc.route(), &RouteConfig::NullRoute);
+        assert_eq!(single_wildcard(&doc), &RouteConfig::NullRoute);
     }
 
     #[test]
@@ -545,7 +632,7 @@ mod tests {
             "a:1"
         );
         assert!(matches!(
-            doc.route(),
+            single_wildcard(&doc),
             RouteConfig::PoolRoute { pool, .. }
                 if doc.pool(*pool).name() == "foo"
         ));
@@ -567,7 +654,7 @@ mod tests {
             }"#,
         );
         assert!(matches!(
-            doc.route(),
+            single_wildcard(&doc),
             RouteConfig::PoolRoute { pool, .. } if doc.pool(*pool).name() == "A"
         ));
     }
@@ -585,7 +672,7 @@ mod tests {
             }"#,
         );
         assert!(matches!(
-            doc.route(),
+            single_wildcard(&doc),
             RouteConfig::PoolRoute { pool, .. } if doc.pool(*pool).name() == "A"
         ));
     }
@@ -602,6 +689,60 @@ mod tests {
             }"#,
         );
         assert!(matches!(error, ConfigError::PrefixRoutingNotImplemented));
+    }
+
+    #[test]
+    fn prefix_selector_validates_policies_and_wildcard() {
+        let document = parse_ok(
+            r#"{
+                "route": {
+                    "type": "PrefixSelectorRoute",
+                    "policies": {
+                        "null:": "NullRoute",
+                        "error:": { "type": "ErrorRoute", "message": "policy" }
+                    },
+                    "wildcard": { "type": "ErrorRoute", "message": "wildcard" }
+                }
+            }"#,
+        );
+        let selector = single_selector(&document);
+
+        assert_eq!(
+            selector.policies().get("null:").map(RouteDefinition::route),
+            Some(&RouteConfig::NullRoute)
+        );
+        assert!(matches!(
+            selector.policies().get("error:").map(RouteDefinition::route),
+            Some(RouteConfig::ErrorRoute { message: Some(message) }) if message == "policy"
+        ));
+        assert!(matches!(
+            selector.wildcard().map(RouteDefinition::route),
+            Some(RouteConfig::ErrorRoute { message: Some(message) }) if message == "wildcard"
+        ));
+
+        assert_eq!(
+            selector.policies().get("null:").unwrap().cache_key(),
+            Some("NullRoute")
+        );
+        assert_eq!(selector.wildcard().unwrap().cache_key(), None);
+    }
+
+    #[test]
+    fn prefix_selector_is_only_valid_at_the_root() {
+        assert!(matches!(
+            parse_err(
+                r#"{
+                    "route": {
+                        "type": "FailoverRoute",
+                        "children": [{
+                            "type": "PrefixSelectorRoute",
+                            "wildcard": "NullRoute"
+                        }]
+                    }
+                }"#
+            ),
+            ConfigError::UnsupportedRouteType { ref kind } if kind == "PrefixSelectorRoute"
+        ));
     }
 
     #[test]
@@ -669,7 +810,7 @@ mod tests {
             }"#,
         );
         assert!(matches!(
-            document.route(),
+            single_wildcard(&document),
             RouteConfig::PoolRoute { pool, .. } if document.pool(*pool).name() == "A"
         ));
 

@@ -4,13 +4,19 @@ use rusty_mcrouter_backend::tko::FailOpenThresholds;
 use rusty_mcrouter_backend::{destination, Backend, BackendFactory, PoolFailOpen, PoolHealth};
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
-    PoolId, RouteConfig,
+    PoolId, PrefixSelectorConfig, RootRouteConfig, RouteConfig,
 };
 use thiserror::Error;
 
 use crate::{
     failover::{code_of_kind, FailoverErrors, FailoverPolicy, InOrderPolicy, LeastFailuresPolicy},
-    routes::{DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, Route},
+    prefix_selector::{PrefixPolicy, PrefixSelector},
+    route_policy_map::RoutePolicyMap,
+    route_target_map::{RootRouteOptions, RouteTargetMap},
+    routes::{
+        DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, RootRoute,
+        Route,
+    },
     selectors::{Ch3, Crc32, Salted, Selector},
     RoutingMetricsLayout,
 };
@@ -40,7 +46,7 @@ where
     F: BackendFactory,
 {
     let mut route_builder = RouteBuilder::new(config, factory, defaults, metrics_layout);
-    route_builder.build_handle(config.route())
+    route_builder.build_root(config.root(), &RootRouteOptions::default())
 }
 
 struct RouteBuilder<'a, F>
@@ -71,6 +77,56 @@ where
             metrics_layout,
             pool_cache: BTreeMap::new(),
         }
+    }
+
+    fn build_root(
+        &mut self,
+        root: &RootRouteConfig,
+        options: &RootRouteOptions,
+    ) -> Result<Rc<dyn DynRoute>> {
+        let RootRouteConfig::Single(config) = root;
+        let selector = self.build_prefix_selector(config)?;
+        let route_map = Rc::new(RoutePolicyMap::new(&[selector]));
+        let targets = RouteTargetMap::new(options, route_map);
+
+        Ok(RootRoute::new(targets).into_dyn())
+    }
+
+    fn build_prefix_selector(
+        &mut self,
+        config: &PrefixSelectorConfig,
+        route_cache: &mut HashMap<String, Rc<dyn DynRoute>>,
+    ) -> Result<Rc<PrefixSelector>> {
+        let mut policies = Vec::with_capacity(config.policies().len());
+        for (prefix, child) in config.policies() {
+            policies.push(PrefixPolicy::new(
+                prefix.as_bytes().to_vec(),
+                self.build_definition(child, route_cache)?,
+            ));
+        }
+
+        let wildcard = config
+            .wildcard()
+            .map(|child| self.build_definition(child, route_cache))
+            .transpose()?;
+
+        Ok(Rc::new(PrefixSelector::new(policies, wildcard)))
+    }
+
+    fn build_definition(
+        &mut self,
+        definition: &RouteDefinition,
+        route_cache: &mut HashMap<String, Rc<dyn DynRoute>>,
+    ) -> Result<Rc<dyn DynRoute>> {
+        if let Some(cached) = definition.cache_key().and_then(|key| route_cache.get(key)) {
+            return Ok(Rc::clone(cached));
+        }
+
+        let route = self.build_handle(definition.route())?;
+        if let Some(key) = definition.cache_key() {
+            route_cache.insert(key.to_string(), Rc::clone(&route));
+        }
+        Ok(route)
     }
 
     fn build_handle(&mut self, handle: &RouteConfig) -> Result<Rc<dyn DynRoute>> {
@@ -302,6 +358,82 @@ mod tests {
         let route = build(&cfg, &MockBackendFactory::new()).unwrap();
         let reply = execute(&route, get(b"foo")).await.unwrap();
         assert_eq!(reply, server_error(b"nope"));
+    }
+
+    #[tokio::test]
+    async fn prefix_selector_uses_longest_policy_then_wildcard() {
+        let cfg = parse(
+            r#"{
+                "route": {
+                    "type": "PrefixSelectorRoute",
+                    "policies": {
+                        "key:": "ErrorRoute|short",
+                        "key:specific:": "ErrorRoute|long"
+                    },
+                    "wildcard": "NullRoute"
+                }
+            }"#,
+        )
+        .unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
+
+        assert_eq!(
+            execute(&route, get(b"key:specific:1")).await.unwrap(),
+            server_error(b"long")
+        );
+        assert_eq!(
+            execute(&route, get(b"key:other")).await.unwrap(),
+            server_error(b"short")
+        );
+        assert_eq!(execute(&route, get(b"other")).await.unwrap(), get_miss());
+    }
+
+    #[tokio::test]
+    async fn prefix_selector_uses_routing_key_for_default_prefix() {
+        let cfg = parse(
+            r#"{
+                "route": {
+                    "type": "PrefixSelectorRoute",
+                    "policies": { "key": "ErrorRoute|matched" },
+                    "wildcard": "NullRoute"
+                }
+            }"#,
+        )
+        .unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
+
+        let reply = execute(&route, get(b"/././key|#|suffix")).await.unwrap();
+        assert_eq!(reply, server_error(b"matched"));
+    }
+
+    #[tokio::test]
+    async fn singular_root_rejects_unknown_routing_prefix() {
+        let cfg = parse(r#"{"route": "NullRoute"}"#).unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
+
+        assert!(matches!(
+            execute(&route, get(b"/other/cluster/key")).await,
+            Err(crate::RouteError::NoRoute)
+        ));
+    }
+
+    #[tokio::test]
+    async fn policies_only_selector_rejects_unmatched_key() {
+        let cfg = parse(
+            r#"{
+                "route": {
+                    "type": "PrefixSelectorRoute",
+                    "policies": { "matched:": "NullRoute" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let route = build(&cfg, &MockBackendFactory::new()).unwrap();
+
+        assert!(matches!(
+            execute(&route, get(b"unmatched:key")).await,
+            Err(crate::RouteError::NoRoute)
+        ));
     }
 
     #[tokio::test]

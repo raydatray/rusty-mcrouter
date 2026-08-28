@@ -6,6 +6,7 @@ mod metrics;
 mod prefix_selector;
 mod route_builder;
 mod route_policy_map;
+mod route_target_map;
 mod routes;
 mod selectors;
 
@@ -16,6 +17,6 @@ pub use crate::metrics::{
 };
 pub use crate::route_builder::{build_route, BuildError};
 pub use crate::routes::{
-    DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, Route, RouteError,
-    RouteFuture,
+    DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, RootRoute, Route,
+    RouteError, RouteFuture,
 };

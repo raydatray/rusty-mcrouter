@@ -11,7 +11,7 @@ pub(crate) fn route_code(result: &Result<Reply>) -> Option<ResultCode> {
     match result {
         Ok(reply) => Some(reply_code(reply)),
         Err(RouteError::Backend(err)) => Some(err.code()),
-        Err(RouteError::SelectorOutOfRange { .. }) => None,
+        Err(RouteError::SelectorOutOfRange { .. } | RouteError::NoRoute) => None,
     }
 }
 
@@ -135,6 +135,7 @@ mod tests {
                 b"bad",
             ))))),
             Err(RouteError::SelectorOutOfRange { idx: 3, len: 2 }),
+            Err(RouteError::NoRoute),
         ];
         let errors = FailoverErrors::default();
         for case in &cases {
@@ -157,6 +158,7 @@ mod tests {
             route_code(&Err(RouteError::SelectorOutOfRange { idx: 1, len: 1 })),
             None
         );
+        assert_eq!(route_code(&Err(RouteError::NoRoute)), None);
     }
 
     #[test]
