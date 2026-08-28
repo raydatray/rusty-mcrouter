@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 use rusty_mcrouter_config::RoutingPrefix;
 
@@ -22,16 +22,20 @@ impl Default for RootRouteOptions {
 }
 
 pub(crate) struct RouteTargetMap {
-    default_prefix: Box<[u8]>,
     default_route_map: Rc<RoutePolicyMap>,
+    by_route: HashMap<Box<[u8]>, Rc<RoutePolicyMap>>,
     send_invalid_to_default: bool,
 }
 
 impl RouteTargetMap {
-    pub(crate) fn new(options: &RootRouteOptions, default_route_map: Rc<RoutePolicyMap>) -> Self {
+    pub(crate) fn new(
+        options: &RootRouteOptions,
+        default_route_map: Rc<RoutePolicyMap>,
+        by_route: HashMap<Box<[u8]>, Rc<RoutePolicyMap>>,
+    ) -> Self {
         Self {
-            default_prefix: options.default_route.as_bytes().into(),
             default_route_map,
+            by_route,
             send_invalid_to_default: options.send_invalid_to_default,
         }
     }
@@ -43,11 +47,16 @@ impl RouteTargetMap {
     ) -> &[Rc<dyn DynRoute>] {
         match routing_prefix {
             None => self.default_route_map.targets(routing_key),
-            Some(prefix) if prefix == self.default_prefix.as_ref() => {
-                self.default_route_map.targets(routing_key)
-            }
-            Some(_) if self.send_invalid_to_default => self.default_route_map.targets(routing_key),
-            Some(_) => &[],
+            Some(prefix) => self
+                .by_route
+                .get(prefix)
+                .map(|route_map| route_map.targets(routing_key))
+                .filter(|targets| !targets.is_empty())
+                .or_else(|| {
+                    self.send_invalid_to_default
+                        .then(|| self.default_route_map.targets(routing_key))
+                })
+                .unwrap_or_default(),
         }
     }
 }

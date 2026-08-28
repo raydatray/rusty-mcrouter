@@ -6,6 +6,7 @@ mod server;
 
 pub use crate::document::{
     parse, parse_file, ConfigDocument, ConfigError, PoolId, PrefixSelectorConfig, RootRouteConfig,
+    RouteDefinition, RouteSelectorConfig,
 };
 pub use crate::pool::{PoolConfig, PoolTkoTrackerConfig};
 pub use crate::route::{
