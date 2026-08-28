@@ -11,7 +11,9 @@ pub use error_route::ErrorRoute;
 pub use failover_route::FailoverRoute;
 pub use null_route::NullRoute;
 pub use pool_route::PoolRoute;
-pub use root_route::RootRoute;
+pub use root_route::{RootRoute, RootRouteOptions};
+
+pub(crate) use root_route::{PrefixPolicy, PrefixSelector, RoutePolicyMap, RouteTargetMap};
 
 use std::{future::Future, pin::Pin, rc::Rc};
 
