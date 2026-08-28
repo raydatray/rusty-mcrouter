@@ -18,7 +18,7 @@ impl SelectionRoute {
 }
 
 impl Route for SelectionRoute {
-    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+    async fn route(&self, context: &RouteContext, request: Request) -> Result<Reply> {
         let idx = self.selector.select(routing_key(&request));
 
         // defensive bounds check: Ch3/Crc32 are bound to `n` and cannot exceed it,

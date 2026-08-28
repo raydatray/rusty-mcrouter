@@ -29,7 +29,7 @@ impl PoolRoute {
 }
 
 impl Route for PoolRoute {
-    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+    async fn route(&self, context: &RouteContext, request: Request) -> Result<Reply> {
         self.inner.route(context, request).await
     }
 }

@@ -17,7 +17,7 @@ impl RootRoute {
 }
 
 impl Route for RootRoute {
-    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+    async fn route(&self, context: &RouteContext, request: Request) -> Result<Reply> {
         let target = self
             .route_targets
             .resolve(request.key().routing_prefix(), request.key().routing_key())

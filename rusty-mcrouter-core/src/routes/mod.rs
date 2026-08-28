@@ -38,7 +38,7 @@ pub type Result<T> = std::result::Result<T, RouteError>;
 pub trait Route: 'static {
     fn route(
         &self,
-        context: &RouteContext<'_>,
+        context: &RouteContext,
         request: Request,
     ) -> impl Future<Output = Result<Reply>>;
 
@@ -60,14 +60,14 @@ pub trait Route: 'static {
 pub type RouteFuture<'a> = Pin<Box<dyn Future<Output = Result<Reply>> + 'a>>;
 
 pub trait DynRoute: 'static {
-    fn route_dyn<'a>(&'a self, context: &'a RouteContext<'_>, request: Request) -> RouteFuture<'a>;
+    fn route_dyn<'a>(&'a self, context: &'a RouteContext, request: Request) -> RouteFuture<'a>;
 }
 
 impl<R> DynRoute for R
 where
     R: Route,
 {
-    fn route_dyn<'a>(&'a self, context: &'a RouteContext<'_>, request: Request) -> RouteFuture<'a> {
+    fn route_dyn<'a>(&'a self, context: &'a RouteContext, request: Request) -> RouteFuture<'a> {
         Box::pin(<R as Route>::route(self, context, request))
     }
 }

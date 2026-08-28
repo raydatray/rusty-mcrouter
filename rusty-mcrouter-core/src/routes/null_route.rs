@@ -9,7 +9,7 @@ use crate::RouteContext;
 pub struct NullRoute;
 
 impl Route for NullRoute {
-    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+    async fn route(&self, context: &RouteContext, request: Request) -> Result<Reply> {
         context.metrics().dev_null_requests.inc();
 
         Ok(match request {
