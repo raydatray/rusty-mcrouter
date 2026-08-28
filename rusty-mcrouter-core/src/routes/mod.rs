@@ -3,6 +3,7 @@ mod error_route;
 mod failover_route;
 mod null_route;
 mod pool_route;
+mod root_route;
 mod selection_route;
 
 pub use destination_route::DestinationRoute;
@@ -10,6 +11,7 @@ pub use error_route::ErrorRoute;
 pub use failover_route::FailoverRoute;
 pub use null_route::NullRoute;
 pub use pool_route::PoolRoute;
+pub use root_route::RootRoute;
 
 use std::{future::Future, pin::Pin, rc::Rc};
 
@@ -26,6 +28,9 @@ pub enum RouteError {
 
     #[error("selector returned index {idx} but pool has {len} children")]
     SelectorOutOfRange { idx: usize, len: usize },
+
+    #[error("request did not match a configured route")]
+    NoRoute,
 }
 
 pub type Result<T> = std::result::Result<T, RouteError>;

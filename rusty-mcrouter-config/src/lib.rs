@@ -4,7 +4,9 @@ mod route;
 mod routing_prefix;
 mod server;
 
-pub use crate::document::{parse, parse_file, ConfigDocument, ConfigError, PoolId};
+pub use crate::document::{
+    parse, parse_file, ConfigDocument, ConfigError, PoolId, PrefixSelectorConfig, RootRouteConfig,
+};
 pub use crate::pool::{PoolConfig, PoolTkoTrackerConfig};
 pub use crate::route::{
     FailoverErrorKind, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc,
