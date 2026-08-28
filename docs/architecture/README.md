@@ -73,7 +73,9 @@ thread's current-thread Tokio runtime.
 `ProxyRuntime` owns routed-request tasks, client connections, listener and
 destination-sweep tasks. `ControlRuntime` owns event presentation, the metrics
 listener and at most 32 concurrent metrics connection tasks. No OS thread or
-long-lived runtime task is intentionally detached.
+long-lived runtime task is intentionally detached. Wildcard routing is the
+exception for short-lived work: non-primary fanout targets run in detached
+local tasks and may be cancelled when their proxy thread stops.
 
 Startup binds listeners and waits for each thread's ready acknowledgement
 before printing `READY` and `METRICS`. Ctrl-C and unexpected thread exits are
@@ -93,7 +95,7 @@ sequenceDiagram
     C->>P: mg foo v q O123
     Note over P: MetaRequestDecoder<br/>Request + MetaReplyPlan<br/>seq=N, plan pinned to conn
     P->>R: Request
-    Note over R: pool, hash, failover<br/>reaches TKO destinations, which fast-fail<br/>consults fail-open
+    Note over R: RootRoute selects routing-prefix targets<br/>then pool, hash and failover routes run<br/>TKO destinations fast-fail and consult fail-open
     R->>D: Destination::prepare_send
     Note over D: MetaRequestEncoder<br/>canonical bytes + Expectation<br/>q/O/k stripped
     D->>S: mg foo v
@@ -117,7 +119,10 @@ the identity of a request is split into three distinct components
 three consequences of this design are:
 1. **the backend never sees the client's spelling of the request** - rusty-mcrouter re-encodes from the parsed `Request`, not the client's original bytes. this means that the routing prefix is stripped from the original key, presentation flags (q,O,k) are removed, and the flag order is normalized. removed flags are stored in `MetaReplyPlan` and reapplied when encoding the reply back to the client
 2. **reply matching is positional** - no opaque tokens are sent to the backend. the connection actor matches replies on a FIFO of `MetaReplyExpectation`s, with tombstones keeping alignment across per-request timeouts
-3. **clients see strict request order** - replies may complete out of order (thru fanout or failovers), but the frontend reserializes thru sequence-numbered slots before writing
+3. **clients see strict request order** - primary replies may complete out of order, but the frontend reserializes thru sequence-numbered slots before writing. wildcard secondaries have no client reply slot; their replies are discarded
+
+see [routing prefixes](routing-prefixes.md) for exact routing, key-prefix
+policies, fallback and wildcard fanout behavior.
 
 ## divergences from mcrouter
 
@@ -125,4 +130,4 @@ three consequences of this design are:
 |---------------|-------------------------------------------|---------------------------------------------|
 | protocol      | ascii + binary + meta                     | meta only, on both legs                     |
 | runtime       | libevent + folly fibers                   | tokio, thread-per-worker, thread-local `Rc` |
-| route types   | full zoo: shadow, prefix, AllSync, WarmUp | pool, hash, failover, selection so far      |
+| route types   | full zoo: shadow, prefix, AllSync, WarmUp | root/prefix, pool, hash, failover, null and error |
