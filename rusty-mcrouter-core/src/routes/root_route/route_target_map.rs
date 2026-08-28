@@ -1,25 +1,8 @@
 use std::{collections::HashMap, rc::Rc};
 
-use rusty_mcrouter_config::RoutingPrefix;
+use crate::DynRoute;
 
-use crate::{route_policy_map::RoutePolicyMap, DynRoute};
-
-#[derive(Clone, Debug)]
-pub struct RootRouteOptions {
-    pub default_route: RoutingPrefix,
-    pub send_invalid_to_default: bool,
-}
-
-impl Default for RootRouteOptions {
-    fn default() -> Self {
-        Self {
-            default_route: "/././"
-                .parse()
-                .expect("static default routing prefix is valid"),
-            send_invalid_to_default: false,
-        }
-    }
-}
+use super::{route_policy_map::RoutePolicyMap, RootRouteOptions};
 
 pub(crate) struct RouteTargetMap {
     default_route_map: Rc<RoutePolicyMap>,

@@ -1,9 +1,10 @@
 use std::{collections::BTreeSet, rc::Rc};
 
-use crate::{
+use crate::DynRoute;
+
+use super::{
     lower_bound_prefix_map::{LowerBoundPrefixMap, PrefixValue},
     prefix_selector::PrefixSelector,
-    DynRoute,
 };
 
 pub(crate) struct RoutePolicyMap {

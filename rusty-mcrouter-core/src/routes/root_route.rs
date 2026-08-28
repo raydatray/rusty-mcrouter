@@ -1,12 +1,38 @@
 use std::rc::Rc;
 
+use rusty_mcrouter_config::RoutingPrefix;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::{
-    route_target_map::RouteTargetMap,
     routes::{Result, Route, RouteError},
     DynRoute, RouteContext,
 };
+
+mod lower_bound_prefix_map;
+mod prefix_selector;
+mod route_policy_map;
+mod route_target_map;
+
+pub(crate) use prefix_selector::{PrefixPolicy, PrefixSelector};
+pub(crate) use route_policy_map::RoutePolicyMap;
+pub(crate) use route_target_map::RouteTargetMap;
+
+#[derive(Clone, Debug)]
+pub struct RootRouteOptions {
+    pub default_route: RoutingPrefix,
+    pub send_invalid_to_default: bool,
+}
+
+impl Default for RootRouteOptions {
+    fn default() -> Self {
+        Self {
+            default_route: "/././"
+                .parse()
+                .expect("static default routing prefix is valid"),
+            send_invalid_to_default: false,
+        }
+    }
+}
 
 pub struct RootRoute {
     route_targets: RouteTargetMap,
