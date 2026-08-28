@@ -684,6 +684,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_exact_route_uses_regional_fallback_only() {
+        let cfg = parse(
+            r#"{
+                "routes": {
+                    "/eu/a/": "ErrorRoute|default",
+                    "/us/a/": {
+                        "type": "PrefixSelectorRoute",
+                        "policies": { "matched:": "ErrorRoute|exact" }
+                    },
+                    "/us/fallback/": "ErrorRoute|fallback"
+                }
+            }"#,
+        )
+        .unwrap();
+        let layout = RoutingMetricsLayout::new(&cfg);
+        let options = RootRouteOptions {
+            default_route: "/eu/a/".parse().unwrap(),
+            send_invalid_to_default: false,
+        };
+        let route = build_route_with_options(
+            &cfg,
+            &MockBackendFactory::new(),
+            &defaults(),
+            &layout,
+            &options,
+        )
+        .unwrap();
+        let metrics = RoutingMetricsShard::new(layout);
+        let fixture = BuiltRoute {
+            route,
+            state: RoutingState::new(Arc::clone(&metrics), noop_sink()),
+            metrics,
+        };
+
+        assert_eq!(
+            execute(&fixture, get(b"/us/missing/key")).await.unwrap(),
+            server_error(b"fallback")
+        );
+        assert!(matches!(
+            execute(&fixture, get(b"/us/a/unmatched:key")).await,
+            Err(crate::RouteError::NoRoute)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn arbitrary_wildcard_uses_slow_path_with_default_primary() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let cfg = parse(
+                    r#"{
+                        "routes": {
+                            "/uk/preprod/": "ErrorRoute|secondary",
+                            "/us/dev/": "ErrorRoute|unmatched",
+                            "/us/prod/": "ErrorRoute|primary"
+                        }
+                    }"#,
+                )
+                .unwrap();
+                let layout = RoutingMetricsLayout::new(&cfg);
+                let options = RootRouteOptions {
+                    default_route: "/us/prod/".parse().unwrap(),
+                    send_invalid_to_default: false,
+                };
+                let route = build_route_with_options(
+                    &cfg,
+                    &MockBackendFactory::new(),
+                    &defaults(),
+                    &layout,
+                    &options,
+                )
+                .unwrap();
+                let metrics = RoutingMetricsShard::new(layout);
+                let fixture = BuiltRoute {
+                    route,
+                    state: RoutingState::new(Arc::clone(&metrics), noop_sink()),
+                    metrics,
+                };
+
+                assert_eq!(
+                    execute(&fixture, get(b"/u*/*prod/key")).await.unwrap(),
+                    server_error(b"primary")
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn builds_pool_route_from_shorthand() {
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
         let cfg = parse(json).unwrap();
