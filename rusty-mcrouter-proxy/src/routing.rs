@@ -16,10 +16,7 @@ pub(crate) async fn route_request(
     complete_route(context, result)
 }
 
-pub(crate) fn complete_route(
-    context: RouteContext<'_>,
-    result: Result<Reply, RouteError>,
-) -> Reply {
+pub(crate) fn complete_route(context: RouteContext, result: Result<Reply, RouteError>) -> Reply {
     context.finish(&result);
     result.unwrap_or_else(route_error_reply)
 }

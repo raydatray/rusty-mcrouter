@@ -14,13 +14,13 @@ pub struct RoutingState {
     events: RoutingEventSink,
 }
 
-pub struct RouteContext<'a> {
-    state: &'a RoutingState,
+pub struct RouteContext {
+    state: Rc<RoutingState>,
     selected_pool: Cell<Option<PoolId>>,
     started: Instant,
 }
 
-impl RouteContext<'_> {
+impl RouteContext {
     pub fn metrics(&self) -> &RoutingMetricsShard {
         &self.state.metrics
     }
@@ -62,9 +62,9 @@ impl RoutingState {
         self.metrics.layout()
     }
 
-    pub fn context(&self) -> RouteContext<'_> {
+    pub fn context(self: &Rc<Self>) -> RouteContext {
         RouteContext {
-            state: self,
+            state: Rc::clone(self),
             selected_pool: Cell::new(None),
             started: Instant::now(),
         }
@@ -100,7 +100,7 @@ mod tests {
     impl Route for InspectContext {
         async fn route(
             &self,
-            context: &RouteContext<'_>,
+            context: &RouteContext,
             _request: Request,
         ) -> Result<Reply, RouteError> {
             self.observe(context);
@@ -111,7 +111,7 @@ mod tests {
     }
 
     impl InspectContext {
-        fn observe(&self, context: &RouteContext<'_>) {
+        fn observe(&self, context: &RouteContext) {
             assert!(std::ptr::eq(context.metrics(), Arc::as_ptr(&self.expected)));
             self.observations.set(self.observations.get() + 1);
         }
@@ -127,7 +127,7 @@ mod tests {
     }
 
     async fn execute(
-        state: &RoutingState,
+        state: &Rc<RoutingState>,
         route: Rc<dyn DynRoute>,
         request: Request,
     ) -> Result<Reply, RouteError> {

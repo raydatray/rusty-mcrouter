@@ -37,7 +37,7 @@ impl<B> Route for DestinationRoute<B>
 where
     B: Backend,
 {
-    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+    async fn route(&self, context: &RouteContext, request: Request) -> Result<Reply> {
         let started = Instant::now();
         let result = match self.backend.prepare_send(request) {
             Err(rejection) => Err(rejection.into()),

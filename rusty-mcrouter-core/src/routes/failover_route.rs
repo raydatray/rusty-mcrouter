@@ -49,7 +49,7 @@ fn route_result_is_error(result: &Result<Reply>) -> bool {
     }
 }
 
-fn record_policy_error(context: &RouteContext<'_>, result: &Result<Reply>) {
+fn record_policy_error(context: &RouteContext, result: &Result<Reply>) {
     let Some(code) = route_code(result) else {
         return;
     };
@@ -63,7 +63,7 @@ fn record_policy_error(context: &RouteContext<'_>, result: &Result<Reply>) {
     context.metrics().failover_policy_errors[class as usize].inc();
 }
 
-fn record_exhausted(context: &RouteContext<'_>, policy: FailoverPolicyKind, request: &Request) {
+fn record_exhausted(context: &RouteContext, policy: FailoverPolicyKind, request: &Request) {
     context.metrics().failover_exhausted[policy as usize].inc();
     context.emit(RoutingEventRecord {
         event: RoutingEvent::FailoverTargetsExhausted,
@@ -73,7 +73,7 @@ fn record_exhausted(context: &RouteContext<'_>, policy: FailoverPolicyKind, requ
 }
 
 impl Route for FailoverRoute {
-    async fn route(&self, context: &RouteContext<'_>, request: Request) -> Result<Reply> {
+    async fn route(&self, context: &RouteContext, request: Request) -> Result<Reply> {
         let policy = self.policy.kind();
         let mut tries = 0usize;
 

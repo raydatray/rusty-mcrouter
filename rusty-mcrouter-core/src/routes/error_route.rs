@@ -18,7 +18,7 @@ impl ErrorRoute {
 }
 
 impl Route for ErrorRoute {
-    async fn route(&self, _context: &RouteContext<'_>, _request: Request) -> Result<Reply> {
+    async fn route(&self, _context: &RouteContext, _request: Request) -> Result<Reply> {
         Ok(match &self.message {
             Some(m) => Reply::Error(ErrorReply::Server(Some(m.clone()))),
             None => Reply::Error(ErrorReply::Error),
