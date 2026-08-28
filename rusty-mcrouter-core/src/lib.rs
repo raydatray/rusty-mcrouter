@@ -3,6 +3,7 @@ mod events;
 mod failover;
 mod lower_bound_prefix_map;
 mod metrics;
+mod prefix_selector;
 mod route_builder;
 mod routes;
 mod selectors;
