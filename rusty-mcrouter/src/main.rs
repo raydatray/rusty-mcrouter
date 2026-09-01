@@ -7,22 +7,14 @@ use rusty_mcrouter_backend::{
     tko::TkoTrackerMap,
 };
 use rusty_mcrouter_config::{parse_file, RoutingPrefix};
-use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsLayout};
+use rusty_mcrouter_core::RootRouteOptions;
 use rusty_mcrouter_observability::{channel, logging, ControlMetrics, ScrapeInputs};
-use rusty_mcrouter_proxy::{
-    ListenerConfig, ProxyHandle, ProxySet, ProxyShards, ProxyShared, ProxyThreadConfig, ThreadMode,
-};
+use rusty_mcrouter_proxy::{ProxyShared, ThreadMode};
 
 use crate::control::{ControlThread, ControlThreadConfig, ProcessEvent};
-use crate::proxy::ProxyThread;
+use crate::proxy::{ProxyFleet, ProxyFleetConfig};
 
-use std::{
-    io::Write,
-    net::{SocketAddr, ToSocketAddrs},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{io::Write, net::ToSocketAddrs, path::PathBuf, sync::Arc, time::Duration};
 
 const EVENT_BUS_CAPACITY: usize = 1024;
 
@@ -179,11 +171,8 @@ fn main() -> anyhow::Result<()> {
     let control_metrics = Arc::new(ControlMetrics::default());
     let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&control_metrics));
 
-    let config = Arc::new(parse_file(&args.config)?);
-    let routing_layout = RoutingMetricsLayout::new(&config);
-
     let shared = Arc::new(ProxyShared {
-        config,
+        config: Arc::new(parse_file(&args.config)?),
         tko_map: TkoTrackerMap::new(events.sink()),
         destinations: DestinationMetricsRegistry::new(),
         defaults: destination_defaults(&args.options),
@@ -195,60 +184,21 @@ fn main() -> anyhow::Result<()> {
         thread_mode: ThreadMode::SameThread,
     });
 
-    // both ends of every proxy's channels: the handles go to everyone
-    // (as the ProxySet), each inbox to its own thread
-    let (handles, inboxes): (Vec<_>, Vec<_>) =
-        (0..args.num_proxies).map(ProxyHandle::allocate).unzip();
-    let proxies = ProxySet::new(handles.clone());
-
-    let use_reuseport = num_listening_sockets > 1;
     let (process_event_tx, process_event_rx) = std::sync::mpsc::channel();
-    let mut proxy_threads = Vec::with_capacity(args.num_proxies);
-    let mut bound_addr: Option<SocketAddr> = None;
-    // per-thread counter shards, created here so the scrape sources hold
-    // the same Arcs the threads write
-    let mut proxy_shards = Vec::with_capacity(args.num_proxies);
 
-    for (proxy_id, (handle, inbox)) in handles.into_iter().zip(inboxes).enumerate() {
-        let listener = (proxy_id < num_listening_sockets).then_some(ListenerConfig {
+    let proxies = ProxyFleet::spawn(
+        ProxyFleetConfig {
+            num_proxies: args.num_proxies,
+            num_listening_sockets,
             listen_addr,
-            use_reuseport,
-        });
-        let shards = ProxyShards::new(Arc::clone(&routing_layout));
-        proxy_shards.push(shards.clone());
-
-        let cfg = ProxyThreadConfig {
-            proxy_id,
-            inbox,
-            shards,
             shared: Arc::clone(&shared),
-            proxies: proxies.clone(),
-            listener,
-            routing_events: events.sink(),
-            events: events.sink(),
-        };
-
-        let (thread, maybe_addr) = match ProxyThread::spawn(handle, cfg, process_event_tx.clone()) {
-            Ok(spawned) => spawned,
-            Err(error) => {
-                shutdown_proxy_threads(&mut proxy_threads);
-                return Err(error);
-            }
-        };
-        if let Some(addr) = maybe_addr {
-            bound_addr.get_or_insert(addr);
-        }
-        proxy_threads.push(thread);
-    }
-
-    // drop main's sender copies: each thread keeps its own ProxySet clone
-    // and the leaves hold their event sinks, so the queues stay open
-    // until the threads terminate
-    drop(proxies);
-    drop(events);
+            events,
+        },
+        process_event_tx.clone(),
+    )?;
 
     let registry = ScrapeInputs {
-        proxies: proxy_shards,
+        proxies: proxies.shards(),
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
         control: Arc::clone(&control_metrics),
@@ -266,58 +216,33 @@ fn main() -> anyhow::Result<()> {
     ) {
         Ok(spawned) => spawned,
         Err(error) => {
-            shutdown_proxy_threads(&mut proxy_threads);
+            let _ = proxies.shutdown();
             return Err(error);
         }
     };
     drop(process_event_tx);
 
-    let addr =
-        bound_addr.ok_or_else(|| anyhow::anyhow!("no proxy thread reported a bound address"))?;
-    println!("READY {addr}");
+    println!("READY {}", proxies.bound_addr());
     println!("METRICS {metrics_bound}");
     std::io::stdout().flush()?;
     tracing::info!(
-        listen = %addr,
+        listen = %proxies.bound_addr(),
         proxy_threads = args.num_proxies,
         listening_sockets = num_listening_sockets,
         config = %args.config.display(),
         "rusty-mcrouter ready"
     );
 
-    let mut first_error = match process_event_rx.recv()? {
-        ProcessEvent::ShutdownRequested => None,
-        ProcessEvent::ProxyExited { id } => Some(anyhow::anyhow!("proxy-{id} exited unexpectedly")),
-        ProcessEvent::ControlExited => Some(anyhow::anyhow!("control thread exited unexpectedly")),
+    let outcome = match process_event_rx.recv()? {
+        ProcessEvent::ShutdownRequested => Ok(()),
+        ProcessEvent::ProxyExited { id } => Err(anyhow::anyhow!("proxy-{id} exited unexpectedly")),
+        ProcessEvent::ControlExited => Err(anyhow::anyhow!("control thread exited unexpectedly")),
     };
 
-    if let Some(error) = shutdown_proxy_threads(&mut proxy_threads) {
-        if first_error.is_none() {
-            first_error = Some(error);
-        }
-    }
-    if let Err(error) = control_thread.shutdown() {
-        if first_error.is_none() {
-            first_error = Some(error);
-        }
-    }
-    if let Some(error) = first_error {
-        return Err(error);
-    }
-
-    Ok(())
-}
-
-fn shutdown_proxy_threads(proxy_threads: &mut Vec<ProxyThread>) -> Option<anyhow::Error> {
-    let mut first_error = None;
-    for thread in proxy_threads.drain(..) {
-        if let Err(error) = thread.shutdown() {
-            if first_error.is_none() {
-                first_error = Some(error);
-            }
-        }
-    }
-    first_error
+    // proxies first so their Stopped events reach the control runtime
+    let stopped_proxies = proxies.shutdown();
+    let stopped_control = control_thread.shutdown();
+    outcome.and(stopped_proxies).and(stopped_control)
 }
 
 #[cfg(test)]
