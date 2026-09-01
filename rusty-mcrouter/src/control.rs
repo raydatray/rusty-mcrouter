@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::mpsc::SyncSender;
 
 use anyhow::Context;
@@ -38,6 +39,8 @@ impl Drop for ExitNotifier {
 
 const CONTROL_COMMAND_CAPACITY: usize = 16;
 
+type ReadyEvent = anyhow::Result<SocketAddr>;
+
 enum ControlCommand {
     Shutdown { acknowledged: oneshot::Sender<()> },
 }
@@ -68,10 +71,10 @@ impl ControlThread {
     pub fn spawn(
         parts: ObservabilityParts,
         process_events: std::sync::mpsc::Sender<ProcessEvent>,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, SocketAddr)> {
         let (command_tx, command_rx) = mpsc::channel(CONTROL_COMMAND_CAPACITY);
         let handle = ControlHandle { command_tx };
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<ReadyEvent>(1);
         let runtime_events = process_events.clone();
         let join = std::thread::Builder::new()
             .name("control".into())
@@ -80,15 +83,18 @@ impl ControlThread {
                 control_thread_main(parts, command_rx, ready_tx, runtime_events)
             })?;
 
-        match ready_rx.recv() {
+        let metrics_addr = match ready_rx.recv() {
             Ok(result) => result?,
             Err(_) => anyhow::bail!("control thread died during startup"),
-        }
+        };
 
-        Ok(Self {
-            handle,
-            join: Some(join),
-        })
+        Ok((
+            Self {
+                handle,
+                join: Some(join),
+            },
+            metrics_addr,
+        ))
     }
 
     pub fn shutdown(mut self) -> anyhow::Result<()> {
@@ -163,7 +169,7 @@ impl ControlRuntime {
 fn control_thread_main(
     parts: ObservabilityParts,
     command_rx: mpsc::Receiver<ControlCommand>,
-    ready_tx: SyncSender<anyhow::Result<()>>,
+    ready_tx: SyncSender<ReadyEvent>,
     process_events: std::sync::mpsc::Sender<ProcessEvent>,
 ) -> anyhow::Result<()> {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -178,47 +184,81 @@ fn control_thread_main(
         }
     };
 
-    let entered = runtime.enter();
-    let metrics = match tokio::net::TcpListener::from_std(parts.metrics_listener) {
-        Ok(listener) => MetricsHttp::new(listener, parts.registry, parts.metrics),
-        Err(error) => {
-            let error = anyhow::Error::from(error);
-            let _ = ready_tx.send(Err(anyhow::anyhow!(error.to_string())));
-            return Err(error);
-        }
-    };
-    drop(entered);
+    runtime.block_on(async move {
+        let ObservabilityParts {
+            consumer,
+            registry,
+            metrics_addr,
+            metrics: control_metrics,
+        } = parts;
 
-    let _ = ready_tx.send(Ok(()));
-    runtime.block_on(
+        let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = ready_tx.send(Err(anyhow::anyhow!("bind({metrics_addr}) failed: {error}")));
+                anyhow::bail!("bind({metrics_addr}) failed: {error}");
+            }
+        };
+        let bound = listener.local_addr()?;
+        let metrics = MetricsHttp::new(listener, registry, control_metrics);
+
+        let _ = ready_tx.send(Ok(bound));
+        drop(ready_tx);
+
         ControlRuntime {
             command_rx,
-            events: parts.consumer,
+            events: consumer,
             metrics,
             process_events,
         }
-        .run(),
-    )
+        .run()
+        .await
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use rusty_mcrouter_observability::bus::EventSender;
     use rusty_mcrouter_observability::Observability;
 
     use super::*;
 
-    #[test]
-    fn control_thread_acknowledges_shutdown_and_joins() {
+    fn ephemeral() -> SocketAddr {
+        "127.0.0.1:0".parse().unwrap()
+    }
+
+    // the returned sender keeps the bus open for the thread's lifetime
+    fn spawn_control(
+        metrics_addr: SocketAddr,
+    ) -> anyhow::Result<(ControlThread, SocketAddr, EventSender)> {
         let observability = Observability::new(8);
         let events = observability.events().clone();
-        let (_, parts) = observability
-            .into_parts("127.0.0.1:0".parse().unwrap())
-            .unwrap();
         let (process_tx, _process_rx) = std::sync::mpsc::channel();
-        ControlThread::spawn(parts, process_tx)
-            .unwrap()
-            .shutdown()
-            .unwrap();
-        drop(events);
+        let (control, bound) =
+            ControlThread::spawn(observability.into_parts(metrics_addr), process_tx)?;
+        Ok((control, bound, events))
+    }
+
+    #[test]
+    fn control_thread_acknowledges_shutdown_and_joins() {
+        let (control, _, _events) = spawn_control(ephemeral()).unwrap();
+        control.shutdown().unwrap();
+    }
+
+    #[test]
+    fn control_thread_binds_metrics_listener_and_reports_address() {
+        let (control, bound, _events) = spawn_control(ephemeral()).unwrap();
+        assert_ne!(bound.port(), 0);
+        assert!(std::net::TcpStream::connect(bound).is_ok());
+        control.shutdown().unwrap();
+    }
+
+    #[test]
+    fn control_thread_reports_bind_failure_through_spawn() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let error = spawn_control(taken.local_addr().unwrap())
+            .err()
+            .expect("bind conflict surfaces as a spawn error");
+        assert!(error.to_string().contains("bind("), "{error}");
     }
 }
