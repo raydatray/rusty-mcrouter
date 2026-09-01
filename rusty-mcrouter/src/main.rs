@@ -334,15 +334,11 @@ fn main() -> anyhow::Result<()> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     }));
-    let (metrics_bound, observability_parts) = match observability.into_parts(metrics_addr) {
-        Ok(parts) => parts,
-        Err(error) => {
-            shutdown_proxy_threads(&mut proxy_threads);
-            return Err(error.into());
-        }
-    };
-    let control_thread = match ControlThread::spawn(observability_parts, process_event_tx.clone()) {
-        Ok(thread) => thread,
+    let (control_thread, metrics_bound) = match ControlThread::spawn(
+        observability.into_parts(metrics_addr),
+        process_event_tx.clone(),
+    ) {
+        Ok(spawned) => spawned,
         Err(error) => {
             shutdown_proxy_threads(&mut proxy_threads);
             return Err(error);

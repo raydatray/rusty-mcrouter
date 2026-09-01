@@ -5,7 +5,6 @@ pub mod logging;
 pub mod metrics;
 pub mod sources;
 
-use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -15,7 +14,8 @@ use crate::metrics::{ControlMetrics, MetricsRegistry, MetricsSource};
 pub struct ObservabilityParts {
     pub consumer: EventConsumer,
     pub registry: Arc<MetricsRegistry>,
-    pub metrics_listener: std::net::TcpListener,
+    /// unbound; the control thread binds it and reports the address
+    pub metrics_addr: SocketAddr,
     pub metrics: Arc<ControlMetrics>,
 }
 
@@ -52,23 +52,13 @@ impl Observability {
         Arc::clone(&self.metrics)
     }
 
-    pub fn into_parts(
-        self,
-        metrics_addr: SocketAddr,
-    ) -> io::Result<(SocketAddr, ObservabilityParts)> {
-        let listener = std::net::TcpListener::bind(metrics_addr)?;
-        listener.set_nonblocking(true)?;
-        let bound = listener.local_addr()?;
-
+    pub fn into_parts(self, metrics_addr: SocketAddr) -> ObservabilityParts {
         drop(self.events); // leaf-owned sinks keep the event channel alive
-        Ok((
-            bound,
-            ObservabilityParts {
-                consumer: self.consumer,
-                registry: Arc::new(self.registry),
-                metrics_listener: listener,
-                metrics: self.metrics,
-            },
-        ))
+        ObservabilityParts {
+            consumer: self.consumer,
+            registry: Arc::new(self.registry),
+            metrics_addr,
+            metrics: self.metrics,
+        }
     }
 }
