@@ -117,6 +117,8 @@ async fn respond(
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -130,7 +132,7 @@ mod tests {
         }
     }
 
-    async fn start() -> std::net::SocketAddr {
+    async fn start() -> SocketAddr {
         let mut registry = MetricsRegistry::new();
         registry.register(Box::new(Static));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -140,7 +142,7 @@ mod tests {
         addr
     }
 
-    async fn request(addr: std::net::SocketAddr, request: &str) -> String {
+    async fn request(addr: SocketAddr, request: &str) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut response = String::new();

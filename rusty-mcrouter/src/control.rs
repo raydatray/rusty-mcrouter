@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
 use std::sync::Arc;
+use std::thread::{Builder, JoinHandle};
 
 use anyhow::Context;
 use rusty_mcrouter_observability::http::MetricsHttp;
 use rusty_mcrouter_observability::{logging, ControlMetrics, EventConsumer, MetricsRegistry};
+// std mpsc for main's channels; tokio mpsc, module-qualified, for the runtime's
 use tokio::sync::{mpsc, oneshot};
 
 pub struct ControlThreadConfig {
@@ -22,8 +24,8 @@ pub enum ProcessEvent {
 
 /// main's end of the process-event channel
 pub struct Supervisor {
-    tx: std::sync::mpsc::Sender<ProcessEvent>,
-    rx: std::sync::mpsc::Receiver<ProcessEvent>,
+    tx: Sender<ProcessEvent>,
+    rx: Receiver<ProcessEvent>,
 }
 
 impl Supervisor {
@@ -39,7 +41,7 @@ impl Supervisor {
         }
     }
 
-    pub fn sender(&self) -> std::sync::mpsc::Sender<ProcessEvent> {
+    pub fn sender(&self) -> Sender<ProcessEvent> {
         self.tx.clone()
     }
 
@@ -53,7 +55,7 @@ impl Supervisor {
 
 /// drop guard: fires when the owning thread body ends, panic included
 pub struct ExitNotifier {
-    process_events: std::sync::mpsc::Sender<ProcessEvent>,
+    process_events: Sender<ProcessEvent>,
     event: Option<ProcessEvent>,
 }
 
@@ -92,7 +94,7 @@ impl ControlHandle {
 
 pub struct ControlThread {
     handle: ControlHandle,
-    join: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+    join: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
 impl ControlThread {
@@ -102,15 +104,13 @@ impl ControlThread {
     ) -> anyhow::Result<(Self, SocketAddr)> {
         let (command_tx, command_rx) = mpsc::channel(CONTROL_COMMAND_CAPACITY);
         let handle = ControlHandle { command_tx };
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<ReadyEvent>(1);
+        let (ready_tx, ready_rx) = sync_channel::<ReadyEvent>(1);
         let exit = supervisor.exit_notifier(ProcessEvent::ControlExited);
         let process_events = supervisor.sender();
-        let join = std::thread::Builder::new()
-            .name("control".into())
-            .spawn(move || {
-                let _exit = exit;
-                control_thread_main(cfg, command_rx, ready_tx, process_events)
-            })?;
+        let join = Builder::new().name("control".into()).spawn(move || {
+            let _exit = exit;
+            control_thread_main(cfg, command_rx, ready_tx, process_events)
+        })?;
 
         let metrics_addr = match ready_rx.recv() {
             Ok(result) => result?,
@@ -127,11 +127,7 @@ impl ControlThread {
     }
 
     pub fn shutdown(mut self) -> anyhow::Result<()> {
-        let shutdown = if self
-            .join
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
-        {
+        let shutdown = if self.join.as_ref().is_some_and(JoinHandle::is_finished) {
             Ok(())
         } else {
             self.handle.shutdown_blocking()
@@ -148,9 +144,9 @@ impl ControlThread {
 
 struct ControlRuntime {
     command_rx: mpsc::Receiver<ControlCommand>,
-    events: rusty_mcrouter_observability::bus::EventConsumer,
+    events: EventConsumer,
     metrics: MetricsHttp,
-    process_events: std::sync::mpsc::Sender<ProcessEvent>,
+    process_events: Sender<ProcessEvent>,
 }
 
 impl ControlRuntime {
@@ -199,7 +195,7 @@ fn control_thread_main(
     cfg: ControlThreadConfig,
     command_rx: mpsc::Receiver<ControlCommand>,
     ready_tx: SyncSender<ReadyEvent>,
-    process_events: std::sync::mpsc::Sender<ProcessEvent>,
+    process_events: Sender<ProcessEvent>,
 ) -> anyhow::Result<()> {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -247,6 +243,8 @@ fn control_thread_main(
 
 #[cfg(test)]
 mod tests {
+    use std::net::{TcpListener, TcpStream};
+
     use rusty_mcrouter_observability::{channel, EventSender};
 
     use super::*;
@@ -302,13 +300,13 @@ mod tests {
     fn control_thread_binds_metrics_listener_and_reports_address() {
         let (control, bound, _events) = spawn_control(ephemeral()).unwrap();
         assert_ne!(bound.port(), 0);
-        assert!(std::net::TcpStream::connect(bound).is_ok());
+        assert!(TcpStream::connect(bound).is_ok());
         control.shutdown().unwrap();
     }
 
     #[test]
     fn control_thread_reports_bind_failure_through_spawn() {
-        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = TcpListener::bind("127.0.0.1:0").unwrap();
         let error = spawn_control(taken.local_addr().unwrap())
             .err()
             .expect("bind conflict surfaces as a spawn error");

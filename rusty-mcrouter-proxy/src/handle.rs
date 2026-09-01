@@ -1,8 +1,13 @@
+use std::net::TcpStream;
+
 use anyhow::Context;
 use bytes::Bytes;
 use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{
+    mpsc::{self, Sender},
+    oneshot,
+};
 
 use crate::error::Result;
 use crate::{FrontendError, ProxyCommand, ProxyInbox, ProxyRequest};
@@ -14,9 +19,9 @@ const COMMAND_CAPACITY: usize = 16;
 #[derive(Clone)]
 pub struct ProxyHandle {
     id: usize,
-    request_tx: mpsc::Sender<ProxyRequest>,
-    command_tx: mpsc::Sender<ProxyCommand>,
-    work_tx: mpsc::Sender<std::net::TcpStream>,
+    request_tx: Sender<ProxyRequest>,
+    command_tx: Sender<ProxyCommand>,
+    work_tx: Sender<TcpStream>,
 }
 
 impl ProxyHandle {
@@ -60,7 +65,7 @@ impl ProxyHandle {
             .unwrap_or_else(|_| server_error(b"proxy dropped request"))
     }
 
-    pub async fn send_connection(&self, stream: std::net::TcpStream) -> Result<()> {
+    pub async fn send_connection(&self, stream: TcpStream) -> Result<()> {
         self.work_tx
             .send(stream)
             .await

@@ -1,11 +1,11 @@
-use std::{collections::VecDeque, io, sync::Arc};
+use std::{collections::VecDeque, io, sync::Arc, time::Duration};
 
 use bytes::BytesMut;
 use rusty_mcrouter_protocol::meta::{MetaReplyDecoder, MetaRequestEncoder};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{tcp::OwnedWriteHalf, TcpStream},
-    sync::mpsc,
+    sync::mpsc::Receiver,
     time::{sleep_until, Instant},
 };
 
@@ -21,7 +21,7 @@ use crate::{
 pub(crate) struct Connection {
     addr: Arc<str>,
     cfg: BackendConnectionConfig,
-    rx: mpsc::Receiver<ConnectionCommand>,
+    rx: Receiver<ConnectionCommand>,
     events: Box<dyn Fn(ConnectionEvent)>,
     shard_metrics: Arc<BackendMetricsShard>,
     pending: VecDeque<Command>,   // accepted, not yet written
@@ -42,7 +42,7 @@ impl Connection {
     pub(crate) fn new(
         addr: Arc<str>,
         cfg: BackendConnectionConfig,
-        rx: mpsc::Receiver<ConnectionCommand>,
+        rx: Receiver<ConnectionCommand>,
         events: Box<dyn Fn(ConnectionEvent)>,
         shard_metrics: Arc<BackendMetricsShard>,
     ) -> Connection {
@@ -410,16 +410,14 @@ impl Drop for Connection {
 }
 
 fn far_future() -> Instant {
-    Instant::now() + std::time::Duration::from_secs(86_400)
+    Instant::now() + Duration::from_secs(86_400)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use rusty_mcrouter_protocol::meta::MetaReplyExpectation;
     use rusty_mcrouter_protocol::Reply;
-    use tokio::sync::oneshot;
+    use tokio::sync::{mpsc, oneshot};
 
     use super::*;
     use crate::connection::BackendConnectionConfig;

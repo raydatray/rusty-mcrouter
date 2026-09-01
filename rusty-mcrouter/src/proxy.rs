@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{mpsc::sync_channel, Arc};
+use std::thread::{Builder, JoinHandle};
 
 use rusty_mcrouter_core::RoutingMetricsLayout;
 use rusty_mcrouter_observability::EventSender;
@@ -12,7 +13,7 @@ use crate::control::{ProcessEvent, Supervisor};
 
 pub struct ProxyThread {
     handle: ProxyHandle,
-    join: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+    join: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
 impl ProxyThread {
@@ -22,9 +23,9 @@ impl ProxyThread {
         supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, Option<SocketAddr>)> {
         let proxy_id = config.proxy_id;
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = sync_channel(1);
         let exit = supervisor.exit_notifier(ProcessEvent::ProxyExited { id: proxy_id });
-        let join = std::thread::Builder::new()
+        let join = Builder::new()
             .name(format!("proxy-{proxy_id}"))
             .spawn(move || {
                 let _exit = exit;
@@ -46,11 +47,7 @@ impl ProxyThread {
     }
 
     pub fn shutdown(mut self) -> anyhow::Result<()> {
-        let shutdown = if self
-            .join
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
-        {
+        let shutdown = if self.join.as_ref().is_some_and(JoinHandle::is_finished) {
             Ok(())
         } else {
             self.handle.shutdown_blocking()

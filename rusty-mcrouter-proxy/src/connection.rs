@@ -11,7 +11,7 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
-    sync::mpsc,
+    sync::mpsc::{self, Receiver, Sender},
 };
 
 use crate::routing::complete_route;
@@ -48,8 +48,8 @@ pub struct Connection {
     next_write: usize,
     in_flight: usize,
     input_closed: bool,
-    completed_tx: mpsc::Sender<(usize, Reply)>,
-    completed_rx: mpsc::Receiver<(usize, Reply)>,
+    completed_tx: Sender<(usize, Reply)>,
+    completed_rx: Receiver<(usize, Reply)>,
 }
 
 struct Slot {

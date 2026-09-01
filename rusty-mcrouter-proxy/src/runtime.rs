@@ -1,9 +1,9 @@
-use std::{rc::Rc, sync::Arc};
+use std::{net::TcpStream, rc::Rc, sync::Arc};
 
 use anyhow::Context;
 use rusty_mcrouter_backend::destination;
 use rusty_mcrouter_core::{DynRoute, RoutingState};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::connection::Connection;
@@ -17,9 +17,9 @@ pub(crate) struct ProxyRuntime {
     proxies: ProxySet,
     thread_mode: ThreadMode,
     frontend_metrics: Arc<FrontendMetricsShard>,
-    request_rx: mpsc::Receiver<ProxyRequest>,
-    command_rx: mpsc::Receiver<ProxyCommand>,
-    work_rx: mpsc::Receiver<std::net::TcpStream>,
+    request_rx: Receiver<ProxyRequest>,
+    command_rx: Receiver<ProxyCommand>,
+    work_rx: Receiver<TcpStream>,
     listener_task: Option<JoinHandle<anyhow::Result<()>>>,
     sweep_task: Option<JoinHandle<()>>,
     route_tasks: JoinSet<()>,
@@ -36,9 +36,9 @@ impl ProxyRuntime {
         proxies: ProxySet,
         thread_mode: ThreadMode,
         frontend_metrics: Arc<FrontendMetricsShard>,
-        request_rx: mpsc::Receiver<ProxyRequest>,
-        command_rx: mpsc::Receiver<ProxyCommand>,
-        work_rx: mpsc::Receiver<std::net::TcpStream>,
+        request_rx: Receiver<ProxyRequest>,
+        command_rx: Receiver<ProxyCommand>,
+        work_rx: Receiver<TcpStream>,
         listener_task: Option<JoinHandle<anyhow::Result<()>>>,
         sweep_task: Option<JoinHandle<()>>,
         destination_map: Rc<destination::Map>,
@@ -115,7 +115,7 @@ impl ProxyRuntime {
         });
     }
 
-    fn spawn_connection(&mut self, stream: std::net::TcpStream) -> anyhow::Result<()> {
+    fn spawn_connection(&mut self, stream: TcpStream) -> anyhow::Result<()> {
         let stream = tokio::net::TcpStream::from_std(stream)
             .context("could not register accepted stream on proxy runtime")?;
         let connection = Connection::new(
