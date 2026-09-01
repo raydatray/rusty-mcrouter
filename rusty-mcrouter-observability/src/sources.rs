@@ -9,11 +9,10 @@ use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
 use rusty_mcrouter_backend::metrics::BackendMetricsShard;
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_core::{FailoverErrorClass, FailoverPolicyKind, RoutingMetricsShard};
-use rusty_mcrouter_observability_primitives::Counter;
 use rusty_mcrouter_protocol::RequestKind;
 use rusty_mcrouter_proxy::FrontendMetricsShard;
 
-use crate::metrics::{MetricsSource, MetricsText};
+use crate::metrics::{ControlMetrics, MetricsSource, MetricsText};
 use crate::shard_source;
 
 shard_source! {
@@ -279,8 +278,7 @@ impl MetricsSource for DestinationSource {
 }
 
 pub struct SelfSource {
-    pub dropped: Arc<Counter>,
-    pub http_rejected: Arc<Counter>,
+    pub metrics: Arc<ControlMetrics>,
     pub num_proxies: usize,
     /// computed once at startup - no clock reads at scrape time
     pub start_unix_secs: u64,
@@ -291,12 +289,12 @@ impl MetricsSource for SelfSource {
         out.counter(
             "rusty_mcrouter_events_dropped_total",
             &[],
-            self.dropped.load(),
+            self.metrics.events_dropped.load(),
         );
         out.counter(
             "rusty_mcrouter_metrics_http_rejected_total",
             &[],
-            self.http_rejected.load(),
+            self.metrics.http_rejected.load(),
         );
         out.gauge("rusty_mcrouter_proxies", &[], self.num_proxies as i64);
         out.gauge(
@@ -497,13 +495,10 @@ mod tests {
 
     #[test]
     fn self_source_golden() {
+        let metrics = Arc::new(ControlMetrics::default());
+        metrics.events_dropped.add(2);
         let text = render(SelfSource {
-            dropped: {
-                let dropped = Arc::new(Counter::default());
-                dropped.add(2);
-                dropped
-            },
-            http_rejected: Arc::new(Counter::default()),
+            metrics,
             num_proxies: 4,
             start_unix_secs: 1_700_000_000,
         });

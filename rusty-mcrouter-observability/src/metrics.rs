@@ -1,16 +1,17 @@
-// the facts -> metrics boundary: sources read leaf-crate counters at
-// scrape time and encode bare prometheus text (no HELP/TYPE - both are
-// advisory; the upstream cross-reference lives in the catalog doc).
-// the scrape path may allocate; the write path never does.
-
 use std::fmt::Write;
+
+use rusty_mcrouter_observability_primitives::Counter;
+
+#[derive(Default)]
+pub struct ControlMetrics {
+    pub events_dropped: Counter,
+    pub http_rejected: Counter,
+}
 
 pub trait MetricsSource: Send + Sync {
     fn encode(&self, out: &mut MetricsText);
 }
 
-/// metric names and label keys are trusted constants; label values are
-/// escaped (pool names come from config, addrs from the wire).
 pub struct MetricsText {
     buf: String,
 }
@@ -24,7 +25,6 @@ impl MetricsText {
         self.sample(name, labels, &value.to_string());
     }
 
-    /// i64: a bugged gauge renders as -3, not a u64 wrap
     pub fn gauge(&mut self, name: &str, labels: &[(&str, &str)], value: i64) {
         self.sample(name, labels, &value.to_string());
     }
@@ -82,9 +82,6 @@ impl MetricsRegistry {
     }
 }
 
-/// declares a MetricsSource over a Vec of counter shards: each field is
-/// summed across shards and emitted as one bare sample. matrices and
-/// labeled walks don't fit - write those encode() impls by hand.
 #[macro_export]
 macro_rules! shard_source {
     (

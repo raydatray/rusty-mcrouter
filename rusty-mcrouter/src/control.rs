@@ -180,7 +180,7 @@ fn control_thread_main(
 
     let entered = runtime.enter();
     let metrics = match tokio::net::TcpListener::from_std(parts.metrics_listener) {
-        Ok(listener) => MetricsHttp::new(listener, parts.registry, parts.http_rejected),
+        Ok(listener) => MetricsHttp::new(listener, parts.registry, parts.metrics),
         Err(error) => {
             let error = anyhow::Error::from(error);
             let _ = ready_tx.send(Err(anyhow::anyhow!(error.to_string())));

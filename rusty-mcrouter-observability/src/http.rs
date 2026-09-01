@@ -11,11 +11,10 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use rusty_mcrouter_observability_primitives::Counter;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
-use crate::metrics::MetricsRegistry;
+use crate::metrics::{ControlMetrics, MetricsRegistry};
 
 const MAX_HTTP_TASKS: usize = 32;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -25,20 +24,20 @@ pub struct MetricsHttp {
     listener: TcpListener,
     registry: Arc<MetricsRegistry>,
     tasks: JoinSet<anyhow::Result<()>>,
-    rejected: Arc<Counter>,
+    metrics: Arc<ControlMetrics>,
 }
 
 impl MetricsHttp {
     pub fn new(
         listener: TcpListener,
         registry: Arc<MetricsRegistry>,
-        rejected: Arc<Counter>,
+        metrics: Arc<ControlMetrics>,
     ) -> Self {
         Self {
             listener,
             registry,
             tasks: JoinSet::new(),
-            rejected,
+            metrics,
         }
     }
 
@@ -47,7 +46,7 @@ impl MetricsHttp {
             accepted = self.listener.accept() => {
                 let (stream, _) = accepted.context("accept metrics connection")?;
                 if self.tasks.len() >= MAX_HTTP_TASKS {
-                    self.rejected.inc();
+                    self.metrics.http_rejected.inc();
                     drop(stream);
                     return Ok(());
                 }
@@ -136,7 +135,7 @@ mod tests {
         registry.register(Box::new(Static));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = MetricsHttp::new(listener, Arc::new(registry), Arc::new(Counter::default()));
+        let server = MetricsHttp::new(listener, Arc::new(registry), Arc::default());
         tokio::spawn(async move { server.run().await.unwrap() });
         addr
     }

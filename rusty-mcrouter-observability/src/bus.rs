@@ -1,20 +1,23 @@
 use std::{sync::Arc, time::Duration};
 
-use rusty_mcrouter_observability_primitives::{Counter, EventSink};
-use tokio::time::Instant;
+use rusty_mcrouter_observability_primitives::EventSink;
+use tokio::{
+    sync::mpsc::{Receiver, Sender},
+    time::Instant,
+};
 
-use crate::{events::Event, logging};
+use crate::{events::Event, logging, metrics::ControlMetrics};
 
 pub struct EventSender {
-    tx: tokio::sync::mpsc::Sender<Event>,
-    dropped: Arc<Counter>,
+    tx: Sender<Event>,
+    metrics: Arc<ControlMetrics>,
 }
 
 impl Clone for EventSender {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
-            dropped: Arc::clone(&self.dropped),
+            metrics: Arc::clone(&self.metrics),
         }
     }
 }
@@ -39,42 +42,33 @@ impl EventSender {
     pub fn emit(&self, event: Event) {
         if self.tx.try_send(event).is_err() {
             // either full or closed, either way we cannot block so move on
-            self.dropped.inc();
+            self.metrics.events_dropped.inc();
         }
-    }
-
-    pub fn dropped_total(&self) -> u64 {
-        self.dropped.load()
-    }
-
-    pub fn dropped_counter(&self) -> Arc<Counter> {
-        Arc::clone(&self.dropped)
     }
 }
 
 const DROP_WARN_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct EventConsumer {
-    rx: tokio::sync::mpsc::Receiver<Event>,
-    dropped: Arc<Counter>,
+    rx: Receiver<Event>,
+    metrics: Arc<ControlMetrics>,
     last_seen: u64,
     last_warned: Instant,
 }
 
-pub fn channel(capacity: usize) -> (EventSender, EventConsumer) {
+pub fn channel(capacity: usize, metrics: Arc<ControlMetrics>) -> (EventSender, EventConsumer) {
     assert!(capacity > 0, "a zero-capacity event bus drops everything");
 
     let (tx, rx) = tokio::sync::mpsc::channel(capacity);
-    let dropped = Arc::new(Counter::default());
 
     (
         EventSender {
             tx,
-            dropped: Arc::clone(&dropped),
+            metrics: Arc::clone(&metrics),
         },
         EventConsumer {
             rx,
-            dropped,
+            metrics,
             last_seen: 0,
             last_warned: Instant::now() - DROP_WARN_INTERVAL,
         },
@@ -105,7 +99,7 @@ impl EventConsumer {
     }
 
     fn warn_if_shedding_events(&mut self) {
-        let dropped = self.dropped.load();
+        let dropped = self.metrics.events_dropped.load();
         if dropped > self.last_seen && self.last_warned.elapsed() >= DROP_WARN_INTERVAL {
             tracing::warn!(
                 target: "rusty-mcrouter-observability::bus",
@@ -136,22 +130,28 @@ mod tests {
         Event::Worker(worker_record(proxy_id))
     }
 
+    fn test_channel(capacity: usize) -> (EventSender, EventConsumer, Arc<ControlMetrics>) {
+        let metrics = Arc::new(ControlMetrics::default());
+        let (tx, consumer) = channel(capacity, Arc::clone(&metrics));
+        (tx, consumer, metrics)
+    }
+
     /// THE contract: a full queue sheds instead of blocking, and every
     /// shed event is counted.
     #[test]
     fn full_queue_sheds_and_counts() {
-        let (tx, _consumer) = channel(2);
+        let (tx, _consumer, metrics) = test_channel(2);
         let sink = tx.sink::<WorkerEventRecord>();
         for i in 0..5 {
             sink.emit(worker_record(i));
         }
-        assert_eq!(tx.dropped_total(), 3);
+        assert_eq!(metrics.events_dropped.load(), 3);
     }
 
     /// delivered events arrive in emit order.
     #[tokio::test]
     async fn delivered_events_stay_ordered() {
-        let (tx, mut consumer) = channel(8);
+        let (tx, mut consumer, _) = test_channel(8);
         for i in 0..4 {
             tx.emit(worker_event(i));
         }
@@ -173,7 +173,7 @@ mod tests {
             }
         }
 
-        let (tx, mut consumer) = channel(4);
+        let (tx, mut consumer, _) = test_channel(4);
         drop(EmitsOnDrop(tx.clone()));
         let event = consumer.rx.try_recv().expect("event emitted from Drop");
         assert!(matches!(
@@ -185,28 +185,27 @@ mod tests {
     /// senders are cheap clones sharing one drop counter.
     #[test]
     fn cloned_senders_share_the_drop_counter() {
-        let (tx, _consumer) = channel(1);
+        let (tx, _consumer, metrics) = test_channel(1);
         let tx2 = tx.clone();
         tx.emit(worker_event(0)); // fills the queue
         tx2.emit(worker_event(1)); // shed
         tx.emit(worker_event(2)); // shed
-        assert_eq!(tx.dropped_total(), 2);
-        assert_eq!(tx2.dropped_total(), 2);
+        assert_eq!(metrics.events_dropped.load(), 2);
     }
 
     /// closed-channel emits (shutdown race) count as drops, not panics.
     #[tokio::test]
     async fn emit_after_consumer_drop_is_a_counted_drop() {
-        let (tx, consumer) = channel(4);
+        let (tx, consumer, metrics) = test_channel(4);
         drop(consumer);
         tx.emit(worker_event(0));
-        assert_eq!(tx.dropped_total(), 1);
+        assert_eq!(metrics.events_dropped.load(), 1);
     }
 
     /// run() exits when the last sender drops - the shutdown story.
     #[tokio::test]
     async fn run_exits_when_senders_are_gone() {
-        let (tx, consumer) = channel(4);
+        let (tx, consumer, _) = test_channel(4);
         tx.emit(worker_event(0));
         drop(tx);
         consumer.run().await; // must return, not hang

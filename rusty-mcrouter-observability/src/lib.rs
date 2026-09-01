@@ -9,16 +9,14 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use rusty_mcrouter_observability_primitives::Counter;
-
 use crate::bus::{channel, EventConsumer, EventSender};
-use crate::metrics::{MetricsRegistry, MetricsSource};
+use crate::metrics::{ControlMetrics, MetricsRegistry, MetricsSource};
 
 pub struct ObservabilityParts {
     pub consumer: EventConsumer,
     pub registry: Arc<MetricsRegistry>,
     pub metrics_listener: std::net::TcpListener,
-    pub http_rejected: Arc<Counter>,
+    pub metrics: Arc<ControlMetrics>,
 }
 
 /// the wiring handle: hand out sinks, register sources, then spawn() the
@@ -27,17 +25,18 @@ pub struct Observability {
     events: EventSender,
     consumer: EventConsumer,
     registry: MetricsRegistry,
-    http_rejected: Arc<Counter>,
+    metrics: Arc<ControlMetrics>,
 }
 
 impl Observability {
     pub fn new(bus_capacity: usize) -> Self {
-        let (events, consumer) = channel(bus_capacity);
+        let metrics = Arc::new(ControlMetrics::default());
+        let (events, consumer) = channel(bus_capacity, Arc::clone(&metrics));
         Self {
             events,
             consumer,
             registry: MetricsRegistry::new(),
-            http_rejected: Arc::new(Counter::default()),
+            metrics,
         }
     }
 
@@ -49,8 +48,8 @@ impl Observability {
         self.registry.register(source);
     }
 
-    pub fn http_rejected_counter(&self) -> Arc<Counter> {
-        Arc::clone(&self.http_rejected)
+    pub fn control_metrics(&self) -> Arc<ControlMetrics> {
+        Arc::clone(&self.metrics)
     }
 
     pub fn into_parts(
@@ -68,7 +67,7 @@ impl Observability {
                 consumer: self.consumer,
                 registry: Arc::new(self.registry),
                 metrics_listener: listener,
-                http_rejected: self.http_rejected,
+                metrics: self.metrics,
             },
         ))
     }
