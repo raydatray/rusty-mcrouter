@@ -3,6 +3,7 @@
 // written (unique shapes, one instance each).
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusty_mcrouter_backend::classify::ResultCode;
 use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
@@ -10,10 +11,61 @@ use rusty_mcrouter_backend::metrics::BackendMetricsShard;
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_core::{FailoverErrorClass, FailoverPolicyKind, RoutingMetricsShard};
 use rusty_mcrouter_protocol::RequestKind;
-use rusty_mcrouter_proxy::FrontendMetricsShard;
+use rusty_mcrouter_proxy::{FrontendMetricsShard, ProxyShards};
 
-use crate::metrics::{ControlMetrics, MetricsSource, MetricsText};
+use crate::metrics::{ControlMetrics, MetricsRegistry, MetricsSource, MetricsText};
 use crate::shard_source;
+
+pub struct ScrapeInputs {
+    pub proxies: Vec<ProxyShards>,
+    pub tko_map: Arc<TkoTrackerMap>,
+    pub destinations: Arc<DestinationMetricsRegistry>,
+    pub control: Arc<ControlMetrics>,
+}
+
+impl ScrapeInputs {
+    pub fn into_registry(self) -> MetricsRegistry {
+        let backend: Vec<_> = self
+            .proxies
+            .iter()
+            .map(|p| Arc::clone(&p.backend))
+            .collect();
+        let frontend: Vec<_> = self
+            .proxies
+            .iter()
+            .map(|p| Arc::clone(&p.frontend))
+            .collect();
+        let routing: Vec<_> = self
+            .proxies
+            .iter()
+            .map(|p| Arc::clone(&p.routing))
+            .collect();
+
+        let mut registry = MetricsRegistry::new();
+        registry.register(Box::new(BackendScalarsSource {
+            shards: backend.clone(),
+        }));
+        registry.register(Box::new(BackendRequestsSource { shards: backend }));
+        registry.register(Box::new(FrontendScalarsSource {
+            shards: frontend.clone(),
+        }));
+        registry.register(Box::new(FrontendRequestsSource { shards: frontend }));
+        registry.register(Box::new(RoutingSource { shards: routing }));
+        registry.register(Box::new(TkoSource { map: self.tko_map }));
+        registry.register(Box::new(DestinationSource {
+            registry: self.destinations,
+        }));
+        registry.register(Box::new(SelfSource {
+            metrics: self.control,
+            num_proxies: self.proxies.len(),
+            start_unix_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        }));
+        registry
+    }
+}
 
 shard_source! {
     /// Backend metric shards -> the rusty_mcrouter_backend_* scalar families.
@@ -491,6 +543,48 @@ mod tests {
             !text.contains("10.0.0.1:11211"),
             "dead destinations must leave the scrape"
         );
+    }
+
+    #[test]
+    fn scrape_inputs_assemble_every_source_in_order() {
+        let layout = routing_layout(&["pool_a"]);
+        let proxies = vec![
+            ProxyShards::new(Arc::clone(&layout)),
+            ProxyShards::new(layout),
+        ];
+        proxies[0]
+            .backend
+            .record_result(RequestKind::Get, ResultCode::Success);
+        proxies[1].frontend.failed.inc();
+        proxies[1].routing.dev_null_requests.inc();
+        let control = Arc::new(ControlMetrics::default());
+        control.events_dropped.inc();
+
+        let text = ScrapeInputs {
+            proxies,
+            tko_map: TkoTrackerMap::new(noop_sink()),
+            destinations: DestinationMetricsRegistry::new(),
+            control,
+        }
+        .into_registry()
+        .render();
+
+        let position = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        let order = [
+            position("rusty_mcrouter_backend_latency_us_sum_total 0\n"),
+            position(
+                "rusty_mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 1\n",
+            ),
+            position("rusty_mcrouter_noops_total 0\n"),
+            position("rusty_mcrouter_requests_total{command=\"mg\"} 0\n"),
+            position("rusty_mcrouter_dev_null_requests_total 1\n"),
+            position("rusty_mcrouter_tko{kind=\"soft\"} 0\n"),
+            position("rusty_mcrouter_events_dropped_total 1\n"),
+            position("rusty_mcrouter_proxies 2\n"),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{text}");
+        assert!(text.contains("rusty_mcrouter_requests_failed_total 1\n"));
+        assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"pool_a\"} 0\n"));
     }
 
     #[test]
