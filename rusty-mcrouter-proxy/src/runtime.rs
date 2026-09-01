@@ -177,13 +177,15 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::{get, get_miss};
 
     use super::*;
-    use crate::{ProxyHandle, ProxyRequest};
+    use crate::{ProxyHandle, ProxyInbox};
 
-    fn test_runtime() -> (ProxyRuntime, ProxyHandle, mpsc::Sender<std::net::TcpStream>) {
-        let (request_tx, request_rx) = mpsc::channel::<ProxyRequest>(8);
-        let (command_tx, command_rx) = mpsc::channel::<ProxyCommand>(8);
-        let (work_tx, work_rx) = mpsc::channel(8);
-        let handle = ProxyHandle::new(0, request_tx, command_tx);
+    fn test_runtime() -> (ProxyRuntime, ProxyHandle) {
+        let (handle, inbox) = ProxyHandle::allocate(0);
+        let ProxyInbox {
+            work_rx,
+            request_rx,
+            command_rx,
+        } = inbox;
         let proxies = ProxySet::new(vec![handle.clone()]);
         let tko = TkoTrackerMap::new(noop_sink());
         let map = destination::Map::new(
@@ -207,14 +209,14 @@ mod tests {
             None,
             map,
         );
-        (runtime, handle, work_tx)
+        (runtime, handle)
     }
 
     #[tokio::test]
     async fn routes_requests_and_acknowledges_shutdown() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (runtime, handle, _work_tx) = test_runtime();
+                let (runtime, handle) = test_runtime();
                 let task = tokio::task::spawn_local(runtime.run());
 
                 assert_eq!(handle.send_request(get(b"key")).await, get_miss());
