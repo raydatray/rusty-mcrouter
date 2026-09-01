@@ -8,19 +8,12 @@ use rusty_mcrouter_backend::{
 };
 use rusty_mcrouter_config::{parse_file, RoutingPrefix};
 use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsLayout};
-use rusty_mcrouter_observability::{
-    logging,
-    sources::{
-        BackendRequestsSource, BackendScalarsSource, DestinationSource, FrontendRequestsSource,
-        FrontendScalarsSource, RoutingSource, SelfSource, TkoSource,
-    },
-    Observability,
-};
+use rusty_mcrouter_observability::{channel, logging, ControlMetrics, ScrapeInputs};
 use rusty_mcrouter_proxy::{
     ListenerConfig, ProxyHandle, ProxySet, ProxyShards, ProxyShared, ProxyThreadConfig, ThreadMode,
 };
 
-use crate::control::{ControlThread, ProcessEvent};
+use crate::control::{ControlThread, ControlThreadConfig, ProcessEvent};
 use crate::proxy::ProxyThread;
 
 use std::{
@@ -28,8 +21,10 @@ use std::{
     net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
+
+const EVENT_BUS_CAPACITY: usize = 1024;
 
 #[derive(Parser)]
 struct Args {
@@ -181,14 +176,15 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     logging::init();
-    let mut observability = Observability::new(1024);
+    let control_metrics = Arc::new(ControlMetrics::default());
+    let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&control_metrics));
 
     let config = Arc::new(parse_file(&args.config)?);
     let routing_layout = RoutingMetricsLayout::new(&config);
 
     let shared = Arc::new(ProxyShared {
         config,
-        tko_map: TkoTrackerMap::new(observability.events().sink()),
+        tko_map: TkoTrackerMap::new(events.sink()),
         destinations: DestinationMetricsRegistry::new(),
         defaults: destination_defaults(&args.options),
         root_route_options: RootRouteOptions {
@@ -228,8 +224,8 @@ fn main() -> anyhow::Result<()> {
             shared: Arc::clone(&shared),
             proxies: proxies.clone(),
             listener,
-            routing_events: observability.events().sink(),
-            events: observability.events().sink(),
+            routing_events: events.sink(),
+            events: events.sink(),
         };
 
         let (thread, maybe_addr) = match ProxyThread::spawn(handle, cfg, process_event_tx.clone()) {
@@ -245,53 +241,27 @@ fn main() -> anyhow::Result<()> {
         proxy_threads.push(thread);
     }
 
-    // drop main's ProxySet: each thread keeps its own clone, so the
-    // queues stay open until the threads terminate
+    // drop main's sender copies: each thread keeps its own ProxySet clone
+    // and the leaves hold their event sinks, so the queues stay open
+    // until the threads terminate
     drop(proxies);
+    drop(events);
 
-    let backend_shards: Vec<_> = proxy_shards
-        .iter()
-        .map(|s| Arc::clone(&s.backend))
-        .collect();
-    let frontend_shards: Vec<_> = proxy_shards
-        .iter()
-        .map(|s| Arc::clone(&s.frontend))
-        .collect();
-    let routing_shards: Vec<_> = proxy_shards
-        .iter()
-        .map(|s| Arc::clone(&s.routing))
-        .collect();
-    observability.register(Box::new(BackendScalarsSource {
-        shards: backend_shards.clone(),
-    }));
-    observability.register(Box::new(BackendRequestsSource {
-        shards: backend_shards,
-    }));
-    observability.register(Box::new(FrontendScalarsSource {
-        shards: frontend_shards.clone(),
-    }));
-    observability.register(Box::new(FrontendRequestsSource {
-        shards: frontend_shards,
-    }));
-    observability.register(Box::new(RoutingSource {
-        shards: routing_shards,
-    }));
-    observability.register(Box::new(TkoSource {
-        map: Arc::clone(&shared.tko_map),
-    }));
-    observability.register(Box::new(DestinationSource {
-        registry: Arc::clone(&shared.destinations),
-    }));
-    observability.register(Box::new(SelfSource {
-        metrics: observability.control_metrics(),
-        num_proxies: args.num_proxies,
-        start_unix_secs: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    }));
+    let registry = ScrapeInputs {
+        proxies: proxy_shards,
+        tko_map: Arc::clone(&shared.tko_map),
+        destinations: Arc::clone(&shared.destinations),
+        control: Arc::clone(&control_metrics),
+    }
+    .into_registry();
+
     let (control_thread, metrics_bound) = match ControlThread::spawn(
-        observability.into_parts(metrics_addr),
+        ControlThreadConfig {
+            events: event_consumer,
+            registry: Arc::new(registry),
+            metrics_addr,
+            metrics: control_metrics,
+        },
         process_event_tx.clone(),
     ) {
         Ok(spawned) => spawned,

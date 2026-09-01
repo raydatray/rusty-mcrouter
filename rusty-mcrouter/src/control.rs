@@ -1,10 +1,18 @@
 use std::net::SocketAddr;
 use std::sync::mpsc::SyncSender;
+use std::sync::Arc;
 
 use anyhow::Context;
 use rusty_mcrouter_observability::http::MetricsHttp;
-use rusty_mcrouter_observability::{logging, ObservabilityParts};
+use rusty_mcrouter_observability::{logging, ControlMetrics, EventConsumer, MetricsRegistry};
 use tokio::sync::{mpsc, oneshot};
+
+pub struct ControlThreadConfig {
+    pub events: EventConsumer,
+    pub registry: Arc<MetricsRegistry>,
+    pub metrics_addr: SocketAddr,
+    pub metrics: Arc<ControlMetrics>,
+}
 
 pub enum ProcessEvent {
     ShutdownRequested,
@@ -69,7 +77,7 @@ pub struct ControlThread {
 
 impl ControlThread {
     pub fn spawn(
-        parts: ObservabilityParts,
+        cfg: ControlThreadConfig,
         process_events: std::sync::mpsc::Sender<ProcessEvent>,
     ) -> anyhow::Result<(Self, SocketAddr)> {
         let (command_tx, command_rx) = mpsc::channel(CONTROL_COMMAND_CAPACITY);
@@ -80,7 +88,7 @@ impl ControlThread {
             .name("control".into())
             .spawn(move || {
                 let _exit = ExitNotifier::new(process_events, ProcessEvent::ControlExited);
-                control_thread_main(parts, command_rx, ready_tx, runtime_events)
+                control_thread_main(cfg, command_rx, ready_tx, runtime_events)
             })?;
 
         let metrics_addr = match ready_rx.recv() {
@@ -167,7 +175,7 @@ impl ControlRuntime {
 }
 
 fn control_thread_main(
-    parts: ObservabilityParts,
+    cfg: ControlThreadConfig,
     command_rx: mpsc::Receiver<ControlCommand>,
     ready_tx: SyncSender<ReadyEvent>,
     process_events: std::sync::mpsc::Sender<ProcessEvent>,
@@ -185,12 +193,12 @@ fn control_thread_main(
     };
 
     runtime.block_on(async move {
-        let ObservabilityParts {
-            consumer,
+        let ControlThreadConfig {
+            events,
             registry,
             metrics_addr,
             metrics: control_metrics,
-        } = parts;
+        } = cfg;
 
         let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
             Ok(listener) => listener,
@@ -207,7 +215,7 @@ fn control_thread_main(
 
         ControlRuntime {
             command_rx,
-            events: consumer,
+            events,
             metrics,
             process_events,
         }
@@ -218,8 +226,7 @@ fn control_thread_main(
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_observability::bus::EventSender;
-    use rusty_mcrouter_observability::Observability;
+    use rusty_mcrouter_observability::{channel, EventSender};
 
     use super::*;
 
@@ -231,11 +238,16 @@ mod tests {
     fn spawn_control(
         metrics_addr: SocketAddr,
     ) -> anyhow::Result<(ControlThread, SocketAddr, EventSender)> {
-        let observability = Observability::new(8);
-        let events = observability.events().clone();
+        let metrics = Arc::new(ControlMetrics::default());
+        let (events, consumer) = channel(8, Arc::clone(&metrics));
         let (process_tx, _process_rx) = std::sync::mpsc::channel();
-        let (control, bound) =
-            ControlThread::spawn(observability.into_parts(metrics_addr), process_tx)?;
+        let cfg = ControlThreadConfig {
+            events: consumer,
+            registry: Arc::new(MetricsRegistry::new()),
+            metrics_addr,
+            metrics,
+        };
+        let (control, bound) = ControlThread::spawn(cfg, process_tx)?;
         Ok((control, bound, events))
     }
 
