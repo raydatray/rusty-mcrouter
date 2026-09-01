@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use tokio::net::{lookup_host, TcpListener, TcpSocket, ToSocketAddrs};
 
 use crate::{error::Result, FrontendError, ProxySet};
@@ -36,7 +38,7 @@ impl Server {
         Ok(Self { listener })
     }
 
-    pub fn local_addr(&self) -> Result<std::net::SocketAddr> {
+    pub fn local_addr(&self) -> Result<SocketAddr> {
         self.listener.local_addr().map_err(|e| e.into())
     }
 

@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::{SocketAddr, TcpStream},
+    sync::Arc,
+    time::Duration,
+};
 
 use rusty_mcrouter_backend::{
     destination::{DestinationConfig, DestinationMetricsRegistry},
@@ -9,7 +13,7 @@ use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::{
     RootRouteOptions, RoutingEventSink, RoutingMetricsLayout, RoutingMetricsShard,
 };
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 
 use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, WorkerEventSink};
 
@@ -26,9 +30,9 @@ pub struct ProxyThreadConfig {
 }
 
 pub struct ProxyInbox {
-    pub work_rx: mpsc::Receiver<std::net::TcpStream>,
-    pub request_rx: mpsc::Receiver<ProxyRequest>,
-    pub command_rx: mpsc::Receiver<ProxyCommand>,
+    pub work_rx: Receiver<TcpStream>,
+    pub request_rx: Receiver<ProxyRequest>,
+    pub command_rx: Receiver<ProxyCommand>,
 }
 
 #[derive(Clone)]

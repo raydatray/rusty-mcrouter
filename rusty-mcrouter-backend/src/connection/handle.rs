@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::{
     sync::{
-        mpsc::{self, error::TrySendError},
+        mpsc::{self, error::TrySendError, Sender},
         oneshot,
     },
     time::Instant,
@@ -21,7 +21,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct ConnectionHandle {
-    tx: mpsc::Sender<ConnectionCommand>,
+    tx: Sender<ConnectionCommand>,
     reply_timeout: Option<Duration>,
 }
 
