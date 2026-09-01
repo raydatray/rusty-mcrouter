@@ -8,7 +8,7 @@ use rusty_mcrouter_proxy::{
     ProxyThreadConfig,
 };
 
-use crate::control::{ExitNotifier, ProcessEvent};
+use crate::control::{ProcessEvent, Supervisor};
 
 pub struct ProxyThread {
     handle: ProxyHandle,
@@ -19,15 +19,15 @@ impl ProxyThread {
     pub fn spawn(
         handle: ProxyHandle,
         config: ProxyThreadConfig,
-        process_events: std::sync::mpsc::Sender<ProcessEvent>,
+        supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, Option<SocketAddr>)> {
         let proxy_id = config.proxy_id;
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let exit = supervisor.exit_notifier(ProcessEvent::ProxyExited { id: proxy_id });
         let join = std::thread::Builder::new()
             .name(format!("proxy-{proxy_id}"))
             .spawn(move || {
-                let _exit =
-                    ExitNotifier::new(process_events, ProcessEvent::ProxyExited { id: proxy_id });
+                let _exit = exit;
                 proxy_thread_main(config, ready_tx)
             })?;
 
@@ -81,10 +81,7 @@ pub struct ProxyFleet {
 
 impl ProxyFleet {
     /// on failure shuts down what it already started
-    pub fn spawn(
-        cfg: ProxyFleetConfig,
-        process_events: std::sync::mpsc::Sender<ProcessEvent>,
-    ) -> anyhow::Result<Self> {
+    pub fn spawn(cfg: ProxyFleetConfig, supervisor: &Supervisor) -> anyhow::Result<Self> {
         let routing_layout = RoutingMetricsLayout::new(&cfg.shared.config);
         let (handles, inboxes): (Vec<_>, Vec<_>) =
             (0..cfg.num_proxies).map(ProxyHandle::allocate).unzip();
@@ -116,7 +113,7 @@ impl ProxyFleet {
                 events: cfg.events.sink(),
             };
 
-            match ProxyThread::spawn(handle, thread_cfg, process_events.clone()) {
+            match ProxyThread::spawn(handle, thread_cfg, supervisor) {
                 Ok((thread, addr)) => {
                     if let Some(addr) = addr {
                         bound_addr.get_or_insert(addr);

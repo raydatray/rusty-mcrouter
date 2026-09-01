@@ -20,21 +20,41 @@ pub enum ProcessEvent {
     ControlExited,
 }
 
-pub(crate) struct ExitNotifier {
-    process_events: std::sync::mpsc::Sender<ProcessEvent>,
-    event: Option<ProcessEvent>,
+/// main's end of the process-event channel
+pub struct Supervisor {
+    tx: std::sync::mpsc::Sender<ProcessEvent>,
+    rx: std::sync::mpsc::Receiver<ProcessEvent>,
 }
 
-impl ExitNotifier {
-    pub(crate) fn new(
-        process_events: std::sync::mpsc::Sender<ProcessEvent>,
-        event: ProcessEvent,
-    ) -> Self {
-        Self {
-            process_events,
-            event: Some(event),
+impl Supervisor {
+    pub fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { tx, rx }
+    }
+
+    pub fn exit_notifier(&self, on_exit: ProcessEvent) -> ExitNotifier {
+        ExitNotifier {
+            process_events: self.tx.clone(),
+            event: Some(on_exit),
         }
     }
+
+    pub fn sender(&self) -> std::sync::mpsc::Sender<ProcessEvent> {
+        self.tx.clone()
+    }
+
+    pub fn wait(self) -> anyhow::Result<ProcessEvent> {
+        drop(self.tx); // only threads may satisfy recv()
+        self.rx
+            .recv()
+            .context("every thread exited without reporting")
+    }
+}
+
+/// drop guard: fires when the owning thread body ends, panic included
+pub struct ExitNotifier {
+    process_events: std::sync::mpsc::Sender<ProcessEvent>,
+    event: Option<ProcessEvent>,
 }
 
 impl Drop for ExitNotifier {
@@ -78,17 +98,18 @@ pub struct ControlThread {
 impl ControlThread {
     pub fn spawn(
         cfg: ControlThreadConfig,
-        process_events: std::sync::mpsc::Sender<ProcessEvent>,
+        supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, SocketAddr)> {
         let (command_tx, command_rx) = mpsc::channel(CONTROL_COMMAND_CAPACITY);
         let handle = ControlHandle { command_tx };
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<ReadyEvent>(1);
-        let runtime_events = process_events.clone();
+        let exit = supervisor.exit_notifier(ProcessEvent::ControlExited);
+        let process_events = supervisor.sender();
         let join = std::thread::Builder::new()
             .name("control".into())
             .spawn(move || {
-                let _exit = ExitNotifier::new(process_events, ProcessEvent::ControlExited);
-                control_thread_main(cfg, command_rx, ready_tx, runtime_events)
+                let _exit = exit;
+                control_thread_main(cfg, command_rx, ready_tx, process_events)
             })?;
 
         let metrics_addr = match ready_rx.recv() {
@@ -240,15 +261,35 @@ mod tests {
     ) -> anyhow::Result<(ControlThread, SocketAddr, EventSender)> {
         let metrics = Arc::new(ControlMetrics::default());
         let (events, consumer) = channel(8, Arc::clone(&metrics));
-        let (process_tx, _process_rx) = std::sync::mpsc::channel();
+        let supervisor = Supervisor::new();
         let cfg = ControlThreadConfig {
             events: consumer,
             registry: Arc::new(MetricsRegistry::new()),
             metrics_addr,
             metrics,
         };
-        let (control, bound) = ControlThread::spawn(cfg, process_tx)?;
+        let (control, bound) = ControlThread::spawn(cfg, &supervisor)?;
         Ok((control, bound, events))
+    }
+
+    #[test]
+    fn exit_notifier_reports_a_panicking_thread() {
+        let supervisor = Supervisor::new();
+        let exit = supervisor.exit_notifier(ProcessEvent::ProxyExited { id: 7 });
+        let join = std::thread::spawn(move || {
+            let _exit = exit;
+            panic!("boom");
+        });
+        assert!(join.join().is_err());
+        assert!(matches!(
+            supervisor.wait().unwrap(),
+            ProcessEvent::ProxyExited { id: 7 }
+        ));
+    }
+
+    #[test]
+    fn supervisor_wait_errors_when_nothing_can_report() {
+        assert!(Supervisor::new().wait().is_err());
     }
 
     #[test]

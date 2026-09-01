@@ -11,7 +11,7 @@ use rusty_mcrouter_core::RootRouteOptions;
 use rusty_mcrouter_observability::{channel, logging, ControlMetrics, ScrapeInputs};
 use rusty_mcrouter_proxy::{ProxyShared, ThreadMode};
 
-use crate::control::{ControlThread, ControlThreadConfig, ProcessEvent};
+use crate::control::{ControlThread, ControlThreadConfig, ProcessEvent, Supervisor};
 use crate::proxy::{ProxyFleet, ProxyFleetConfig};
 
 use std::{io::Write, net::ToSocketAddrs, path::PathBuf, sync::Arc, time::Duration};
@@ -184,7 +184,7 @@ fn main() -> anyhow::Result<()> {
         thread_mode: ThreadMode::SameThread,
     });
 
-    let (process_event_tx, process_event_rx) = std::sync::mpsc::channel();
+    let supervisor = Supervisor::new();
 
     let proxies = ProxyFleet::spawn(
         ProxyFleetConfig {
@@ -194,7 +194,7 @@ fn main() -> anyhow::Result<()> {
             shared: Arc::clone(&shared),
             events,
         },
-        process_event_tx.clone(),
+        &supervisor,
     )?;
 
     let registry = ScrapeInputs {
@@ -212,7 +212,7 @@ fn main() -> anyhow::Result<()> {
             metrics_addr,
             metrics: control_metrics,
         },
-        process_event_tx.clone(),
+        &supervisor,
     ) {
         Ok(spawned) => spawned,
         Err(error) => {
@@ -220,7 +220,6 @@ fn main() -> anyhow::Result<()> {
             return Err(error);
         }
     };
-    drop(process_event_tx);
 
     println!("READY {}", proxies.bound_addr());
     println!("METRICS {metrics_bound}");
@@ -233,7 +232,7 @@ fn main() -> anyhow::Result<()> {
         "rusty-mcrouter ready"
     );
 
-    let outcome = match process_event_rx.recv()? {
+    let outcome = match supervisor.wait()? {
         ProcessEvent::ShutdownRequested => Ok(()),
         ProcessEvent::ProxyExited { id } => Err(anyhow::anyhow!("proxy-{id} exited unexpectedly")),
         ProcessEvent::ControlExited => Err(anyhow::anyhow!("control thread exited unexpectedly")),
