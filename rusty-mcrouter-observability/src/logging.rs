@@ -1,8 +1,22 @@
+use std::io;
+
 use rusty_mcrouter_backend::tko::{TkoEvent, TkoEventRecord};
 use rusty_mcrouter_core::{RoutingEvent, RoutingEventRecord};
 use rusty_mcrouter_proxy::{WorkerEvent, WorkerEventRecord};
+use tracing::level_filters::LevelFilter;
 
 use crate::events::Event;
+
+pub fn init() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .with_writer(io::stderr)
+        .try_init();
+}
 
 pub fn write(event: &Event) {
     match event {

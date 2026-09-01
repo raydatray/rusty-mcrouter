@@ -10,6 +10,7 @@ use rusty_mcrouter_backend::{
 use rusty_mcrouter_config::{parse_file, RoutingPrefix};
 use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsLayout, RoutingMetricsShard};
 use rusty_mcrouter_observability::{
+    logging,
     sources::{
         BackendRequestsSource, BackendScalarsSource, DestinationSource, FrontendRequestsSource,
         FrontendScalarsSource, RoutingSource, SelfSource, TkoSource,
@@ -185,8 +186,7 @@ fn main() -> anyhow::Result<()> {
         anyhow::anyhow!("could not resolve metrics address: {}", args.metrics_addr)
     })?;
 
-    // first: installs the tracing subscriber (logs -> stderr; stdout is
-    // the READY/METRICS control channel)
+    logging::init();
     let mut observability = Observability::new(1024);
 
     let config = Arc::new(parse_file(&args.config)?);
