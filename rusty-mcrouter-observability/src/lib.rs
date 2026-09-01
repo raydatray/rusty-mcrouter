@@ -21,8 +21,7 @@ pub struct ObservabilityParts {
     pub http_rejected: Arc<Counter>,
 }
 
-/// the wiring handle: construct FIRST in main (installs the tracing
-/// subscriber), hand out sinks, register sources, then spawn() the
+/// the wiring handle: hand out sinks, register sources, then spawn() the
 /// control thread (bus consumer + optional /metrics server).
 pub struct Observability {
     events: EventSender,
@@ -33,17 +32,6 @@ pub struct Observability {
 
 impl Observability {
     pub fn new(bus_capacity: usize) -> Self {
-        // logs go to stderr: stdout is the READY/METRICS control channel.
-        // try_init so tests constructing multiple instances don't panic.
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::builder()
-                    .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                    .from_env_lossy(),
-            )
-            .with_writer(io::stderr)
-            .try_init();
-
         let (events, consumer) = channel(bus_capacity);
         Self {
             events,
