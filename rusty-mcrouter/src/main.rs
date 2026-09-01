@@ -74,10 +74,11 @@ struct Args {
     #[arg(
         long,
         value_name = "ADDR",
+        default_value = "127.0.0.1:5001",
         env = "RUSTY_MCROUTER_METRICS_ADDR",
-        help = "address for the prometheus /metrics endpoint; unset disables it"
+        help = "address for the prometheus /metrics endpoint"
     )]
-    metrics_addr: Option<String>,
+    metrics_addr: String,
 
     #[command(flatten)]
     options: RouterOptions,
@@ -180,15 +181,9 @@ fn main() -> anyhow::Result<()> {
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| anyhow::anyhow!("could not resolve listen address: {}", args.listen))?;
-    let metrics_addr = args
-        .metrics_addr
-        .as_deref()
-        .map(|addr| {
-            addr.to_socket_addrs()?
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("could not resolve metrics address: {addr}"))
-        })
-        .transpose()?;
+    let metrics_addr = args.metrics_addr.to_socket_addrs()?.next().ok_or_else(|| {
+        anyhow::anyhow!("could not resolve metrics address: {}", args.metrics_addr)
+    })?;
 
     // first: installs the tracing subscriber (logs -> stderr; stdout is
     // the READY/METRICS control channel)
@@ -359,9 +354,7 @@ fn main() -> anyhow::Result<()> {
     let addr =
         bound_addr.ok_or_else(|| anyhow::anyhow!("no proxy thread reported a bound address"))?;
     println!("READY {addr}");
-    if let Some(metrics) = metrics_bound {
-        println!("METRICS {metrics}");
-    }
+    println!("METRICS {metrics_bound}");
     std::io::stdout().flush()?;
     tracing::info!(
         listen = %addr,
