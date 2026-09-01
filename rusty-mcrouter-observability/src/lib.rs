@@ -17,7 +17,7 @@ use crate::metrics::{MetricsRegistry, MetricsSource};
 pub struct ObservabilityParts {
     pub consumer: EventConsumer,
     pub registry: Arc<MetricsRegistry>,
-    pub metrics_listener: Option<std::net::TcpListener>,
+    pub metrics_listener: std::net::TcpListener,
     pub http_rejected: Arc<Counter>,
 }
 
@@ -67,17 +67,11 @@ impl Observability {
 
     pub fn into_parts(
         self,
-        metrics_addr: Option<SocketAddr>,
-    ) -> io::Result<(Option<SocketAddr>, ObservabilityParts)> {
-        let listener = match metrics_addr {
-            Some(addr) => {
-                let listener = std::net::TcpListener::bind(addr)?;
-                listener.set_nonblocking(true)?;
-                Some(listener)
-            }
-            None => None,
-        };
-        let bound = listener.as_ref().map(|l| l.local_addr()).transpose()?;
+        metrics_addr: SocketAddr,
+    ) -> io::Result<(SocketAddr, ObservabilityParts)> {
+        let listener = std::net::TcpListener::bind(metrics_addr)?;
+        listener.set_nonblocking(true)?;
+        let bound = listener.local_addr()?;
 
         drop(self.events); // leaf-owned sinks keep the event channel alive
         Ok((

@@ -114,7 +114,7 @@ impl ControlThread {
 struct ControlRuntime {
     command_rx: mpsc::Receiver<ControlCommand>,
     events: rusty_mcrouter_observability::bus::EventConsumer,
-    metrics: Option<MetricsHttp>,
+    metrics: MetricsHttp,
     process_events: std::sync::mpsc::Sender<ProcessEvent>,
 }
 
@@ -140,7 +140,7 @@ impl ControlRuntime {
                     logging::write(&event);
                 }
 
-                result = step_metrics(&mut self.metrics), if self.metrics.is_some() => {
+                result = self.metrics.step() => {
                     result?;
                 }
 
@@ -156,14 +156,8 @@ impl ControlRuntime {
         while let Some(event) = self.events.try_recv() {
             logging::write(&event);
         }
-        if let Some(metrics) = &mut self.metrics {
-            metrics.shutdown().await;
-        }
+        self.metrics.shutdown().await;
     }
-}
-
-async fn step_metrics(metrics: &mut Option<MetricsHttp>) -> anyhow::Result<()> {
-    metrics.as_mut().expect("guarded by is_some").step().await
 }
 
 fn control_thread_main(
@@ -185,20 +179,13 @@ fn control_thread_main(
     };
 
     let entered = runtime.enter();
-    let metrics = match parts.metrics_listener {
-        Some(listener) => match tokio::net::TcpListener::from_std(listener) {
-            Ok(listener) => Some(MetricsHttp::new(
-                listener,
-                parts.registry,
-                parts.http_rejected,
-            )),
-            Err(error) => {
-                let error = anyhow::Error::from(error);
-                let _ = ready_tx.send(Err(anyhow::anyhow!(error.to_string())));
-                return Err(error);
-            }
-        },
-        None => None,
+    let metrics = match tokio::net::TcpListener::from_std(parts.metrics_listener) {
+        Ok(listener) => MetricsHttp::new(listener, parts.registry, parts.http_rejected),
+        Err(error) => {
+            let error = anyhow::Error::from(error);
+            let _ = ready_tx.send(Err(anyhow::anyhow!(error.to_string())));
+            return Err(error);
+        }
     };
     drop(entered);
 
@@ -224,7 +211,9 @@ mod tests {
     fn control_thread_acknowledges_shutdown_and_joins() {
         let observability = Observability::new(8);
         let events = observability.events().clone();
-        let (_, parts) = observability.into_parts(None).unwrap();
+        let (_, parts) = observability
+            .into_parts("127.0.0.1:0".parse().unwrap())
+            .unwrap();
         let (process_tx, _process_rx) = std::sync::mpsc::channel();
         ControlThread::spawn(parts, process_tx)
             .unwrap()
