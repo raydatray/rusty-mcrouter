@@ -333,7 +333,6 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::{ProxyCommand, ProxyRequest};
 
     /// a real Connection over a localhost socket pair, with a SameThread
     /// route into a mock backend. the proxy handle channel is never used
@@ -365,9 +364,8 @@ mod tests {
             routing_state.layout(),
         )
         .unwrap();
-        let (request_tx, _request_rx) = mpsc::channel::<ProxyRequest>(1);
-        let (command_tx, _command_rx) = mpsc::channel::<ProxyCommand>(1);
-        let proxies = ProxySet::new(vec![ProxyHandle::new(0, request_tx, command_tx)]);
+        let (handle, _inbox) = ProxyHandle::allocate(0);
+        let proxies = ProxySet::new(vec![handle]);
 
         let conn = Connection::new(
             server_stream,

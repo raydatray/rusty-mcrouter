@@ -4,26 +4,39 @@ use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{ProxyCommand, ProxyRequest};
+use crate::error::Result;
+use crate::{FrontendError, ProxyCommand, ProxyInbox, ProxyRequest};
+
+const WORK_CAPACITY: usize = 1024;
+const REQUEST_CAPACITY: usize = 1024;
+const COMMAND_CAPACITY: usize = 16;
 
 #[derive(Clone)]
 pub struct ProxyHandle {
     id: usize,
     request_tx: mpsc::Sender<ProxyRequest>,
     command_tx: mpsc::Sender<ProxyCommand>,
+    work_tx: mpsc::Sender<std::net::TcpStream>,
 }
 
 impl ProxyHandle {
-    pub fn new(
-        id: usize,
-        request_tx: mpsc::Sender<ProxyRequest>,
-        command_tx: mpsc::Sender<ProxyCommand>,
-    ) -> Self {
-        Self {
-            id,
-            request_tx,
-            command_tx,
-        }
+    pub fn allocate(id: usize) -> (ProxyHandle, ProxyInbox) {
+        let (request_tx, request_rx) = mpsc::channel(REQUEST_CAPACITY);
+        let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (work_tx, work_rx) = mpsc::channel(WORK_CAPACITY);
+        (
+            ProxyHandle {
+                id,
+                request_tx,
+                command_tx,
+                work_tx,
+            },
+            ProxyInbox {
+                work_rx,
+                request_rx,
+                command_rx,
+            },
+        )
     }
 
     pub fn id(&self) -> usize {
@@ -45,6 +58,13 @@ impl ProxyHandle {
         reply_rx
             .await
             .unwrap_or_else(|_| server_error(b"proxy dropped request"))
+    }
+
+    pub async fn send_connection(&self, stream: std::net::TcpStream) -> Result<()> {
+        self.work_tx
+            .send(stream)
+            .await
+            .map_err(|_| FrontendError::WorkerClosed { worker: self.id })
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {

@@ -4,11 +4,10 @@ mod proxy;
 use clap::Parser;
 use rusty_mcrouter_backend::{
     destination::{self, DestinationMetricsRegistry},
-    metrics::BackendMetricsShard,
     tko::TkoTrackerMap,
 };
 use rusty_mcrouter_config::{parse_file, RoutingPrefix};
-use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsLayout, RoutingMetricsShard};
+use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsLayout};
 use rusty_mcrouter_observability::{
     logging,
     sources::{
@@ -18,10 +17,8 @@ use rusty_mcrouter_observability::{
     Observability,
 };
 use rusty_mcrouter_proxy::{
-    FrontendMetricsShard, ListenerConfig, ProxyCommand, ProxyHandle, ProxyRequest, ProxySet,
-    ProxyThreadConfig, ThreadMode,
+    ListenerConfig, ProxyHandle, ProxySet, ProxyShards, ProxyShared, ProxyThreadConfig, ThreadMode,
 };
-use tokio::sync::mpsc;
 
 use crate::control::{ControlThread, ProcessEvent};
 use crate::proxy::ProxyThread;
@@ -33,9 +30,6 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-const WORK_CHANNEL_CAPACITY: usize = 1024;
-const PROXY_REQUEST_CAPACITY: usize = 1024;
-const PROXY_COMMAND_CAPACITY: usize = 16;
 
 #[derive(Parser)]
 struct Args {
@@ -192,139 +186,101 @@ fn main() -> anyhow::Result<()> {
     let config = Arc::new(parse_file(&args.config)?);
     let routing_layout = RoutingMetricsLayout::new(&config);
 
-    // the cross-thread objects: per-server health and per-server counters,
-    // shared by every proxy thread's destinations, atomics only
-    let tko_map = TkoTrackerMap::new(observability.events().sink());
-    let metrics_registry = DestinationMetricsRegistry::new();
-    let defaults = destination_defaults(&args.options);
-    let root_route_options = RootRouteOptions {
-        default_route: args.options.route_prefix.clone(),
-        send_invalid_to_default: args.options.send_invalid_route_to_default,
-    };
-    let sweep_interval = Duration::from_millis(args.options.reset_inactive_connection_interval_ms);
+    let shared = Arc::new(ProxyShared {
+        config,
+        tko_map: TkoTrackerMap::new(observability.events().sink()),
+        destinations: DestinationMetricsRegistry::new(),
+        defaults: destination_defaults(&args.options),
+        root_route_options: RootRouteOptions {
+            default_route: args.options.route_prefix.clone(),
+            send_invalid_to_default: args.options.send_invalid_route_to_default,
+        },
+        sweep_interval: Duration::from_millis(args.options.reset_inactive_connection_interval_ms),
+        thread_mode: ThreadMode::SameThread,
+    });
 
-    let (work_txs, work_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
-        .map(|_| mpsc::channel::<std::net::TcpStream>(WORK_CHANNEL_CAPACITY))
-        .unzip();
-
-    let (request_txs, request_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
-        .map(|_| mpsc::channel::<ProxyRequest>(PROXY_REQUEST_CAPACITY))
-        .unzip();
-    let (command_txs, command_rxs): (Vec<_>, Vec<_>) = (0..args.num_proxies)
-        .map(|_| mpsc::channel::<ProxyCommand>(PROXY_COMMAND_CAPACITY))
-        .unzip();
-    let proxy_handles: Vec<_> = request_txs
-        .iter()
-        .zip(&command_txs)
-        .enumerate()
-        .map(|(id, (request_tx, command_tx))| {
-            ProxyHandle::new(id, request_tx.clone(), command_tx.clone())
-        })
-        .collect();
-    let proxies = ProxySet::new(proxy_handles.clone());
+    // both ends of every proxy's channels: the handles go to everyone
+    // (as the ProxySet), each inbox to its own thread
+    let (handles, inboxes): (Vec<_>, Vec<_>) =
+        (0..args.num_proxies).map(ProxyHandle::allocate).unzip();
+    let proxies = ProxySet::new(handles.clone());
 
     let use_reuseport = num_listening_sockets > 1;
     let (process_event_tx, process_event_rx) = std::sync::mpsc::channel();
     let mut proxy_threads = Vec::with_capacity(args.num_proxies);
     let mut bound_addr: Option<SocketAddr> = None;
-    let mut work_rxs_iter = work_rxs.into_iter();
-    let mut request_rxs_iter = request_rxs.into_iter();
-    let mut command_rxs_iter = command_rxs.into_iter();
     // per-thread counter shards, created here so the scrape sources hold
     // the same Arcs the threads write
-    let mut backend_metric_shards = Vec::with_capacity(args.num_proxies);
-    let mut frontend_metric_shards = Vec::with_capacity(args.num_proxies);
-    let mut routing_metric_shards = Vec::with_capacity(args.num_proxies);
+    let mut proxy_shards = Vec::with_capacity(args.num_proxies);
 
-    for (proxy_id, proxy_handle) in proxy_handles.into_iter().enumerate() {
-        let has_listener = proxy_id < num_listening_sockets;
-        let work_rx = work_rxs_iter.next().expect("one work_rx per proxy thread");
-        let request_rx = request_rxs_iter
-            .next()
-            .expect("one request_rx per proxy thread");
-        let command_rx = command_rxs_iter
-            .next()
-            .expect("one command_rx per proxy thread");
-        let listener_config = if has_listener {
-            Some(ListenerConfig {
-                listen_addr,
-                use_reuseport,
-                listener_txs: work_txs.clone(),
-            })
-        } else {
-            None
-        };
-
-        let backend_metrics = BackendMetricsShard::new();
-        let frontend_metrics = FrontendMetricsShard::new();
-        let routing_metrics = RoutingMetricsShard::new(Arc::clone(&routing_layout));
-        backend_metric_shards.push(Arc::clone(&backend_metrics));
-        frontend_metric_shards.push(Arc::clone(&frontend_metrics));
-        routing_metric_shards.push(Arc::clone(&routing_metrics));
+    for (proxy_id, (handle, inbox)) in handles.into_iter().zip(inboxes).enumerate() {
+        let listener = (proxy_id < num_listening_sockets).then_some(ListenerConfig {
+            listen_addr,
+            use_reuseport,
+        });
+        let shards = ProxyShards::new(Arc::clone(&routing_layout));
+        proxy_shards.push(shards.clone());
 
         let cfg = ProxyThreadConfig {
             proxy_id,
-            config: Arc::clone(&config),
-            work_rx,
-            request_rx,
-            command_rx,
+            inbox,
+            shards,
+            shared: Arc::clone(&shared),
             proxies: proxies.clone(),
-            thread_mode: ThreadMode::SameThread,
-            listener_config,
-            tko_map: Arc::clone(&tko_map),
-            metrics_registry: Arc::clone(&metrics_registry),
-            backend_metrics,
-            frontend_metrics,
-            routing_metrics,
+            listener,
             routing_events: observability.events().sink(),
             events: observability.events().sink(),
-            defaults: defaults.clone(),
-            root_route_options: root_route_options.clone(),
-            sweep_interval,
         };
 
-        let (thread, maybe_addr) =
-            match ProxyThread::spawn(proxy_handle, cfg, process_event_tx.clone()) {
-                Ok(spawned) => spawned,
-                Err(error) => {
-                    shutdown_proxy_threads(&mut proxy_threads);
-                    return Err(error);
-                }
-            };
+        let (thread, maybe_addr) = match ProxyThread::spawn(handle, cfg, process_event_tx.clone()) {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                shutdown_proxy_threads(&mut proxy_threads);
+                return Err(error);
+            }
+        };
         if let Some(addr) = maybe_addr {
             bound_addr.get_or_insert(addr);
         }
         proxy_threads.push(thread);
     }
 
-    // drop main's sender copies
-    // - each thread keeps its own clones (work_txs inside listener_config, proxy senders inside the ProxySet)
-    // - the queues stay open until the threads terminate
-    drop(work_txs);
-    drop(request_txs);
-    drop(command_txs);
+    // drop main's ProxySet: each thread keeps its own clone, so the
+    // queues stay open until the threads terminate
     drop(proxies);
 
+    let backend_shards: Vec<_> = proxy_shards
+        .iter()
+        .map(|s| Arc::clone(&s.backend))
+        .collect();
+    let frontend_shards: Vec<_> = proxy_shards
+        .iter()
+        .map(|s| Arc::clone(&s.frontend))
+        .collect();
+    let routing_shards: Vec<_> = proxy_shards
+        .iter()
+        .map(|s| Arc::clone(&s.routing))
+        .collect();
     observability.register(Box::new(BackendScalarsSource {
-        shards: backend_metric_shards.clone(),
+        shards: backend_shards.clone(),
     }));
     observability.register(Box::new(BackendRequestsSource {
-        shards: backend_metric_shards,
+        shards: backend_shards,
     }));
     observability.register(Box::new(FrontendScalarsSource {
-        shards: frontend_metric_shards.clone(),
+        shards: frontend_shards.clone(),
     }));
     observability.register(Box::new(FrontendRequestsSource {
-        shards: frontend_metric_shards,
+        shards: frontend_shards,
     }));
     observability.register(Box::new(RoutingSource {
-        shards: routing_metric_shards,
+        shards: routing_shards,
     }));
     observability.register(Box::new(TkoSource {
-        map: Arc::clone(&tko_map),
+        map: Arc::clone(&shared.tko_map),
     }));
     observability.register(Box::new(DestinationSource {
-        registry: Arc::clone(&metrics_registry),
+        registry: Arc::clone(&shared.destinations),
     }));
     observability.register(Box::new(SelfSource {
         metrics: observability.control_metrics(),

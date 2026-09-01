@@ -1,9 +1,6 @@
-use tokio::{
-    net::{lookup_host, TcpListener, TcpSocket, ToSocketAddrs},
-    sync::mpsc::Sender,
-};
+use tokio::net::{lookup_host, TcpListener, TcpSocket, ToSocketAddrs};
 
-use crate::{error::Result, FrontendError};
+use crate::{error::Result, FrontendError, ProxySet};
 
 const LISTEN_BACKLOG: u32 = 1024;
 
@@ -43,11 +40,8 @@ impl Server {
         self.listener.local_addr().map_err(|e| e.into())
     }
 
-    pub async fn accept_and_dispatch(
-        self,
-        work_txs: Vec<Sender<std::net::TcpStream>>,
-    ) -> Result<()> {
-        let mut next = 0;
+    pub async fn accept_and_dispatch(self, proxies: ProxySet) -> Result<()> {
+        let mut next = 0usize;
         loop {
             let (tokio_stream, _) = match self.listener.accept().await {
                 Ok(pair) => pair,
@@ -62,12 +56,8 @@ impl Server {
             let std_stream = tokio_stream.into_std()?;
 
             // todo - thread modes, accepted sockets are round-robin today; per-request affinity belongs behind a proxy message queue
-            let target = next % work_txs.len();
+            proxies.nth(next).send_connection(std_stream).await?;
             next = next.wrapping_add(1);
-
-            if work_txs[target].send(std_stream).await.is_err() {
-                return Err(FrontendError::WorkerClosed { worker: target });
-            }
         }
     }
 }

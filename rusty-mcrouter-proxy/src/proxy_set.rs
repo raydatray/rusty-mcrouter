@@ -23,4 +23,8 @@ impl ProxySet {
 
         self.proxies[idx].clone()
     }
+
+    pub fn nth(&self, n: usize) -> &ProxyHandle {
+        &self.proxies[n % self.proxies.len()]
+    }
 }

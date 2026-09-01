@@ -13,7 +13,9 @@ mod runtime;
 mod server;
 mod thread;
 
-pub use crate::config::{ListenerConfig, ProxyThreadConfig, ThreadMode};
+pub use crate::config::{
+    ListenerConfig, ProxyInbox, ProxyShards, ProxyShared, ProxyThreadConfig, ThreadMode,
+};
 pub use crate::error::FrontendError;
 pub use crate::events::{WorkerEvent, WorkerEventRecord, WorkerEventSink};
 pub use crate::handle::ProxyHandle;
