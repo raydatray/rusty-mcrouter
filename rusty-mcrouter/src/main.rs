@@ -327,8 +327,7 @@ fn main() -> anyhow::Result<()> {
         registry: Arc::clone(&metrics_registry),
     }));
     observability.register(Box::new(SelfSource {
-        dropped: observability.events().dropped_counter(),
-        http_rejected: observability.http_rejected_counter(),
+        metrics: observability.control_metrics(),
         num_proxies: args.num_proxies,
         start_unix_secs: SystemTime::now()
             .duration_since(UNIX_EPOCH)
