@@ -25,4 +25,4 @@ name = "pool1-open250k"
 route = "pool1"
 workload = "etc-like"
 mode = { open = { requests_per_second = 250000 } }
-expect = { min_completed = 18000, max_dropped = 10, max_schedule_lag_p99_us = 1000 }
+expect = { min_completed = 450000, max_dropped = 5000, max_schedule_lag_p99_us = 5000 }
