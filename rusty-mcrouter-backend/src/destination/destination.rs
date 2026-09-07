@@ -50,10 +50,10 @@ impl Destination {
             };
 
             let connection_cfg = BackendConnectionConfig {
-                connect_timeout: cfg.connect_timeout,
+                connect_timeout: Some(cfg.connect_timeout),
                 connect_timeout_retries: cfg.connect_timeout_retries,
-                write_timeout: cfg.reply_timeout,
-                reply_timeout: cfg.reply_timeout,
+                write_timeout: Some(cfg.reply_timeout),
+                reply_timeout: Some(cfg.reply_timeout),
                 ..BackendConnectionConfig::default()
             };
 
@@ -287,8 +287,8 @@ mod tests {
         probe_initial_ms: u64,
     ) -> DestinationConfig {
         DestinationConfig {
-            connect_timeout: Some(Duration::from_millis(1000)),
-            reply_timeout: Some(Duration::from_millis(reply_timeout_ms)),
+            connect_timeout: Duration::from_millis(1000),
+            reply_timeout: Duration::from_millis(reply_timeout_ms),
             connect_timeout_retries: 0,
             failures_until_tko,
             probe_delay_initial: Duration::from_millis(probe_initial_ms),
@@ -499,7 +499,7 @@ mod tests {
             let metrics_b = DestinationMetricsRegistry::new().metrics_for(&tracker);
             let key_b = DestinationKey {
                 addr: addr_b,
-                reply_timeout: Some(Duration::from_millis(1000)),
+                reply_timeout: Duration::from_millis(1000),
             };
             let dest_b = Destination::new(
                 key_b,
@@ -543,7 +543,7 @@ mod tests {
             let shard = BackendMetricsShard::new();
             let key = DestinationKey {
                 addr,
-                reply_timeout: Some(Duration::from_millis(1000)),
+                reply_timeout: Duration::from_millis(1000),
             };
             let dest = Destination::new(
                 key,

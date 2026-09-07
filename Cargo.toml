@@ -12,7 +12,7 @@ license = "MIT"
 anyhow = "1.0.102"
 base64 = "0.22.1"
 bytes = "1.11.1"
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive"] }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
