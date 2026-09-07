@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import report, runner, scenarios
+from . import report, resources, runner, scenarios
 
 REPO = runner.REPO
 BENCH_DIR = runner.BENCH_DIR
@@ -58,9 +58,23 @@ def main(argv: list[str] | None = None) -> int:
     render = commands.add_parser("report", help="render an existing JSONL result")
     render.add_argument("results", type=Path)
 
+    doctor = commands.add_parser("doctor", help="validate the selected Linux resource profile")
+
     args = parser.parse_args(argv)
     if args.command == "report":
         print(report.summary(report.load(args.results)))
+        return 0
+    profile_name = os.environ.get("BENCH_PROFILE")
+    profile = resources.load(profile_name) if profile_name else None
+    observed_resources = resources.validate(profile) if profile else resources.observed()
+    resource_info = {
+        "requested": profile.requested() if profile else None,
+        "observed": observed_resources,
+    }
+    if args.command == "doctor":
+        import json
+
+        print(json.dumps(resource_info, indent=2, sort_keys=True))
         return 0
 
     if args.build or not (args.router.exists() and args.loadgen.exists()):
@@ -76,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
             args.label,
             args.repeat,
+            command_prefixes=profile.prefixes() if profile else None,
+            resource_info=resource_info,
         )
     except runner.InvalidRun as error:
         print(report.summary(report.load(args.output)))

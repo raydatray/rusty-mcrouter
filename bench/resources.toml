@@ -1,0 +1,13 @@
+[profile.smoke-4cpu]
+container_cpus = "0-3"
+container_memory_mb = 4096
+loadgen_cpus = "0"
+router_cpus = "1-2"
+memcached_cpus = "3"
+
+[profile.perf-8cpu]
+container_cpus = "0-7"
+container_memory_mb = 6144
+loadgen_cpus = "0-1"
+router_cpus = "2-5"
+memcached_cpus = "6-7"

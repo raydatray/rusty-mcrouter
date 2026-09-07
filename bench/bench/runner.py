@@ -121,6 +121,7 @@ def run_scenario(
     label: str,
     *,
     command_prefixes: dict[str, list[str]] | None = None,
+    resource_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     prefixes = command_prefixes or {}
     with tempfile.TemporaryDirectory(prefix="rmc-bench-") as temporary, ExitStack() as stack:
@@ -194,6 +195,7 @@ def run_scenario(
             "source_revision": _revision(),
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "host": _host(),
+            "resources": resource_info,
             "parameters": scenario.resolved(),
             "subject": router_result,
             "loadgen": {"binary_sha256": _sha256(loadgen_binary), "report": report},
@@ -209,6 +211,9 @@ def run_matrix(
     output: Path,
     label: str,
     repeat: int | None = None,
+    *,
+    command_prefixes: dict[str, list[str]] | None = None,
+    resource_info: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     records = []
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -221,6 +226,8 @@ def run_matrix(
                     loadgen_binary,
                     repetition,
                     label,
+                    command_prefixes=command_prefixes,
+                    resource_info=resource_info,
                 )
                 records.append(record)
                 destination.write(json.dumps(record, sort_keys=True) + "\n")
