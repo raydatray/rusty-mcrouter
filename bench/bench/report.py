@@ -22,18 +22,24 @@ def _latency(value: float) -> str:
 
 def summary(records: list[dict]) -> str:
     rows = [
-        "| scenario | label | rps | p50 | p99 | errors | dropped | valid |",
-        "|---|---|---:|---:|---:|---:|---:|---|",
+        "| scenario | label | mode | rps | p50 | p99 | errors | dropped | router cores | valid | notes |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for record in records:
         report = record["loadgen"]["report"]
         counts = report["counts"]
+        subject = record.get("subject") or {}
+        notes = list(record["validity"].get("reasons", []))
+        faults = record.get("faults", {}).get("applied", [])
+        if faults:
+            notes.append("faults=" + ",".join(fault["action"] for fault in faults))
         rows.append(
-            f"| {record['scenario']} | {record['label']} | "
+            f"| {record['scenario']} | {record['label']} | {report['mode']} | "
             f"{_rate(report['achieved_requests_per_second'])} | "
             f"{_latency(report['latency_us']['p50'])} | "
             f"{_latency(report['latency_us']['p99'])} | "
             f"{counts['errors']} | {counts['dropped']} | "
-            f"{'yes' if record['validity']['valid'] else 'no'} |"
+            f"{subject.get('cpu_cores_average', '-')} | "
+            f"{'yes' if record['validity']['valid'] else 'no'} | {'; '.join(notes)} |"
         )
     return "\n".join(rows)

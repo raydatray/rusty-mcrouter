@@ -1,0 +1,15 @@
+{
+  "pools": {
+    "A": {
+      "servers": "$SERVERS",
+      "server_timeout": 200
+    }
+  },
+  "route": {
+    "type": "PoolRoute",
+    "pool": "A",
+    "hash": {
+      "hash_func": "Ch3"
+    }
+  }
+}

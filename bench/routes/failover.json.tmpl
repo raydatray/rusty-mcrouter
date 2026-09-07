@@ -1,0 +1,21 @@
+{
+  "pools": {
+    "primary": {
+      "servers": ["$SERVER_0"],
+      "server_timeout": 200
+    },
+    "secondary": {
+      "servers": ["$SERVER_1"],
+      "server_timeout": 200
+    }
+  },
+  "route": {
+    "type": "FailoverRoute",
+    "children": ["PoolRoute|primary", "PoolRoute|secondary"],
+    "failover_errors": ["tko", "timeout", "connect_error"],
+    "failover_policy": {
+      "type": "LeastFailuresPolicy",
+      "max_tries": 2
+    }
+  }
+}
