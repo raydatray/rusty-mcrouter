@@ -1,7 +1,7 @@
 [defaults]
 duration_seconds = 5
 warmup_seconds = 1
-repeat = 3
+repeat = 7
 loadgen = { threads = 2, connections = 32, depth = 16 }
 memcached = { count = 1, threads = 2, memory_mb = 512 }
 router = { num_proxies = 4, listening_sockets = 1 }

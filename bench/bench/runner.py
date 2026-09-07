@@ -179,6 +179,9 @@ def run_scenario(
     *,
     command_prefixes: dict[str, list[str]] | None = None,
     resource_info: dict[str, Any] | None = None,
+    pair_id: str | None = None,
+    order: int | None = None,
+    subject_revision: str | None = None,
 ) -> dict[str, Any]:
     prefixes = command_prefixes or {}
     with tempfile.TemporaryDirectory(prefix="rmc-bench-") as temporary, ExitStack() as stack:
@@ -243,6 +246,7 @@ def run_scenario(
             cpu_seconds = max(0.0, cpu_after - cpu_before)
             router_result = {
                 "binary_sha256": _sha256(router_binary),
+                "source_revision": subject_revision,
                 "cpu_seconds": cpu_seconds,
                 "cpu_cores_average": cpu_seconds / wall_seconds if wall_seconds else 0.0,
                 "rss_mb": router.rss_mb(),
@@ -254,6 +258,8 @@ def run_scenario(
             "scenario": scenario.name,
             "label": label,
             "repetition": repetition,
+            "pair_id": pair_id,
+            "order": order,
             "source_revision": _revision(),
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "host": _host(),
@@ -309,4 +315,51 @@ def run_matrix(
             for record in invalid
         )
         raise InvalidRun(detail)
+    return records
+
+
+def comparison_order(repetition: int) -> tuple[str, str]:
+    return ("base", "head") if repetition % 2 == 0 else ("head", "base")
+
+
+def run_comparison(
+    scenarios: list[Scenario],
+    base_binary: Path,
+    head_binary: Path,
+    loadgen_binary: Path,
+    output: Path,
+    repeat: int | None = None,
+    *,
+    command_prefixes: dict[str, list[str]] | None = None,
+    resource_info: dict[str, Any] | None = None,
+    base_revision: str | None = None,
+    head_revision: str | None = None,
+) -> list[dict[str, Any]]:
+    subjects = {
+        "base": (base_binary, base_revision),
+        "head": (head_binary, head_revision),
+    }
+    records = []
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w") as destination:
+        for scenario in scenarios:
+            for repetition in range(repeat or scenario.repeat):
+                pair_id = f"{scenario.name}:{repetition}"
+                for order, label in enumerate(comparison_order(repetition)):
+                    binary, revision = subjects[label]
+                    record = run_scenario(
+                        scenario,
+                        binary,
+                        loadgen_binary,
+                        repetition,
+                        label,
+                        command_prefixes=command_prefixes,
+                        resource_info=resource_info,
+                        pair_id=pair_id,
+                        order=order,
+                        subject_revision=revision,
+                    )
+                    records.append(record)
+                    destination.write(json.dumps(record, sort_keys=True) + "\n")
+                    destination.flush()
     return records
