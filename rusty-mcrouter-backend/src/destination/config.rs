@@ -2,8 +2,8 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct DestinationConfig {
-    pub connect_timeout: Option<Duration>,
-    pub reply_timeout: Option<Duration>,
+    pub connect_timeout: Duration,
+    pub reply_timeout: Duration,
     pub connect_timeout_retries: usize,
     pub failures_until_tko: u64,
     pub probe_delay_initial: Duration,
@@ -17,8 +17,8 @@ impl Default for DestinationConfig {
     /// TKO, probes from 10s backing off to 60s, tracking enabled.
     fn default() -> Self {
         Self {
-            connect_timeout: Some(Duration::from_millis(1000)),
-            reply_timeout: Some(Duration::from_millis(1000)),
+            connect_timeout: Duration::from_millis(1000),
+            reply_timeout: Duration::from_millis(1000),
             connect_timeout_retries: 0,
             failures_until_tko: 3,
             probe_delay_initial: Duration::from_secs(10),

@@ -304,11 +304,11 @@ fn pool_destination_config(
 ) -> destination::DestinationConfig {
     let mut cfg = defaults.clone();
     if let Some(ms) = pool.server_timeout_ms() {
-        cfg.reply_timeout = Some(Duration::from_millis(ms));
-        cfg.connect_timeout = Some(Duration::from_millis(ms));
+        cfg.reply_timeout = Duration::from_millis(ms);
+        cfg.connect_timeout = Duration::from_millis(ms);
     }
     if let Some(ms) = pool.connect_timeout_ms() {
-        cfg.connect_timeout = Some(Duration::from_millis(ms));
+        cfg.connect_timeout = Duration::from_millis(ms);
     }
     cfg
 }
@@ -859,8 +859,8 @@ mod tests {
     fn pool_server_timeout_drags_connect_timeout() {
         let pool = pool_json(r#"{ "servers": ["a:1"], "server_timeout": 200 }"#);
         let cfg = pool_destination_config(&defaults(), &pool);
-        assert_eq!(cfg.reply_timeout, Some(Duration::from_millis(200)));
-        assert_eq!(cfg.connect_timeout, Some(Duration::from_millis(200)));
+        assert_eq!(cfg.reply_timeout, Duration::from_millis(200));
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(200));
     }
 
     #[test]
@@ -868,8 +868,8 @@ mod tests {
         let pool =
             pool_json(r#"{ "servers": ["a:1"], "server_timeout": 200, "connect_timeout": 50 }"#);
         let cfg = pool_destination_config(&defaults(), &pool);
-        assert_eq!(cfg.reply_timeout, Some(Duration::from_millis(200)));
-        assert_eq!(cfg.connect_timeout, Some(Duration::from_millis(50)));
+        assert_eq!(cfg.reply_timeout, Duration::from_millis(200));
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(50));
     }
 
     #[test]
