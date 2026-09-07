@@ -1,0 +1,28 @@
+seed = 42
+keyspace = 200000
+prewarm_fraction = 0.95
+
+[ops]
+mg = 30
+ms = 1
+
+[keys]
+distribution = "zipf"
+theta = 0.99
+length = { min = 16, max = 40 }
+
+[values]
+ttl = { min = 60, max = 3600 }
+buckets = [{ weight = 1, min = 2, max = 512 }]
+
+[[prefixes]]
+value = ""
+weight = 80
+
+[[prefixes]]
+value = "/east/a/"
+weight = 15
+
+[[prefixes]]
+value = "/west/b/"
+weight = 5

@@ -1,0 +1,20 @@
+seed = 42
+keyspace = 20000
+prewarm_fraction = 1.0
+
+[ops]
+mg = 10
+ms = 1
+
+[keys]
+distribution = "zipf"
+theta = 0.9
+length = { min = 24, max = 24 }
+
+[values]
+ttl = { min = 3600, max = 3600 }
+buckets = [
+  { weight = 60, min = 1024, max = 8192 },
+  { weight = 30, min = 8192, max = 32768 },
+  { weight = 10, min = 32768, max = 65536 },
+]

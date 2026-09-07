@@ -1,0 +1,17 @@
+seed = 42
+keyspace = 2000000
+prewarm_fraction = 0.5
+
+[ops]
+mg = 10
+ms = 3
+ma = 2
+md = 0.5
+
+[keys]
+distribution = "uniform"
+length = { min = 12, max = 64 }
+
+[values]
+ttl = { min = 10, max = 600 }
+buckets = [{ weight = 1, min = 1, max = 32 }]
