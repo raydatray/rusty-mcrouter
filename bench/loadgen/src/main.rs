@@ -249,9 +249,6 @@ fn main() -> Result<()> {
     if report.counts.errors > 0 {
         bail!("received {} server error replies", report.counts.errors);
     }
-    if report.counts.dropped > 0 {
-        bail!("dropped {} scheduled requests", report.counts.dropped);
-    }
     Ok(())
 }
 

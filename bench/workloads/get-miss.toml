@@ -1,0 +1,10 @@
+seed = 42
+keyspace = 1000000
+prewarm_fraction = 0.0
+
+[ops]
+mg = 1
+
+[keys]
+distribution = "uniform"
+length = { min = 16, max = 40 }
