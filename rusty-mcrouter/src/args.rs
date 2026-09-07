@@ -145,6 +145,7 @@ impl Args {
             self.num_listening_sockets,
             self.num_proxies
         );
+        anyhow::ensure!(self.server_timeout_ms > 0, "server_timeout_ms must be >= 1");
         Ok(())
     }
 
@@ -160,8 +161,8 @@ impl Args {
         DestinationConfig {
             // connect_timeout defaults to the server timeout, like mcrouter
             // (McRouteHandleProvider-inl.h:197-205); pools may override both
-            connect_timeout: Some(Duration::from_millis(self.server_timeout_ms)),
-            reply_timeout: Some(Duration::from_millis(self.server_timeout_ms)),
+            connect_timeout: Duration::from_millis(self.server_timeout_ms),
+            reply_timeout: Duration::from_millis(self.server_timeout_ms),
             connect_timeout_retries: self.connect_timeout_retries,
             failures_until_tko: self.failures_until_tko,
             probe_delay_initial: Duration::from_millis(self.probe_delay_initial_ms),
@@ -244,7 +245,7 @@ mod tests {
         ]);
         let defaults = args.destination_defaults();
 
-        assert_eq!(defaults.reply_timeout, Some(Duration::from_millis(11)));
+        assert_eq!(defaults.reply_timeout, Duration::from_millis(11));
         assert_eq!(defaults.failures_until_tko, 12);
         assert_eq!(defaults.probe_delay_initial, Duration::from_millis(13));
         assert_eq!(defaults.probe_delay_max, Duration::from_millis(14));
@@ -252,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_thread_and_listener_counts() {
+    fn validates_cli_constraints() {
         assert!(parse_args(&["--num-proxies", "0"]).validate().is_err());
         assert!(parse_args(&["--num-listening-sockets", "0"])
             .validate()
@@ -262,5 +263,6 @@ mod tests {
                 .validate()
                 .is_err()
         );
+        assert!(parse_args(&["--server-timeout", "0"]).validate().is_err());
     }
 }

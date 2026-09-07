@@ -146,8 +146,8 @@ mod tests {
 
     fn test_cfg() -> DestinationConfig {
         DestinationConfig {
-            connect_timeout: Some(Duration::from_millis(1000)),
-            reply_timeout: Some(Duration::from_millis(1000)),
+            connect_timeout: Duration::from_millis(1000),
+            reply_timeout: Duration::from_millis(1000),
             connect_timeout_retries: 0,
             failures_until_tko: 1,
             probe_delay_initial: Duration::from_secs(10),
@@ -159,7 +159,7 @@ mod tests {
     fn key_for(addr: &str, reply_timeout_ms: u64) -> DestinationKey {
         DestinationKey {
             addr: Arc::from(addr),
-            reply_timeout: Some(Duration::from_millis(reply_timeout_ms)),
+            reply_timeout: Duration::from_millis(reply_timeout_ms),
         }
     }
 
@@ -299,8 +299,8 @@ mod tests {
             ])
             .await;
             let mut cfg = test_cfg();
-            cfg.connect_timeout = Some(Duration::from_millis(100));
-            cfg.reply_timeout = Some(Duration::from_millis(20));
+            cfg.connect_timeout = Duration::from_millis(100);
+            cfg.reply_timeout = Duration::from_millis(20);
             cfg.probe_delay_initial = Duration::from_millis(5);
             cfg.probe_delay_max = Duration::from_millis(100);
 
