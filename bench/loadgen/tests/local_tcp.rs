@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusty_mcrouter_loadgen::runner::{run_closed, RunConfig};
+use rusty_mcrouter_loadgen::runner::{run, RunConfig, RunMode};
 use rusty_mcrouter_loadgen::workload::{OpKind, WorkloadSpec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -27,6 +27,68 @@ buckets = [{ weight = 1, min = 3, max = 9 }]
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drives_pipelined_meta_requests_against_local_tcp_server() {
+    let (address, server) = spawn_server().await;
+    let workload = Arc::new(WorkloadSpec::parse(WORKLOAD).unwrap().validate().unwrap());
+    let stats = run(
+        RunConfig {
+            target: address.to_string(),
+            connections: 2,
+            depth: 8,
+            duration: Duration::from_millis(80),
+            mode: RunMode::Closed,
+        },
+        workload,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    assert!(stats.completed_in_window > 0);
+    assert_eq!(
+        stats.sent,
+        stats.completed_in_window + stats.completed_during_drain
+    );
+    assert_eq!(stats.errors(), 0);
+    assert_eq!(
+        stats.completed_in_window,
+        OpKind::ALL
+            .iter()
+            .map(|kind| stats.ops[*kind as usize].count)
+            .sum()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_loop_accounts_for_every_scheduled_request() {
+    let (address, server) = spawn_server().await;
+    let workload = Arc::new(WorkloadSpec::parse(WORKLOAD).unwrap().validate().unwrap());
+    let stats = run(
+        RunConfig {
+            target: address.to_string(),
+            connections: 2,
+            depth: 8,
+            duration: Duration::from_millis(100),
+            mode: RunMode::Open {
+                requests_per_second: 200,
+            },
+        },
+        workload,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    assert_eq!(stats.scheduled, 20);
+    assert_eq!(stats.sent, 20);
+    assert_eq!(stats.dropped, 0);
+    assert_eq!(
+        stats.sent,
+        stats.completed_in_window + stats.completed_during_drain
+    );
+    assert_eq!(stats.schedule_lag_us.len(), stats.sent);
+}
+
+async fn spawn_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -35,31 +97,7 @@ async fn drives_pipelined_meta_requests_against_local_tcp_server() {
             tokio::spawn(serve(stream));
         }
     });
-    let workload = Arc::new(WorkloadSpec::parse(WORKLOAD).unwrap().validate().unwrap());
-    let stats = run_closed(
-        RunConfig {
-            target: address.to_string(),
-            connections: 2,
-            depth: 8,
-            warmup: Duration::from_millis(20),
-            duration: Duration::from_millis(80),
-        },
-        workload,
-    )
-    .await
-    .unwrap();
-    server.abort();
-
-    assert!(stats.measured > 0);
-    assert_eq!(stats.sent, stats.completed);
-    assert_eq!(stats.errors(), 0);
-    assert_eq!(
-        stats.measured,
-        OpKind::ALL
-            .iter()
-            .map(|kind| stats.ops[*kind as usize].count)
-            .sum()
-    );
+    (address, server)
 }
 
 async fn serve(mut stream: TcpStream) {

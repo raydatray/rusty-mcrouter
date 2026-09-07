@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,6 +8,7 @@ use bytes::BytesMut;
 use hdrhistogram::Histogram;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Instant};
 
@@ -19,13 +21,19 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_BATCH_BYTES: usize = 256 * 1024;
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 
+#[derive(Clone, Copy, Debug)]
+pub enum RunMode {
+    Closed,
+    Open { requests_per_second: u64 },
+}
+
 #[derive(Clone, Debug)]
 pub struct RunConfig {
     pub target: String,
     pub connections: usize,
     pub depth: usize,
-    pub warmup: Duration,
     pub duration: Duration,
+    pub mode: RunMode,
 }
 
 #[derive(Clone)]
@@ -49,12 +57,29 @@ impl Default for OpStats {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RunStats {
     pub ops: [OpStats; 4],
+    pub schedule_lag_us: Histogram<u64>,
+    pub scheduled: u64,
     pub sent: u64,
-    pub completed: u64,
-    pub measured: u64,
+    pub completed_in_window: u64,
+    pub completed_during_drain: u64,
+    pub dropped: u64,
+}
+
+impl Default for RunStats {
+    fn default() -> Self {
+        Self {
+            ops: Default::default(),
+            schedule_lag_us: histogram(),
+            scheduled: 0,
+            sent: 0,
+            completed_in_window: 0,
+            completed_during_drain: 0,
+            dropped: 0,
+        }
+    }
 }
 
 impl RunStats {
@@ -66,9 +91,12 @@ impl RunStats {
             left.misses += right.misses;
             left.errors += right.errors;
         }
+        self.schedule_lag_us.add(&other.schedule_lag_us)?;
+        self.scheduled += other.scheduled;
         self.sent += other.sent;
-        self.completed += other.completed;
-        self.measured += other.measured;
+        self.completed_in_window += other.completed_in_window;
+        self.completed_during_drain += other.completed_during_drain;
+        self.dropped += other.dropped;
         Ok(())
     }
 
@@ -77,36 +105,22 @@ impl RunStats {
     }
 }
 
-pub async fn run_closed(config: RunConfig, workload: Arc<Workload>) -> Result<RunStats> {
-    let start = Instant::now();
-    let measure_start = start
-        .checked_add(config.warmup)
-        .context("warmup is too large for the platform clock")?;
-    let measure_end = measure_start
-        .checked_add(config.duration)
-        .context("duration is too large for the platform clock")?;
-    let mut tasks = JoinSet::new();
-    for connection in 0..config.connections {
-        let config = config.clone();
-        let workload = workload.clone();
-        tasks.spawn(async move {
-            drive_connection(
-                &config.target,
-                config.depth,
-                measure_start,
-                measure_end,
-                workload,
-                connection as u64,
-            )
-            .await
-            .with_context(|| format!("connection {connection}"))
-        });
-    }
+pub struct PreparedRun {
+    config: RunConfig,
+    streams: Vec<TcpStream>,
+}
 
-    let mut merged = RunStats::default();
+pub async fn prepare(config: RunConfig) -> Result<PreparedRun> {
+    validate_config(&config)?;
+    let mut tasks = JoinSet::new();
+    for index in 0..config.connections {
+        let target = config.target.clone();
+        tasks.spawn(async move { connect(&target).await.map(|stream| (index, stream)) });
+    }
+    let mut streams: Vec<Option<TcpStream>> = (0..config.connections).map(|_| None).collect();
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(Ok(stats)) => merged.merge(&stats)?,
+            Ok(Ok((index, stream))) => streams[index] = Some(stream),
             Ok(Err(error)) => {
                 tasks.abort_all();
                 return Err(error);
@@ -117,18 +131,111 @@ pub async fn run_closed(config: RunConfig, workload: Arc<Workload>) -> Result<Ru
             }
         }
     }
-    Ok(merged)
+    let streams = streams
+        .into_iter()
+        .enumerate()
+        .map(|(index, stream)| stream.with_context(|| format!("connection {index} was not opened")))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PreparedRun { config, streams })
+}
+
+impl PreparedRun {
+    pub async fn run(self, workload: Arc<Workload>, start: Instant) -> Result<RunStats> {
+        let measure_end = start
+            .checked_add(self.config.duration)
+            .context("duration is too large for the platform clock")?;
+        let pacing = match self.config.mode {
+            RunMode::Closed => None,
+            RunMode::Open {
+                requests_per_second,
+            } => Some(Pacing::start(
+                self.config.connections,
+                requests_per_second,
+                start,
+                measure_end,
+            )?),
+        };
+        let mut tasks = JoinSet::new();
+        for (connection, stream) in self.streams.into_iter().enumerate() {
+            let workload = workload.clone();
+            let mode = match &pacing {
+                None => ConnectionMode::Closed,
+                Some(pacing) => ConnectionMode::Open {
+                    slot: pacing.slots[connection].clone(),
+                    first: pacing.first(connection),
+                    interval: pacing.per_connection_interval,
+                    expected: scheduled_before(
+                        measure_end,
+                        pacing.first(connection),
+                        pacing.per_connection_interval,
+                    ),
+                },
+            };
+            let depth = self.config.depth;
+            tasks.spawn(async move {
+                drive_connection(
+                    stream,
+                    depth,
+                    start,
+                    measure_end,
+                    workload,
+                    connection as u64,
+                    mode,
+                )
+                .await
+                .with_context(|| format!("connection {connection}"))
+            });
+        }
+
+        let mut merged = RunStats::default();
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(stats)) => merged.merge(&stats)?,
+                Ok(Err(error)) => {
+                    tasks.abort_all();
+                    return Err(error);
+                }
+                Err(error) => {
+                    tasks.abort_all();
+                    return Err(anyhow!("connection task failed: {error}"));
+                }
+            }
+        }
+        drop(pacing);
+        Ok(merged)
+    }
+}
+
+pub async fn run(config: RunConfig, workload: Arc<Workload>) -> Result<RunStats> {
+    let prepared = prepare(config).await?;
+    prepared.run(workload, Instant::now()).await
+}
+
+#[derive(Debug)]
+struct PendingRequest {
+    kind: OpKind,
+    issued_at: Instant,
+}
+
+enum ConnectionMode {
+    Closed,
+    Open {
+        slot: Arc<PaceSlot>,
+        first: Instant,
+        interval: Duration,
+        expected: u64,
+    },
 }
 
 async fn drive_connection(
-    target: &str,
+    stream: TcpStream,
     depth: usize,
     measure_start: Instant,
     measure_end: Instant,
     workload: Arc<Workload>,
     stream_id: u64,
+    mode: ConnectionMode,
 ) -> Result<RunStats> {
-    let stream = connect(target).await?;
     let (mut reader, mut writer) = stream.into_split();
     let mut generator = workload.generator(stream_id);
     let mut pending = VecDeque::with_capacity(depth);
@@ -140,27 +247,64 @@ async fn drive_connection(
         .checked_add(DRAIN_TIMEOUT)
         .context("drain deadline is too large for the platform clock")?;
     let mut stats = RunStats::default();
+    let mut open_sequence = 0u64;
 
     loop {
-        if Instant::now() < measure_end {
-            while pending.len() < depth {
-                write_buffer.clear();
-                while pending.len() < depth
-                    && (write_buffer.is_empty() || write_buffer.len() < WRITE_BATCH_BYTES)
-                {
-                    let sent_at = Instant::now();
-                    let kind = generator.next_request(&mut write_buffer);
-                    pending.push_back((kind, sent_at));
-                    stats.sent += 1;
+        let now = Instant::now();
+        let issuing = now < measure_end;
+        if issuing {
+            match &mode {
+                ConnectionMode::Closed => {
+                    let room = depth.saturating_sub(pending.len());
+                    if room > 0 {
+                        issue_closed(
+                            room,
+                            &mut generator,
+                            &mut writer,
+                            &mut write_buffer,
+                            &mut pending,
+                            &mut stats,
+                        )
+                        .await?;
+                    }
                 }
-                io_timeout("write", writer.write_all(&write_buffer)).await?;
-                if Instant::now() >= measure_end {
-                    break;
+                ConnectionMode::Open {
+                    slot,
+                    first,
+                    interval,
+                    ..
+                } => {
+                    let room = depth.saturating_sub(pending.len());
+                    let due = slot.due.load(Ordering::Relaxed).min(room as u64) as usize;
+                    if due > 0 {
+                        issue_open(
+                            due,
+                            slot,
+                            *first,
+                            *interval,
+                            &mut open_sequence,
+                            &mut generator,
+                            &mut writer,
+                            &mut write_buffer,
+                            &mut pending,
+                            &mut stats,
+                        )
+                        .await?;
+                    }
                 }
             }
         }
-        if pending.is_empty() {
+
+        if !issuing && pending.is_empty() {
             break;
+        }
+        if issuing && pending.is_empty() {
+            if let ConnectionMode::Open { slot, .. } = &mode {
+                tokio::select! {
+                    _ = slot.notify.notified() => continue,
+                    _ = tokio::time::sleep_until(measure_end) => continue,
+                }
+            }
         }
 
         let now = Instant::now();
@@ -172,9 +316,20 @@ async fn drive_connection(
         } else {
             IO_TIMEOUT
         };
-        let bytes_read = timeout(read_limit, reader.read(&mut read_chunk))
-            .await
-            .map_err(|_| anyhow!("read timed out with {} requests in flight", pending.len()))??;
+        let read = reader.read(&mut read_chunk);
+        let bytes_read = match &mode {
+            ConnectionMode::Open { slot, .. } if now < measure_end => {
+                tokio::select! {
+                    biased;
+                    result = read => result?,
+                    _ = slot.notify.notified() => continue,
+                    _ = tokio::time::sleep_until(measure_end) => continue,
+                }
+            }
+            _ => timeout(read_limit, read).await.map_err(|_| {
+                anyhow!("read timed out with {} requests in flight", pending.len())
+            })??,
+        };
         if bytes_read == 0 {
             bail!(
                 "peer closed the connection with {} requests in flight",
@@ -187,18 +342,16 @@ async fn drive_connection(
         read_buffer.extend_from_slice(&read_chunk[..bytes_read]);
 
         while let Some(reply) = decoder.decode(&mut read_buffer)? {
-            let (kind, sent_at) = pending
+            let request = pending
                 .pop_front()
                 .context("received a reply without a matching request")?;
-            validate_reply(kind, reply)?;
-            let completed_at = Instant::now();
-            stats.completed += 1;
+            validate_reply(request.kind, reply)?;
             record_completion(
                 &mut stats,
-                kind,
+                request.kind,
                 reply,
-                sent_at,
-                completed_at,
+                request.issued_at,
+                Instant::now(),
                 measure_start,
                 measure_end,
             )?;
@@ -208,27 +361,102 @@ async fn drive_connection(
     if !read_buffer.is_empty() {
         bail!("connection ended with a partial or extra Meta reply");
     }
+    match mode {
+        ConnectionMode::Closed => {}
+        ConnectionMode::Open { expected, .. } => {
+            stats.scheduled = expected;
+            stats.dropped = expected.saturating_sub(stats.sent);
+        }
+    }
     Ok(stats)
+}
+
+async fn issue_closed(
+    room: usize,
+    generator: &mut crate::workload::Generator,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    write_buffer: &mut BytesMut,
+    pending: &mut VecDeque<PendingRequest>,
+    stats: &mut RunStats,
+) -> Result<()> {
+    write_buffer.clear();
+    let mut kinds = Vec::with_capacity(room);
+    while kinds.len() < room && (write_buffer.is_empty() || write_buffer.len() < WRITE_BATCH_BYTES)
+    {
+        kinds.push(generator.next_request(write_buffer));
+    }
+    let issued_at = Instant::now();
+    io_timeout("write", writer.write_all(write_buffer)).await?;
+    for kind in kinds {
+        pending.push_back(PendingRequest { kind, issued_at });
+        stats.scheduled += 1;
+        stats.sent += 1;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn issue_open(
+    due: usize,
+    slot: &PaceSlot,
+    first: Instant,
+    interval: Duration,
+    sequence: &mut u64,
+    generator: &mut crate::workload::Generator,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    write_buffer: &mut BytesMut,
+    pending: &mut VecDeque<PendingRequest>,
+    stats: &mut RunStats,
+) -> Result<()> {
+    write_buffer.clear();
+    let mut requests = Vec::with_capacity(due);
+    while requests.len() < due
+        && (write_buffer.is_empty() || write_buffer.len() < WRITE_BATCH_BYTES)
+    {
+        let scheduled_at = instant_for_sequence(first, interval, *sequence);
+        *sequence += 1;
+        requests.push((generator.next_request(write_buffer), scheduled_at));
+    }
+    slot.due.fetch_sub(requests.len() as u64, Ordering::Relaxed);
+    let issued_at = Instant::now();
+    io_timeout("write", writer.write_all(write_buffer)).await?;
+    for (kind, scheduled_at) in requests {
+        let lag = issued_at
+            .saturating_duration_since(scheduled_at)
+            .as_micros();
+        stats
+            .schedule_lag_us
+            .record(u64::try_from(lag).unwrap_or(u64::MAX).max(1))?;
+        pending.push_back(PendingRequest { kind, issued_at });
+        stats.sent += 1;
+    }
+    Ok(())
 }
 
 fn record_completion(
     stats: &mut RunStats,
     kind: OpKind,
     reply: ReplyCode,
-    sent_at: Instant,
+    issued_at: Instant,
     completed_at: Instant,
     measure_start: Instant,
     measure_end: Instant,
 ) -> Result<()> {
-    if completed_at < measure_start || completed_at >= measure_end {
+    if completed_at < measure_start {
+        return Ok(());
+    }
+    if completed_at >= measure_end {
+        stats.completed_during_drain += 1;
         return Ok(());
     }
     let op = &mut stats.ops[kind as usize];
     op.count += 1;
-    stats.measured += 1;
-    let micros = completed_at.saturating_duration_since(sent_at).as_micros();
-    let micros = u64::try_from(micros).unwrap_or(u64::MAX).max(1);
-    op.latency_us.record(micros)?;
+    stats.completed_in_window += 1;
+    let micros = completed_at
+        .saturating_duration_since(issued_at)
+        .as_micros();
+    op.latency_us
+        .record(u64::try_from(micros).unwrap_or(u64::MAX).max(1))?;
     match reply {
         ReplyCode::Value | ReplyCode::Hit => op.hits += 1,
         ReplyCode::End | ReplyCode::NotFound | ReplyCode::NotStored | ReplyCode::Exists => {
@@ -242,15 +470,7 @@ fn record_completion(
 fn validate_reply(kind: OpKind, reply: ReplyCode) -> Result<()> {
     let valid = match kind {
         OpKind::Mg => matches!(reply, ReplyCode::Value | ReplyCode::End | ReplyCode::Error),
-        OpKind::Ms => matches!(
-            reply,
-            ReplyCode::Hit
-                | ReplyCode::NotFound
-                | ReplyCode::NotStored
-                | ReplyCode::Exists
-                | ReplyCode::Error
-        ),
-        OpKind::Md | OpKind::Ma => matches!(
+        OpKind::Ms | OpKind::Md | OpKind::Ma => matches!(
             reply,
             ReplyCode::Hit
                 | ReplyCode::NotFound
@@ -264,6 +484,149 @@ fn validate_reply(kind: OpKind, reply: ReplyCode) -> Result<()> {
     } else {
         bail!("unexpected {reply:?} reply for {} request", kind.name())
     }
+}
+
+#[derive(Debug, Default)]
+struct PaceSlot {
+    due: AtomicU64,
+    notify: Notify,
+}
+
+struct Pacing {
+    slots: Vec<Arc<PaceSlot>>,
+    first_request: Instant,
+    global_interval: Duration,
+    per_connection_interval: Duration,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Pacing {
+    fn start(
+        connections: usize,
+        requests_per_second: u64,
+        start: Instant,
+        end: Instant,
+    ) -> Result<Self> {
+        let global_interval = Duration::from_secs_f64(1.0 / requests_per_second as f64);
+        if global_interval.is_zero() {
+            bail!("open-loop request rate exceeds clock resolution");
+        }
+        let per_connection_interval =
+            Duration::from_secs_f64(connections as f64 / requests_per_second as f64);
+        let slots: Vec<_> = (0..connections)
+            .map(|_| Arc::new(PaceSlot::default()))
+            .collect();
+        let thread_slots = slots.clone();
+        let thread_start = start.into_std();
+        let thread_end = end.into_std();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let tick = Duration::from_micros(100)
+            .min(per_connection_interval / 2)
+            .max(Duration::from_micros(1));
+        let thread = std::thread::Builder::new()
+            .name("loadgen-pacer".to_string())
+            .spawn(move || {
+                let mut granted = vec![0u64; thread_slots.len()];
+                while !thread_stop.load(Ordering::Relaxed) {
+                    let now = std::time::Instant::now();
+                    if now >= thread_end {
+                        break;
+                    }
+                    for (index, slot) in thread_slots.iter().enumerate() {
+                        let first = thread_start + global_interval.mul_f64(index as f64);
+                        let should = scheduled_before_std(now, first, per_connection_interval);
+                        if should > granted[index] {
+                            slot.due
+                                .fetch_add(should - granted[index], Ordering::Relaxed);
+                            granted[index] = should;
+                            slot.notify.notify_one();
+                        }
+                    }
+                    std::thread::sleep(tick);
+                }
+                for (index, slot) in thread_slots.iter().enumerate() {
+                    let first = thread_start + global_interval.mul_f64(index as f64);
+                    let should = scheduled_before_std(thread_end, first, per_connection_interval);
+                    if should > granted[index] {
+                        slot.due
+                            .fetch_add(should - granted[index], Ordering::Relaxed);
+                    }
+                    slot.notify.notify_one();
+                }
+            })
+            .context("spawn open-loop pacer")?;
+        Ok(Self {
+            slots,
+            first_request: start,
+            global_interval,
+            per_connection_interval,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn first(&self, connection: usize) -> Instant {
+        self.first_request + self.global_interval.mul_f64(connection as f64)
+    }
+}
+
+impl Drop for Pacing {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn scheduled_before(end: Instant, first: Instant, interval: Duration) -> u64 {
+    scheduled_count(end.saturating_duration_since(first), end > first, interval)
+}
+
+fn scheduled_before_std(
+    end: std::time::Instant,
+    first: std::time::Instant,
+    interval: Duration,
+) -> u64 {
+    scheduled_count(end.saturating_duration_since(first), end > first, interval)
+}
+
+fn scheduled_count(elapsed: Duration, started: bool, interval: Duration) -> u64 {
+    if !started {
+        return 0;
+    }
+    let count = (elapsed.as_nanos() - 1) / interval.as_nanos() + 1;
+    u64::try_from(count).unwrap_or(u64::MAX)
+}
+
+fn instant_for_sequence(first: Instant, interval: Duration, sequence: u64) -> Instant {
+    first + interval.mul_f64(sequence as f64)
+}
+
+fn validate_config(config: &RunConfig) -> Result<()> {
+    if config.target.trim().is_empty() {
+        bail!("target must not be empty");
+    }
+    if config.connections == 0 {
+        bail!("connections must be greater than zero");
+    }
+    if config.depth == 0 {
+        bail!("depth must be greater than zero");
+    }
+    if config.duration.is_zero() {
+        bail!("duration must be greater than zero");
+    }
+    if let RunMode::Open {
+        requests_per_second,
+    } = config.mode
+    {
+        if requests_per_second == 0 {
+            bail!("open-loop requests per second must be greater than zero");
+        }
+    }
+    Ok(())
 }
 
 async fn connect(target: &str) -> Result<TcpStream> {
@@ -438,7 +801,27 @@ mod tests {
             end,
         )
         .unwrap();
-        assert_eq!(stats.measured, 1);
+        assert_eq!(stats.completed_in_window, 1);
+        assert_eq!(stats.completed_during_drain, 1);
         assert_eq!(stats.ops[OpKind::Mg as usize].misses, 1);
+    }
+
+    #[test]
+    fn computes_exact_per_connection_schedule() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(10);
+        assert_eq!(scheduled_before(start, start, interval), 0);
+        assert_eq!(
+            scheduled_before(start + Duration::from_millis(1), start, interval),
+            1
+        );
+        assert_eq!(
+            scheduled_before(start + Duration::from_millis(10), start, interval),
+            1
+        );
+        assert_eq!(
+            scheduled_before(start + Duration::from_millis(11), start, interval),
+            2
+        );
     }
 }

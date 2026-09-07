@@ -1,17 +1,18 @@
 use std::collections::BTreeMap;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use hdrhistogram::Histogram;
-use rusty_mcrouter_loadgen::runner::{self, RunConfig, RunStats};
+use rusty_mcrouter_loadgen::runner::{self, RunConfig, RunMode, RunStats};
 use rusty_mcrouter_loadgen::workload::{OpKind, WorkloadSpec};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
-#[command(about = "Closed-loop Meta protocol load generator")]
+#[command(about = "Meta protocol load generator for rusty-mcrouter benchmarks")]
 struct Args {
     #[arg(long)]
     target: String,
@@ -23,6 +24,10 @@ struct Args {
     depth: usize,
     #[arg(long, default_value_t = 2)]
     threads: usize,
+    #[arg(long, value_enum, default_value_t = ModeArg::Closed)]
+    mode: ModeArg,
+    #[arg(long, default_value_t = 100_000)]
+    requests_per_second: u64,
     #[arg(long, alias = "duration-s", default_value_t = 10.0)]
     duration: f64,
     #[arg(long, alias = "warmup-s", default_value_t = 2.0)]
@@ -33,6 +38,8 @@ struct Args {
     no_prewarm: bool,
     #[arg(long)]
     out: Option<PathBuf>,
+    #[arg(long)]
+    controlled: bool,
 }
 
 impl Args {
@@ -55,6 +62,12 @@ impl Args {
         if !self.warmup.is_finite() || self.warmup < 0.0 {
             bail!("--warmup must be finite and non-negative");
         }
+        if self.mode == ModeArg::Open && self.requests_per_second == 0 {
+            bail!("--requests-per-second must be greater than zero in open mode");
+        }
+        if self.controlled && self.out.is_none() {
+            bail!("--controlled requires --out so stdout remains an event stream");
+        }
         let duration = Duration::try_from_secs_f64(self.duration)
             .context("--duration is outside the supported range")?;
         let warmup = Duration::try_from_secs_f64(self.warmup)
@@ -63,11 +76,20 @@ impl Args {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+enum ModeArg {
+    Closed,
+    Open,
+}
+
 #[derive(Serialize)]
 struct Report {
     schema_version: u32,
     target: String,
     workload: String,
+    mode: ModeArg,
+    target_requests_per_second: Option<u64>,
     connections: usize,
     depth: usize,
     threads: usize,
@@ -77,14 +99,17 @@ struct Report {
     achieved_requests_per_second: f64,
     counts: Counts,
     latency_us: Percentiles,
+    schedule_lag_us: Option<Percentiles>,
     ops: BTreeMap<&'static str, OpReport>,
 }
 
 #[derive(Serialize)]
 struct Counts {
+    scheduled: u64,
     sent: u64,
-    completed: u64,
-    measured: u64,
+    completed_in_window: u64,
+    completed_during_drain: u64,
+    dropped: u64,
     prewarmed: u64,
     hits: u64,
     misses: u64,
@@ -142,23 +167,70 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("build Tokio runtime")?;
+    let mode = match args.mode {
+        ModeArg::Closed => RunMode::Closed,
+        ModeArg::Open => RunMode::Open {
+            requests_per_second: args.requests_per_second,
+        },
+    };
     let target = args.target.clone();
-    let workload_for_run = workload.clone();
-    let config = RunConfig {
-        target: target.clone(),
+    let prewarmed = runtime.block_on(async {
+        if args.no_prewarm {
+            Ok(0)
+        } else {
+            runner::prewarm(&target, workload.clone(), args.connections).await
+        }
+    })?;
+    if !warmup.is_zero() {
+        let warmup_stats = runtime.block_on(runner::run(
+            RunConfig {
+                target: target.clone(),
+                connections: args.connections,
+                depth: args.depth,
+                duration: warmup,
+                mode,
+            },
+            workload.clone(),
+        ))?;
+        if warmup_stats.errors() > 0 {
+            bail!(
+                "warmup received {} server error replies",
+                warmup_stats.errors()
+            );
+        }
+    }
+    let prepared = runtime.block_on(runner::prepare(RunConfig {
+        target,
         connections: args.connections,
         depth: args.depth,
-        warmup,
         duration,
-    };
-    let (prewarmed, stats) = runtime.block_on(async move {
-        let prewarmed = if args.no_prewarm {
-            0
-        } else {
-            runner::prewarm(&target, workload_for_run.clone(), args.connections).await?
-        };
-        let stats = runner::run_closed(config, workload_for_run).await?;
-        Ok::<_, anyhow::Error>((prewarmed, stats))
+        mode,
+    }))?;
+    if args.controlled {
+        emit_event("ready")?;
+        wait_for_go()?;
+    }
+    let start = tokio::time::Instant::now();
+    if args.controlled {
+        emit_event("measure_start")?;
+    }
+    let controlled = args.controlled;
+    let stats = runtime.block_on(async move {
+        let end_event = controlled.then(|| {
+            tokio::spawn(async move {
+                tokio::time::sleep_until(start + duration).await;
+                emit_event("measure_end")
+            })
+        });
+        let result = prepared.run(workload, start).await;
+        if let Some(task) = end_event {
+            if result.is_ok() {
+                task.await.context("measurement event task failed")??;
+            } else {
+                task.abort();
+            }
+        }
+        result
     })?;
     let report = make_report(&args, seed, prewarmed, &stats)?;
     let json = serde_json::to_string_pretty(&report).context("serialize report")? + "\n";
@@ -169,11 +241,34 @@ fn main() -> Result<()> {
     }
     eprintln!(
         "completed {} measured requests at {:.0} req/s (p99 {} us, {} errors)",
-        report.counts.measured,
+        report.counts.completed_in_window,
         report.achieved_requests_per_second,
         report.latency_us.p99,
         report.counts.errors
     );
+    if report.counts.errors > 0 {
+        bail!("received {} server error replies", report.counts.errors);
+    }
+    if report.counts.dropped > 0 {
+        bail!("dropped {} scheduled requests", report.counts.dropped);
+    }
+    Ok(())
+}
+
+fn emit_event(event: &str) -> Result<()> {
+    println!("{{\"event\":\"{event}\"}}");
+    std::io::stdout().flush().context("flush event stream")
+}
+
+fn wait_for_go() -> Result<()> {
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("read controller command")?;
+    if line.trim() != "GO" {
+        bail!("expected GO from controller");
+    }
     Ok(())
 }
 
@@ -204,23 +299,30 @@ fn make_report(args: &Args, seed: u64, prewarmed: u64, stats: &RunStats) -> Resu
         schema_version: 1,
         target: args.target.clone(),
         workload: args.workload.display().to_string(),
+        mode: args.mode,
+        target_requests_per_second: (args.mode == ModeArg::Open)
+            .then_some(args.requests_per_second),
         connections: args.connections,
         depth: args.depth,
         threads: args.threads,
         seed,
         duration_seconds: args.duration,
         warmup_seconds: args.warmup,
-        achieved_requests_per_second: stats.measured as f64 / args.duration,
+        achieved_requests_per_second: stats.completed_in_window as f64 / args.duration,
         counts: Counts {
+            scheduled: stats.scheduled,
             sent: stats.sent,
-            completed: stats.completed,
-            measured: stats.measured,
+            completed_in_window: stats.completed_in_window,
+            completed_during_drain: stats.completed_during_drain,
+            dropped: stats.dropped,
             prewarmed,
             hits,
             misses,
             errors,
         },
         latency_us: Percentiles::from(&total_latency),
+        schedule_lag_us: (args.mode == ModeArg::Open)
+            .then(|| Percentiles::from(&stats.schedule_lag_us)),
         ops,
     })
 }
