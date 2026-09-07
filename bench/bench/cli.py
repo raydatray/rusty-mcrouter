@@ -55,6 +55,18 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--build", action="store_true")
     run.add_argument("--fresh", action="store_true")
 
+    compare = commands.add_parser("compare", help="run a paired base/head comparison")
+    compare.add_argument("scenarios", type=Path)
+    compare.add_argument("base", type=Path)
+    compare.add_argument("head", type=Path)
+    compare.add_argument("--loadgen", type=Path, default=default_loadgen)
+    compare.add_argument("--output", type=Path, default=BENCH_DIR / "results/comparison.jsonl")
+    compare.add_argument("--summary", type=Path)
+    compare.add_argument("--only", nargs="*")
+    compare.add_argument("--repeat", type=int)
+    compare.add_argument("--base-revision")
+    compare.add_argument("--head-revision")
+
     render = commands.add_parser("report", help="render an existing JSONL result")
     render.add_argument("results", type=Path)
 
@@ -75,6 +87,29 @@ def main(argv: list[str] | None = None) -> int:
         import json
 
         print(json.dumps(resource_info, indent=2, sort_keys=True))
+        return 0
+    if args.command == "compare":
+        missing = [path for path in (args.base, args.head, args.loadgen) if not path.exists()]
+        if missing:
+            parser.error("missing comparison binaries: " + ", ".join(map(str, missing)))
+        selected = scenarios.load(args.scenarios, set(args.only) if args.only else None)
+        records = runner.run_comparison(
+            selected,
+            args.base,
+            args.head,
+            args.loadgen,
+            args.output,
+            args.repeat,
+            command_prefixes=profile.prefixes() if profile else None,
+            resource_info=resource_info,
+            base_revision=args.base_revision,
+            head_revision=args.head_revision,
+        )
+        markdown, _ = report.comparison(records)
+        print(markdown)
+        if args.summary:
+            with args.summary.open("a") as destination:
+                destination.write("## Benchmark A/B\n\n" + markdown + "\n")
         return 0
 
     if args.build or not (args.router.exists() and args.loadgen.exists()):
