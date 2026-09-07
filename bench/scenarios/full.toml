@@ -1,0 +1,68 @@
+[defaults]
+duration_seconds = 5
+warmup_seconds = 1
+repeat = 3
+loadgen = { threads = 2, connections = 32, depth = 16 }
+memcached = { count = 1, threads = 2, memory_mb = 512 }
+router = { num_proxies = 4, listening_sockets = 1 }
+expect = { min_completed = 1000, max_protocol_errors = 0, max_dropped = 0 }
+
+[[scenario]]
+name = "null-ceiling"
+route = "null"
+workload = "get-miss"
+mode = "closed"
+memcached = { count = 0 }
+
+[[scenario]]
+name = "pool1-depth1"
+route = "pool1"
+workload = "get-miss"
+mode = "closed"
+loadgen = { threads = 2, connections = 64, depth = 1 }
+
+[[scenario]]
+name = "pool1-etc"
+route = "pool1"
+workload = "etc-like"
+mode = "closed"
+
+[[scenario]]
+name = "pool1-open250k"
+route = "pool1"
+workload = "etc-like"
+mode = { open = { requests_per_second = 250000 } }
+expect = { min_completed = 1125000, max_dropped = 10000, max_schedule_lag_p99_us = 5000 }
+
+[[scenario]]
+name = "pool1-open500k"
+route = "pool1"
+workload = "etc-like"
+mode = { open = { requests_per_second = 500000 } }
+expect = { min_completed = 2250000, max_dropped = 20000, max_schedule_lag_p99_us = 5000 }
+
+[[scenario]]
+name = "pool1-large-values"
+route = "pool1"
+workload = "large-values"
+mode = "closed"
+
+[[scenario]]
+name = "pool4-write-heavy"
+route = "poolN"
+workload = "write-heavy"
+mode = "closed"
+memcached = { count = 4, threads = 1, memory_mb = 256 }
+
+[[scenario]]
+name = "prefix-3pools"
+route = "prefix"
+workload = "etc-prefixed"
+mode = "closed"
+memcached = { count = 3, threads = 1, memory_mb = 256 }
+
+[[scenario]]
+name = "pool1-tiny-uniform"
+route = "pool1"
+workload = "tiny-uniform"
+mode = "closed"

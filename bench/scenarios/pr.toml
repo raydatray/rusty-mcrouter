@@ -1,0 +1,34 @@
+[defaults]
+duration_seconds = 3
+warmup_seconds = 1
+repeat = 3
+loadgen = { threads = 2, connections = 32, depth = 16 }
+memcached = { count = 1, threads = 1, memory_mb = 256 }
+router = { num_proxies = 2, listening_sockets = 1 }
+expect = { min_completed = 1000, max_protocol_errors = 0, max_dropped = 0 }
+
+[[scenario]]
+name = "direct-control"
+route = "none"
+workload = "get-miss"
+mode = "closed"
+
+[[scenario]]
+name = "null-ceiling"
+route = "null"
+workload = "get-miss"
+mode = "closed"
+memcached = { count = 0 }
+
+[[scenario]]
+name = "pool1-miss"
+route = "pool1"
+workload = "get-miss"
+mode = "closed"
+
+[[scenario]]
+name = "pool1-open500k"
+route = "pool1"
+workload = "etc-like"
+mode = { open = { requests_per_second = 500000 } }
+expect = { min_completed = 1350000, max_dropped = 10000, max_schedule_lag_p99_us = 5000 }

@@ -41,6 +41,15 @@ class Expectations:
     max_protocol_errors: int = 0
     max_dropped: int = 0
     max_schedule_lag_p99_us: int | None = None
+    min_failovers: int = 0
+    max_tko_final: int | None = None
+
+
+@dataclass(frozen=True)
+class Fault:
+    at_seconds: float
+    action: str
+    target: int
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,7 @@ class Scenario:
     memcached: MemcachedConfig
     router: RouterConfig
     expect: Expectations
+    faults: tuple[Fault, ...]
 
     def workload_path(self) -> Path:
         return BENCH_DIR / "workloads" / f"{self.workload}.toml"
@@ -108,6 +118,7 @@ def load(path: Path, only: set[str] | None = None) -> list[Scenario]:
             ),
             router=RouterConfig(**router),
             expect=Expectations(**_merged(defaults.get("expect", {}), raw.get("expect"))),
+            faults=tuple(Fault(**fault) for fault in raw.get("faults", [])),
         )
         _validate(scenario)
         loaded.append(scenario)
@@ -133,6 +144,13 @@ def _validate(scenario: Scenario) -> None:
         raise ValueError(f"{scenario.name}: null route must not start memcached")
     if scenario.router.listening_sockets > scenario.router.num_proxies:
         raise ValueError(f"{scenario.name}: listening sockets exceed proxy threads")
+    for fault in scenario.faults:
+        if fault.action not in {"sigstop", "sigcont"}:
+            raise ValueError(f"{scenario.name}: unsupported fault action {fault.action!r}")
+        if fault.at_seconds < 0 or fault.at_seconds >= scenario.duration_seconds:
+            raise ValueError(f"{scenario.name}: fault time is outside the measurement window")
+        if fault.target < 0 or fault.target >= scenario.memcached.count:
+            raise ValueError(f"{scenario.name}: fault target is outside the backend list")
 
 
 def render_route(name: str, servers: list[str]) -> dict[str, Any]:

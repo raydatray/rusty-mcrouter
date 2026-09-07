@@ -1,0 +1,18 @@
+[defaults]
+duration_seconds = 5
+warmup_seconds = 1
+repeat = 1
+loadgen = { threads = 2, connections = 16, depth = 16 }
+memcached = { count = 2, threads = 1, memory_mb = 256 }
+router = { num_proxies = 2, listening_sockets = 1, extra_args = ["--probe-timeout-initial", "200", "--probe-timeout-max", "500"] }
+expect = { min_completed = 50000, max_protocol_errors = 0, max_dropped = 100, min_failovers = 1, max_tko_final = 0 }
+
+[[scenario]]
+name = "failover-stop-and-recover"
+route = "failover"
+workload = "get-miss"
+mode = { open = { requests_per_second = 20000 } }
+faults = [
+  { at_seconds = 1.0, action = "sigstop", target = 0 },
+  { at_seconds = 3.0, action = "sigcont", target = 0 },
+]

@@ -107,6 +107,10 @@ class ManagedProcess:
     def stop(self) -> None:
         if self.process.poll() is not None:
             return
+        try:
+            os.killpg(self.process.pid, signal.SIGCONT)
+        except ProcessLookupError:
+            return
         for sig, wait in ((signal.SIGINT, 3), (signal.SIGTERM, 2), (signal.SIGKILL, 1)):
             try:
                 os.killpg(self.process.pid, sig)
@@ -209,6 +213,12 @@ class Memcached:
             if len(parts) == 3 and parts[0] == "STAT" and parts[1] in selected:
                 result[parts[1]] = parts[2]
         return result
+
+    def send_signal(self, action: str) -> None:
+        if not self.child or self.child.process.poll() is not None:
+            raise ProcessError("cannot signal a stopped memcached process")
+        selected = {"sigstop": signal.SIGSTOP, "sigcont": signal.SIGCONT}[action]
+        os.killpg(self.child.process.pid, selected)
 
     def __exit__(self, *_args) -> None:
         if self.child:
