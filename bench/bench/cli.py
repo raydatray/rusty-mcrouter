@@ -39,6 +39,34 @@ def _build() -> None:
     )
 
 
+def _test() -> None:
+    subprocess.check_call(
+        ["cargo", "fmt", "--manifest-path", str(BENCH_DIR / "Cargo.toml"), "--all", "--", "--check"],
+        cwd=REPO,
+    )
+    subprocess.check_call(
+        ["cargo", "test", "--manifest-path", str(BENCH_DIR / "Cargo.toml"), "--workspace", "--locked"],
+        cwd=REPO,
+    )
+    subprocess.check_call(
+        [
+            "cargo",
+            "clippy",
+            "--manifest-path",
+            str(BENCH_DIR / "Cargo.toml"),
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        cwd=REPO,
+    )
+    subprocess.check_call([sys.executable, "-m", "pytest", str(BENCH_DIR / "tests")], cwd=REPO)
+    subprocess.check_call(["shellcheck", str(BENCH_DIR / "run.sh")], cwd=REPO)
+
+
 def main(argv: list[str] | None = None) -> int:
     default_router, default_loadgen = _targets()
     parser = argparse.ArgumentParser(prog="rmc-bench")
@@ -71,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     render.add_argument("results", type=Path)
 
     doctor = commands.add_parser("doctor", help="validate the selected Linux resource profile")
+    tests = commands.add_parser("test", help="run benchmark harness checks")
 
     args = parser.parse_args(argv)
     if args.command == "report":
@@ -87,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
         import json
 
         print(json.dumps(resource_info, indent=2, sort_keys=True))
+        return 0
+    if args.command == "test":
+        _test()
         return 0
     if args.command == "compare":
         missing = [path for path in (args.base, args.head, args.loadgen) if not path.exists()]
@@ -110,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.summary:
             with args.summary.open("a") as destination:
                 destination.write("## Benchmark A/B\n\n" + markdown + "\n")
-        return 0
+        return 1 if any(not record["validity"]["valid"] for record in records) else 0
 
     if args.build or not (args.router.exists() and args.loadgen.exists()):
         _build()
