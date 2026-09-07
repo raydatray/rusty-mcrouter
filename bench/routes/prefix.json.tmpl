@@ -1,0 +1,36 @@
+{
+  "pools": {
+    "default": {
+      "servers": ["$SERVER_0"],
+      "server_timeout": 200
+    },
+    "east": {
+      "servers": ["$SERVER_1"],
+      "server_timeout": 200
+    },
+    "west": {
+      "servers": ["$SERVER_2"],
+      "server_timeout": 200
+    }
+  },
+  "routes": [
+    {
+      "aliases": ["/././"],
+      "route": {
+        "type": "PrefixSelectorRoute",
+        "policies": {
+          "c": "PoolRoute|west"
+        },
+        "wildcard": "PoolRoute|default"
+      }
+    },
+    {
+      "aliases": ["/east/a/"],
+      "route": "PoolRoute|east"
+    },
+    {
+      "aliases": ["/west/b/"],
+      "route": "PoolRoute|west"
+    }
+  ]
+}
