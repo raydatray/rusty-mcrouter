@@ -1,0 +1,21 @@
+[package]
+name = "rusty-mcrouter-loadgen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Closed-loop Meta protocol load generator for rusty-mcrouter"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "=1.0.79"
+bytes = "=1.5.0"
+clap = { version = "=4.4.18", features = ["derive"] }
+hdrhistogram = { version = "=7.5.4", default-features = false }
+serde = { version = "=1.0.196", features = ["derive"] }
+serde_json = "=1.0.113"
+thiserror = "=1.0.56"
+tokio = { version = "=1.35.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+toml = "=0.8.8"
