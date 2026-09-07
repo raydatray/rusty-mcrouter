@@ -1,5 +1,5 @@
-FROM ghcr.io/astral-sh/uv:0.9.30 AS uv
-FROM rust:1.91.1-bookworm
+FROM ghcr.io/astral-sh/uv:0.9.30@sha256:538e0b39736e7feae937a65983e49d2ab75e1559d35041f9878b7b7e51de91e4 AS uv
+FROM rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33
 
 RUN apt-get update -q \
     && apt-get install -y -q --no-install-recommends \
@@ -8,8 +8,11 @@ RUN apt-get update -q \
         procps \
         python3 \
         python3-venv \
+        shellcheck \
         util-linux \
     && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add clippy rustfmt
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 

@@ -4,8 +4,14 @@ warmup_seconds = 1
 repeat = 7
 loadgen = { threads = 2, connections = 32, depth = 16 }
 memcached = { count = 1, threads = 2, memory_mb = 512 }
-router = { num_proxies = 4, listening_sockets = 1 }
+router = { num_proxies = 2, listening_sockets = 1 }
 expect = { min_completed = 1000, max_protocol_errors = 0, max_dropped = 0 }
+
+[[scenario]]
+name = "direct-control"
+route = "none"
+workload = "get-miss"
+mode = "closed"
 
 [[scenario]]
 name = "null-ceiling"

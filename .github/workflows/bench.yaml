@@ -1,0 +1,119 @@
+name: Bench
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Optional comparison base revision
+        required: false
+      suite:
+        description: Scenario suite
+        type: choice
+        options:
+          - pr
+          - full
+        default: full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-linux-x86_64
+          add-job-id-key: false
+          cache-on-failure: true
+          workspaces: |
+            . -> bench/.cache/target-x86_64
+            bench -> .cache/target-x86_64
+          cache-directories: |
+            bench/.cache/cargo-x86_64
+      - name: Check benchmark harness
+        run: ./bench/run.sh test
+      - name: Run Linux smoke matrix
+        run: ./bench/run.sh run bench/scenarios/smoke.toml --fresh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-smoke-${{ github.run_id }}
+          path: bench/results/
+
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-linux-x86_64
+          add-job-id-key: false
+          cache-on-failure: true
+          workspaces: |
+            . -> bench/.cache/target-x86_64
+            bench -> .cache/target-x86_64
+          cache-directories: |
+            bench/.cache/cargo-x86_64
+      - name: Select comparison
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          INPUT_BASE: ${{ inputs.base_sha }}
+          INPUT_SUITE: ${{ inputs.suite }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE"
+            suite="pr"
+          else
+            base="${INPUT_BASE:-$(git rev-parse HEAD^)}"
+            suite="${INPUT_SUITE:-full}"
+          fi
+          printf 'BASE_SHA=%s\nSUITE=%s\n' "$base" "$suite" >> "$GITHUB_ENV"
+      - name: Build head and load generator
+        run: |
+          mkdir -p bench/.cache/bin
+          ./bench/run.sh exec cargo build --release --locked -p rusty-mcrouter
+          ./bench/run.sh exec cargo build --release --locked --manifest-path /work/bench/Cargo.toml -p rusty-mcrouter-loadgen
+          cp bench/.cache/target-x86_64/release/rusty-mcrouter bench/.cache/bin/router-head
+      - name: Build base
+        run: |
+          mkdir -p bench/.cache/base
+          git archive "$BASE_SHA" | tar -x -C bench/.cache/base
+          ./bench/run.sh exec cargo build --release --locked \
+            --manifest-path /work/bench/.cache/base/Cargo.toml \
+            --target-dir /work/bench/.cache/target-x86_64 \
+            -p rusty-mcrouter
+          cp bench/.cache/target-x86_64/release/rusty-mcrouter bench/.cache/bin/router-base
+      - name: Run paired Linux comparison
+        run: |
+          ./bench/run.sh compare "bench/scenarios/${SUITE}.toml" \
+            /work/bench/.cache/bin/router-base \
+            /work/bench/.cache/bin/router-head \
+            --base-revision "$BASE_SHA" \
+            --head-revision "$GITHUB_SHA" \
+            --output /work/bench/results/comparison.jsonl \
+            --summary /work/bench/results/summary.md
+          cat bench/results/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify failover and TKO recovery
+        run: |
+          ./bench/run.sh run bench/scenarios/faults.toml \
+            --output /work/bench/results/faults.jsonl \
+            --fresh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-comparison-${{ github.run_id }}
+          path: bench/results/
