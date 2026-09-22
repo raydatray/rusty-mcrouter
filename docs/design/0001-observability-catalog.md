@@ -147,7 +147,7 @@ upstream anchors: `mcrouter/routes/FailoverRoute.h:193-286,337-361`,
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| config_age, config_last_attempt, config_last_success, config_failures, configs_from_disk, config_full_attempt | defer | port with hot reload (design 000N); prometheus-shape: `rusty_mcrouter_config_last_success_timestamp_seconds` etc |
+| config_age, config_last_attempt, config_last_success, config_failures, configs_from_disk, config_full_attempt | defer | port with hot reload; mapping planned in design 0002 §observability |
 | config_age_sr, config_last_sr_update | n/a | servicerouter |
 
 ## asynclog / distribution / axon / acl / misc
