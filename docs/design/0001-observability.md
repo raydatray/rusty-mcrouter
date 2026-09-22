@@ -34,9 +34,9 @@ scrape endpoint, per our OSS-alternatives philosophy.
 | process + exposition metadata | deferred |
 | remaining event domains | partial |
 
-the remaining event domains include config lifecycle events. config is
-currently loaded once at startup; hot reload and its attempt/success/failure
-events are not implemented by the route-graph slice.
+config is currently loaded once at startup. hot reload is planned in
+design 0002. its lifecycle is control-plane work, so per §scope below it logs
+directly and exports metrics, rather than emitting bus events.
 
 ## route-graph slice contract
 
