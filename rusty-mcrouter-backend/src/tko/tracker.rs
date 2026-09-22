@@ -62,6 +62,11 @@ impl TkoTracker {
         }
     }
 
+    /// Known limitation, shared with mcrouter (TkoTracker.cpp:69-70, :88-89):
+    /// marks and unmarks go through whichever gate is attached at that moment,
+    /// so a server that is TKO'd while a reload moves it to another gated pool
+    /// is unmarked against the new gate, and the old gate keeps the mark.
+    /// See docs/design/0002-config-reload.md §known limitations.
     pub(crate) fn set_pool_tracker(&self, pool: Arc<PoolTkoTracker>) {
         *self.pool.lock().unwrap() = Some(pool)
     }
@@ -311,7 +316,6 @@ mod tests {
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
     use super::*;
-    use crate::test_support::pool_id;
     use crate::tko::{FailOpenThresholds, TkoTrackerMap};
 
     /// Tracker via the map (the only production construction path); the map
@@ -400,11 +404,7 @@ mod tests {
     #[test]
     fn soft_to_hard_conversion_moves_globals_but_not_pool_count() {
         let map = TkoTrackerMap::new(noop_sink());
-        let gate = map.pool_tracker_for(
-            pool_id("pool"),
-            "pool",
-            FailOpenThresholds { enter: 2, exit: 1 },
-        );
+        let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 2, exit: 1 });
         let a = map.tracker_for("a:11211", 1);
         let b = map.tracker_for("b:11211", 1);
         a.set_pool_tracker(Arc::clone(&gate));
@@ -460,11 +460,7 @@ mod tests {
     #[test]
     fn gate_refusal_leaves_word_unmarked() {
         let map = TkoTrackerMap::new(noop_sink());
-        let gate = map.pool_tracker_for(
-            pool_id("pool"),
-            "pool",
-            FailOpenThresholds { enter: 1, exit: 1 },
-        );
+        let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
         let a = map.tracker_for("a:11211", 1);
         let b = map.tracker_for("b:11211", 1);
         a.set_pool_tracker(Arc::clone(&gate));

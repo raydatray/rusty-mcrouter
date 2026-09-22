@@ -4,7 +4,7 @@ use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rusty_mcrouter_config::{PoolId, ServerConfig};
+use rusty_mcrouter_config::ServerConfig;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::classify::ResultCode;
@@ -52,7 +52,6 @@ where
 
 #[derive(Clone, Copy)]
 pub struct PoolFailOpen<'a> {
-    pub id: PoolId,
     pub name: &'a str,
     pub thresholds: FailOpenThresholds,
 }
@@ -89,7 +88,7 @@ pub trait BackendFactory {
 /// destination map (and, transitively, sharing TKO trackers across threads).
 pub struct DestinationFactory {
     map: Rc<Map>,
-    pool_gates: RefCell<HashMap<PoolId, Arc<PoolTkoTracker>>>,
+    pool_gates: RefCell<HashMap<Arc<str>, Arc<PoolTkoTracker>>>,
 }
 
 impl DestinationFactory {
@@ -102,17 +101,17 @@ impl DestinationFactory {
 
     fn pool_gate(&self, pool: &PoolHealth<'_>) -> Option<Arc<PoolTkoTracker>> {
         let config = pool.fail_open?;
-        if let Some(gate) = self.pool_gates.borrow().get(&config.id) {
+        if let Some(gate) = self.pool_gates.borrow().get(config.name) {
             return Some(Arc::clone(gate));
         }
 
         let gate = self
             .map
             .tko_map()
-            .pool_tracker_for(config.id, config.name, config.thresholds);
+            .pool_tracker_for(config.name, config.thresholds);
         self.pool_gates
             .borrow_mut()
-            .insert(config.id, Arc::clone(&gate));
+            .insert(Arc::clone(gate.name()), Arc::clone(&gate));
         Some(gate)
     }
 }
@@ -201,12 +200,8 @@ mod tests {
         run_local(async {
             let (_tko, factory) = factory();
             let cfg = destination::DestinationConfig::default();
-            let config =
-                parse(r#"{"pools":{"gated":{"servers":["gated:1"]}},"route":"NullRoute"}"#)
-                    .unwrap();
             let pool = PoolHealth {
                 fail_open: Some(PoolFailOpen {
-                    id: config.pool_id("gated").unwrap(),
                     name: "gated",
                     thresholds: FailOpenThresholds { enter: 1, exit: 1 },
                 }),

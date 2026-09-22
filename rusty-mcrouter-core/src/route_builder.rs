@@ -267,7 +267,6 @@ where
         let dest_cfg = pool_destination_config(self.defaults, pool_config);
         let pool_health = PoolHealth {
             fail_open: pool_config.tko_tracker().map(|config| PoolFailOpen {
-                id: pool_id,
                 name: pool_name,
                 thresholds: FailOpenThresholds {
                     enter: config.enter(),
