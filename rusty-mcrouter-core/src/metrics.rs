@@ -85,7 +85,7 @@ impl RoutingMetricsLayout {
 }
 
 #[cfg(test)]
-pub(crate) fn test_metrics_layout(names: &[&str]) -> Arc<RoutingMetricsLayout> {
+pub(crate) fn test_config(names: &[&str]) -> ConfigDocument {
     let pools = names
         .iter()
         .map(|name| {
@@ -95,19 +95,10 @@ pub(crate) fn test_metrics_layout(names: &[&str]) -> Arc<RoutingMetricsLayout> {
             )
         })
         .collect::<serde_json::Map<_, _>>();
-    let config = rusty_mcrouter_config::parse(
+    rusty_mcrouter_config::parse(
         &serde_json::json!({ "pools": pools, "route": "NullRoute" }).to_string(),
     )
-    .unwrap();
-    RoutingMetricsLayout::new(&config)
-}
-
-#[cfg(test)]
-pub(crate) fn test_pool_id(layout: &RoutingMetricsLayout, name: &str) -> PoolId {
-    layout
-        .pools()
-        .find_map(|(id, candidate)| (candidate == name).then_some(id))
-        .unwrap()
+    .unwrap()
 }
 
 #[derive(Default)]
@@ -209,7 +200,9 @@ mod tests {
     #[test]
     fn distinct_shards_do_not_share_pool_counters() {
         let layout = layout();
-        let pool = test_pool_id(&layout, "backup");
+        let pool = test_config(&["primary", "backup"])
+            .pool_id("backup")
+            .unwrap();
         let first = RoutingMetricsShard::new(Arc::clone(&layout));
         let second = RoutingMetricsShard::new(layout);
         first.pool(pool).requests.inc();

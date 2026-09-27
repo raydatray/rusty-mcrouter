@@ -6,7 +6,7 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::time::Instant;
 
 use crate::{
-    DynRoute, RouteError, RoutingEventRecord, RoutingEventSink, RoutingMetricsLayout,
+    DynRoute, PoolMetrics, RouteError, RoutingEventRecord, RoutingEventSink, RoutingMetricsLayout,
     RoutingMetricsShard,
 };
 
@@ -79,6 +79,14 @@ impl RoutingState {
         self.metrics.layout()
     }
 
+    pub fn metrics(&self) -> &Arc<RoutingMetricsShard> {
+        &self.metrics
+    }
+
+    pub fn pool(&self, pool: PoolId) -> &PoolMetrics {
+        self.metrics.pool(pool)
+    }
+
     pub fn context(self: &Rc<Self>) -> RouteContext {
         RouteContext {
             state: Rc::clone(self),
@@ -90,9 +98,13 @@ impl RoutingState {
 
 #[cfg(test)]
 pub(crate) fn test_routing_state() -> Rc<RoutingState> {
-    let layout = RoutingMetricsLayout::empty();
+    test_state(&crate::metrics::test_config(&[]))
+}
+
+#[cfg(test)]
+pub(crate) fn test_state(config: &rusty_mcrouter_config::ConfigDocument) -> Rc<RoutingState> {
     RoutingState::new(
-        RoutingMetricsShard::new(layout),
+        RoutingMetricsShard::new(RoutingMetricsLayout::new(config)),
         rusty_mcrouter_observability_primitives::test_support::noop_sink(),
     )
 }
@@ -106,7 +118,7 @@ mod tests {
     use rusty_mcrouter_protocol::{Reply, Request};
 
     use super::*;
-    use crate::metrics::{test_metrics_layout, test_pool_id};
+    use crate::metrics::test_config;
     use crate::{DynRoute, Route, RouteError};
 
     struct InspectContext {
@@ -238,28 +250,26 @@ mod tests {
 
     #[test]
     fn first_sendable_pool_wins_within_one_context() {
-        let layout = test_metrics_layout(&["primary", "backup"]);
-        let primary = test_pool_id(&layout, "primary");
-        let backup = test_pool_id(&layout, "backup");
-        let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
+        let config = test_config(&["primary", "backup"]);
+        let primary = config.pool_id("primary").unwrap();
+        let backup = config.pool_id("backup").unwrap();
+        let state = test_state(&config);
         let context = state.context();
         context.select_pool(primary);
         context.select_pool(backup);
 
         context.finish(&Ok(get_miss()));
 
-        assert_eq!(metrics.pool(primary).completed_requests.load(), 1);
-        assert_eq!(metrics.pool(backup).completed_requests.load(), 0);
+        assert_eq!(state.pool(primary).completed_requests.load(), 1);
+        assert_eq!(state.pool(backup).completed_requests.load(), 0);
     }
 
     #[test]
     fn concurrent_contexts_keep_selected_pools_isolated() {
-        let layout = test_metrics_layout(&["first", "second"]);
-        let first_pool = test_pool_id(&layout, "first");
-        let second_pool = test_pool_id(&layout, "second");
-        let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
+        let config = test_config(&["first", "second"]);
+        let first_pool = config.pool_id("first").unwrap();
+        let second_pool = config.pool_id("second").unwrap();
+        let state = test_state(&config);
         let first = state.context();
         let second = state.context();
         first.select_pool(first_pool);
@@ -268,21 +278,20 @@ mod tests {
         first.finish(&Ok(get_miss()));
         second.finish(&Ok(get_miss()));
 
-        assert_eq!(metrics.pool(first_pool).completed_requests.load(), 1);
-        assert_eq!(metrics.pool(second_pool).completed_requests.load(), 1);
+        assert_eq!(state.pool(first_pool).completed_requests.load(), 1);
+        assert_eq!(state.pool(second_pool).completed_requests.load(), 1);
     }
 
     #[test]
     fn request_without_selected_pool_has_no_final_pool_metrics() {
-        let layout = test_metrics_layout(&["pool"]);
-        let pool = test_pool_id(&layout, "pool");
-        let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
+        let config = test_config(&["pool"]);
+        let pool = config.pool_id("pool").unwrap();
+        let state = test_state(&config);
 
         state.context().finish(&Ok(get_miss()));
 
-        assert_eq!(metrics.pool(pool).completed_requests.load(), 0);
-        assert_eq!(metrics.pool(pool).final_errors.load(), 0);
-        assert_eq!(metrics.pool(pool).total_duration_us_sum.load(), 0);
+        assert_eq!(state.pool(pool).completed_requests.load(), 0);
+        assert_eq!(state.pool(pool).final_errors.load(), 0);
+        assert_eq!(state.pool(pool).total_duration_us_sum.load(), 0);
     }
 }

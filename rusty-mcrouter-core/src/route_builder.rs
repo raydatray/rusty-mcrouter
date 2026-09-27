@@ -353,16 +353,14 @@ fn build_failover_policy(cfg: &FailoverPolicyConfig, n: usize) -> (Box<dyn Failo
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use rusty_mcrouter_backend::test_support::MockBackendFactory;
     use rusty_mcrouter_config::parse;
-    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
     use rusty_mcrouter_protocol::{Reply, Request};
 
-    use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
+    use crate::context::test_state;
+    use crate::RoutingState;
 
     fn defaults() -> destination::DestinationConfig {
         destination::DestinationConfig::default()
@@ -370,8 +368,6 @@ mod tests {
 
     struct BuiltRoute {
         route: Rc<dyn DynRoute>,
-        #[allow(dead_code)]
-        metrics: Arc<RoutingMetricsShard>,
         state: Rc<RoutingState>,
     }
 
@@ -379,14 +375,10 @@ mod tests {
     where
         F: BackendFactory,
     {
-        let layout = RoutingMetricsLayout::new(cfg);
         let route = build_route(cfg, factory, &defaults())?;
-        let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         Ok(BuiltRoute {
             route,
-            metrics,
-            state,
+            state: test_state(cfg),
         })
     }
 
@@ -575,7 +567,6 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let layout = RoutingMetricsLayout::new(&cfg);
         let options = RootRouteOptions {
             default_route: "/b/b/".parse().unwrap(),
             send_invalid_to_default: true,
@@ -583,11 +574,9 @@ mod tests {
         let route =
             build_route_with_options(&cfg, &MockBackendFactory::new(), &defaults(), &options)
                 .unwrap();
-        let metrics = RoutingMetricsShard::new(layout);
         let fixture = BuiltRoute {
             route,
-            state: RoutingState::new(Arc::clone(&metrics), noop_sink()),
-            metrics,
+            state: test_state(&cfg),
         };
 
         assert_eq!(
@@ -618,7 +607,6 @@ mod tests {
                     }"#,
                 )
                 .unwrap();
-                let layout = RoutingMetricsLayout::new(&cfg);
                 let options = RootRouteOptions {
                     default_route: "/us/a/".parse().unwrap(),
                     send_invalid_to_default: false,
@@ -630,11 +618,9 @@ mod tests {
                     &options,
                 )
                 .unwrap();
-                let metrics = RoutingMetricsShard::new(layout);
                 let fixture = BuiltRoute {
                     route,
-                    state: RoutingState::new(Arc::clone(&metrics), noop_sink()),
-                    metrics,
+                    state: test_state(&cfg),
                 };
 
                 assert_eq!(
@@ -664,7 +650,6 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let layout = RoutingMetricsLayout::new(&cfg);
         let options = RootRouteOptions {
             default_route: "/eu/a/".parse().unwrap(),
             send_invalid_to_default: false,
@@ -672,11 +657,9 @@ mod tests {
         let route =
             build_route_with_options(&cfg, &MockBackendFactory::new(), &defaults(), &options)
                 .unwrap();
-        let metrics = RoutingMetricsShard::new(layout);
         let fixture = BuiltRoute {
             route,
-            state: RoutingState::new(Arc::clone(&metrics), noop_sink()),
-            metrics,
+            state: test_state(&cfg),
         };
 
         assert_eq!(
@@ -703,7 +686,6 @@ mod tests {
                     }"#,
                 )
                 .unwrap();
-                let layout = RoutingMetricsLayout::new(&cfg);
                 let options = RootRouteOptions {
                     default_route: "/us/prod/".parse().unwrap(),
                     send_invalid_to_default: false,
@@ -715,11 +697,9 @@ mod tests {
                     &options,
                 )
                 .unwrap();
-                let metrics = RoutingMetricsShard::new(layout);
                 let fixture = BuiltRoute {
                     route,
-                    state: RoutingState::new(Arc::clone(&metrics), noop_sink()),
-                    metrics,
+                    state: test_state(&cfg),
                 };
 
                 assert_eq!(

@@ -29,17 +29,13 @@ impl Route for NullRoute {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{
         arithmetic, debug, debug_miss, delete, delete_success, expect_store_success, get, get_miss,
         reply, store,
     };
 
     use crate::context::test_routing_state;
-    use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
 
     async fn execute(request: Request) -> Result<Reply> {
         let state = test_routing_state();
@@ -80,15 +76,13 @@ mod tests {
 
     #[tokio::test]
     async fn counts_each_invocation() {
-        let layout = RoutingMetricsLayout::empty();
-        let metrics = RoutingMetricsShard::new(layout);
-        let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
+        let state = test_routing_state();
 
         let first = state.context();
         NullRoute.route(&first, get(b"a")).await.unwrap();
         let second = state.context();
         NullRoute.route(&second, get(b"b")).await.unwrap();
 
-        assert_eq!(metrics.dev_null_requests.load(), 2);
+        assert_eq!(state.metrics().dev_null_requests.load(), 2);
     }
 }
