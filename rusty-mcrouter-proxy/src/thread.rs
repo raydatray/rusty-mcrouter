@@ -83,7 +83,8 @@ pub fn proxy_thread_main(
         );
         let sweep_task = dest_map.spawn_idle_sweep(shared.sweep_interval);
         let factory = DestinationFactory::new(Rc::clone(&dest_map));
-        let routing_state = RoutingState::new(routing_metrics, routing_events);
+        let routing_state =
+            RoutingState::new(routing_metrics, Rc::new(routing_events), &shared.config);
         let route = match build_route_with_options(
             &shared.config,
             &factory,

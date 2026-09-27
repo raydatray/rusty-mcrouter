@@ -2,7 +2,6 @@ use std::net::SocketAddr;
 use std::sync::{mpsc::sync_channel, Arc};
 use std::thread::{Builder, JoinHandle};
 
-use rusty_mcrouter_core::RoutingMetricsLayout;
 use rusty_mcrouter_observability::EventSender;
 use rusty_mcrouter_proxy::{
     proxy_thread_main, ListenerConfig, ProxyHandle, ProxySet, ProxyShards, ProxyShared,
@@ -79,14 +78,11 @@ pub struct ProxyFleet {
 impl ProxyFleet {
     /// on failure shuts down what it already started
     pub fn spawn(cfg: ProxyFleetConfig, supervisor: &Supervisor) -> anyhow::Result<Self> {
-        let routing_layout = RoutingMetricsLayout::new(&cfg.shared.config);
         let (handles, inboxes): (Vec<_>, Vec<_>) =
             (0..cfg.num_proxies).map(ProxyHandle::allocate).unzip();
         let proxies = ProxySet::new(handles.clone());
         // created here so the scrape sources hold the same Arcs the threads write
-        let shards: Vec<_> = (0..cfg.num_proxies)
-            .map(|_| ProxyShards::new(Arc::clone(&routing_layout)))
-            .collect();
+        let shards: Vec<_> = (0..cfg.num_proxies).map(|_| ProxyShards::new()).collect();
 
         let use_reuseport = cfg.num_listening_sockets > 1;
         let mut threads = Vec::with_capacity(cfg.num_proxies);

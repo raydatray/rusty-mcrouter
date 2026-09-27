@@ -163,7 +163,7 @@ mod tests {
 
     use crate::context::{test_routing_state, test_state};
     use crate::metrics::test_config;
-    use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
+    use crate::{RoutingMetricsShard, RoutingState};
 
     fn dest(backend: MockBackend) -> Rc<dyn DynRoute> {
         DestinationRoute::new(backend).into_dyn()
@@ -205,10 +205,10 @@ mod tests {
         Arc<RoutingMetricsShard>,
         EventLog<RoutingEventRecord>,
     ) {
-        let metrics = RoutingMetricsShard::new(RoutingMetricsLayout::empty());
+        let metrics = RoutingMetricsShard::new();
         let (sink, events) = recording_sink();
         (
-            RoutingState::new(Arc::clone(&metrics), sink),
+            RoutingState::new(Arc::clone(&metrics), Rc::new(sink), &test_config(&[])),
             metrics,
             events,
         )

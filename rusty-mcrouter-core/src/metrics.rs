@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::ops::Index;
+use std::sync::{Arc, Mutex, Weak};
 
 use rusty_mcrouter_config::{ConfigDocument, PoolId};
 use rusty_mcrouter_observability_primitives::Counter;
@@ -42,45 +44,80 @@ impl FailoverErrorClass {
     }
 }
 
-struct PoolMetricsLayout {
-    id: PoolId,
-    name: String,
+#[derive(Default)]
+pub struct PoolMetrics {
+    pub requests: Counter,
+    pub duration_us_sum: Counter,
+    pub completed_requests: Counter,
+    pub final_errors: Counter,
+    pub total_duration_us_sum: Counter,
 }
 
-pub struct RoutingMetricsLayout {
-    pools: Vec<PoolMetricsLayout>,
+/// One config's pool blocks, indexed by that config's `PoolId`. PoolIds
+/// renumber across reloads; the blocks are shared by pool name.
+pub struct PoolMetricsTable {
+    pools: Vec<Arc<PoolMetrics>>,
 }
 
-impl RoutingMetricsLayout {
-    pub fn new(config: &ConfigDocument) -> Arc<Self> {
+impl Index<PoolId> for PoolMetricsTable {
+    type Output = PoolMetrics;
+
+    fn index(&self, pool: PoolId) -> &PoolMetrics {
+        &self.pools[pool.index()]
+    }
+}
+
+#[repr(align(64))]
+pub struct RoutingMetricsShard {
+    // locked at generation build and at scrape, never per request. weak, so a
+    // removed pool leaves the scrape with the last generation naming it
+    pools: Mutex<BTreeMap<Arc<str>, Weak<PoolMetrics>>>,
+    pub dev_null_requests: Counter,
+    pub failover: [Counter; FAILOVER_POLICY_COUNT],
+    pub failover_exhausted: [Counter; FAILOVER_POLICY_COUNT],
+    pub failover_policy_errors: [Counter; FAILOVER_ERROR_CLASS_COUNT],
+}
+
+impl RoutingMetricsShard {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            pools: config
-                .pools()
-                .map(|(id, pool)| PoolMetricsLayout {
-                    id,
-                    name: pool.name().to_string(),
-                })
-                .collect(),
+            pools: Mutex::new(BTreeMap::new()),
+            dev_null_requests: Counter::default(),
+            failover: Default::default(),
+            failover_exhausted: Default::default(),
+            failover_policy_errors: Default::default(),
         })
     }
 
-    pub fn empty() -> Arc<Self> {
-        Arc::new(Self { pools: Vec::new() })
+    /// A pool that survives a reload gets its live block, so its counters
+    /// continue instead of resetting.
+    pub fn table_for(&self, config: &ConfigDocument) -> PoolMetricsTable {
+        let mut registry = self.pools.lock().unwrap();
+        registry.retain(|_, block| block.strong_count() > 0);
+
+        let pools = config
+            .pools()
+            .enumerate()
+            .map(|(position, (id, pool))| {
+                debug_assert_eq!(id.index(), position, "tables index by PoolId");
+                if let Some(live) = registry.get(pool.name()).and_then(Weak::upgrade) {
+                    return live;
+                }
+                let block = Arc::new(PoolMetrics::default());
+                registry.insert(Arc::from(pool.name()), Arc::downgrade(&block));
+                block
+            })
+            .collect();
+
+        PoolMetricsTable { pools }
     }
 
-    pub fn pool_name(&self, id: PoolId) -> Option<&str> {
-        self.pools
-            .get(id.index())
-            .filter(|pool| pool.id == id)
-            .map(|pool| pool.name.as_str())
-    }
-
-    pub fn pools_len(&self) -> usize {
-        self.pools.len()
-    }
-
-    pub fn pools(&self) -> impl ExactSizeIterator<Item = (PoolId, &str)> {
-        self.pools.iter().map(|pool| (pool.id, pool.name.as_str()))
+    pub fn pool_blocks(&self) -> Vec<(Arc<str>, Arc<PoolMetrics>)> {
+        let registry = self.pools.lock().unwrap();
+        registry
+            .iter()
+            .filter_map(|(name, block)| Some((Arc::clone(name), block.upgrade()?)))
+            .collect()
     }
 }
 
@@ -101,114 +138,82 @@ pub(crate) fn test_config(names: &[&str]) -> ConfigDocument {
     .unwrap()
 }
 
-#[derive(Default)]
-pub struct PoolMetrics {
-    pub requests: Counter,
-    pub duration_us_sum: Counter,
-    pub completed_requests: Counter,
-    pub final_errors: Counter,
-    pub total_duration_us_sum: Counter,
-}
-
-#[repr(align(64))]
-pub struct RoutingMetricsShard {
-    layout: Arc<RoutingMetricsLayout>,
-    pools: Vec<PoolMetrics>,
-    pub dev_null_requests: Counter,
-    pub failover: [Counter; FAILOVER_POLICY_COUNT],
-    pub failover_exhausted: [Counter; FAILOVER_POLICY_COUNT],
-    pub failover_policy_errors: [Counter; FAILOVER_ERROR_CLASS_COUNT],
-}
-
-impl RoutingMetricsShard {
-    pub fn new(layout: Arc<RoutingMetricsLayout>) -> Arc<Self> {
-        let pools = (0..layout.pools_len())
-            .map(|_| PoolMetrics::default())
-            .collect();
-
-        Arc::new(Self {
-            layout,
-            pools,
-            dev_null_requests: Counter::default(),
-            failover: Default::default(),
-            failover_exhausted: Default::default(),
-            failover_policy_errors: Default::default(),
-        })
-    }
-
-    pub fn layout(&self) -> &Arc<RoutingMetricsLayout> {
-        &self.layout
-    }
-
-    pub fn pool(&self, id: PoolId) -> &PoolMetrics {
-        &self.pools[id.index()]
-    }
-
-    pub fn pools(&self) -> impl ExactSizeIterator<Item = (PoolId, &PoolMetrics)> {
-        self.layout
-            .pools()
-            .map(|(id, _)| (id, &self.pools[id.index()]))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_mcrouter_config::parse;
-
-    fn layout() -> Arc<RoutingMetricsLayout> {
-        let config = parse(
-            r#"{
-                "pools": {
-                    "primary": { "servers": ["primary:1"] },
-                    "backup": { "servers": ["backup:1"] }
-                },
-                "route": "NullRoute"
-            }"#,
-        )
-        .unwrap();
-        RoutingMetricsLayout::new(&config)
-    }
 
     #[test]
-    fn layout_resolves_pool_ids_to_stable_indexes() {
-        let config = parse(
-            r#"{
-                "pools": {
-                    "primary": { "servers": ["primary:1"] },
-                    "backup": { "servers": ["backup:1"] }
-                },
-                "route": "NullRoute"
-            }"#,
-        )
-        .unwrap();
-        let layout = RoutingMetricsLayout::new(&config);
+    fn table_resolves_this_configs_pool_ids() {
+        let config = test_config(&["primary", "backup"]);
         let primary = config.pool_id("primary").unwrap();
         let backup = config.pool_id("backup").unwrap();
+        let table = RoutingMetricsShard::new().table_for(&config);
 
-        assert_eq!(layout.pool_name(primary), Some("primary"));
-        assert_eq!(layout.pool_name(backup), Some("backup"));
+        table[primary].requests.inc();
+
+        assert_eq!(table[primary].requests.load(), 1);
+        assert_eq!(table[backup].requests.load(), 0);
     }
 
     #[test]
-    fn shard_has_one_pool_block_per_layout_entry() {
-        let layout = layout();
-        let shard = RoutingMetricsShard::new(layout);
-        assert_eq!(shard.pools().len(), 2);
+    fn table_covers_every_configured_pool() {
+        let shard = RoutingMetricsShard::new();
+        let _table = shard.table_for(&test_config(&["primary", "backup"]));
+
+        let names: Vec<_> = shard
+            .pool_blocks()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        assert_eq!(names, ["backup", "primary"]);
     }
 
     #[test]
     fn distinct_shards_do_not_share_pool_counters() {
-        let layout = layout();
-        let pool = test_config(&["primary", "backup"])
-            .pool_id("backup")
-            .unwrap();
-        let first = RoutingMetricsShard::new(Arc::clone(&layout));
-        let second = RoutingMetricsShard::new(layout);
-        first.pool(pool).requests.inc();
+        let config = test_config(&["primary", "backup"]);
+        let pool = config.pool_id("backup").unwrap();
+        let first = RoutingMetricsShard::new().table_for(&config);
+        let second = RoutingMetricsShard::new().table_for(&config);
+        first[pool].requests.inc();
 
-        assert_eq!(first.pool(pool).requests.load(), 1);
-        assert_eq!(second.pool(pool).requests.load(), 0);
+        assert_eq!(first[pool].requests.load(), 1);
+        assert_eq!(second[pool].requests.load(), 0);
+    }
+
+    #[test]
+    fn surviving_pool_keeps_its_block_when_its_pool_id_changes() {
+        let shard = RoutingMetricsShard::new();
+        let v1 = test_config(&["users"]);
+        let v2 = test_config(&["aaa", "users"]);
+        let (old_id, new_id) = (v1.pool_id("users").unwrap(), v2.pool_id("users").unwrap());
+        assert_ne!(old_id, new_id);
+
+        let old = shard.table_for(&v1);
+        old[old_id].requests.add(5);
+        let new = shard.table_for(&v2);
+        // an old-generation request still in flight writes the same block
+        old[old_id].requests.inc();
+        drop(old);
+
+        assert_eq!(new[new_id].requests.load(), 6);
+    }
+
+    #[test]
+    fn removed_pool_leaves_the_scrape_when_its_last_table_drops() {
+        let shard = RoutingMetricsShard::new();
+        let old = shard.table_for(&test_config(&["kept", "removed"]));
+        let new = shard.table_for(&test_config(&["kept"]));
+        assert_eq!(shard.pool_blocks().len(), 2, "the old generation is alive");
+
+        drop(old);
+        let names: Vec<_> = shard
+            .pool_blocks()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        assert_eq!(names, ["kept"]);
+        drop(new);
+        assert!(shard.pool_blocks().is_empty());
     }
 
     #[test]

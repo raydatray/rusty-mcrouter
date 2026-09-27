@@ -1,18 +1,21 @@
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use rusty_mcrouter_backend::classify::reply_code;
-use rusty_mcrouter_config::PoolId;
+use rusty_mcrouter_config::{ConfigDocument, PoolId};
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::time::Instant;
 
 use crate::{
-    DynRoute, PoolMetrics, RouteError, RoutingEventRecord, RoutingEventSink, RoutingMetricsLayout,
+    DynRoute, PoolMetrics, PoolMetricsTable, RouteError, RoutingEventRecord, RoutingEventSink,
     RoutingMetricsShard,
 };
 
+/// One route graph generation's state; `metrics` and `events` are shared by
+/// every generation on the proxy.
 pub struct RoutingState {
     metrics: Arc<RoutingMetricsShard>,
-    events: RoutingEventSink,
+    events: Rc<RoutingEventSink>,
+    pools: PoolMetricsTable,
 }
 
 pub struct RouteContext {
@@ -42,6 +45,10 @@ impl RouteContext {
         &self.state.metrics
     }
 
+    pub(crate) fn pool_metrics(&self, pool: PoolId) -> &PoolMetrics {
+        &self.state.pools[pool]
+    }
+
     pub(crate) fn emit(&self, event: RoutingEventRecord) {
         self.state.events.emit(event);
     }
@@ -56,7 +63,7 @@ impl RouteContext {
         let Some(pool) = self.selected_pool.get() else {
             return;
         };
-        let metrics = self.state.metrics.pool(pool);
+        let metrics = &self.state.pools[pool];
         metrics.completed_requests.inc();
         metrics
             .total_duration_us_sum
@@ -71,12 +78,19 @@ impl RouteContext {
 }
 
 impl RoutingState {
-    pub fn new(metrics: Arc<RoutingMetricsShard>, events: RoutingEventSink) -> Rc<Self> {
-        Rc::new(Self { metrics, events })
-    }
-
-    pub fn layout(&self) -> &Arc<RoutingMetricsLayout> {
-        self.metrics.layout()
+    /// `config` must be the document the route graph was built from: the
+    /// graph's `PoolId`s index the pool table resolved here.
+    pub fn new(
+        metrics: Arc<RoutingMetricsShard>,
+        events: Rc<RoutingEventSink>,
+        config: &ConfigDocument,
+    ) -> Rc<Self> {
+        let pools = metrics.table_for(config);
+        Rc::new(Self {
+            metrics,
+            events,
+            pools,
+        })
     }
 
     pub fn metrics(&self) -> &Arc<RoutingMetricsShard> {
@@ -84,7 +98,7 @@ impl RoutingState {
     }
 
     pub fn pool(&self, pool: PoolId) -> &PoolMetrics {
-        self.metrics.pool(pool)
+        &self.pools[pool]
     }
 
     pub fn context(self: &Rc<Self>) -> RouteContext {
@@ -102,10 +116,11 @@ pub(crate) fn test_routing_state() -> Rc<RoutingState> {
 }
 
 #[cfg(test)]
-pub(crate) fn test_state(config: &rusty_mcrouter_config::ConfigDocument) -> Rc<RoutingState> {
+pub(crate) fn test_state(config: &ConfigDocument) -> Rc<RoutingState> {
     RoutingState::new(
-        RoutingMetricsShard::new(RoutingMetricsLayout::new(config)),
-        rusty_mcrouter_observability_primitives::test_support::noop_sink(),
+        RoutingMetricsShard::new(),
+        Rc::new(rusty_mcrouter_observability_primitives::test_support::noop_sink()),
+        config,
     )
 }
 
@@ -162,12 +177,9 @@ mod tests {
     }
 
     fn state() -> (Rc<RoutingState>, Arc<RoutingMetricsShard>) {
-        let layout = RoutingMetricsLayout::empty();
-        let metrics = RoutingMetricsShard::new(layout);
-        (
-            RoutingState::new(Arc::clone(&metrics), noop_sink()),
-            metrics,
-        )
+        let state = test_routing_state();
+        let metrics = Arc::clone(state.metrics());
+        (state, metrics)
     }
 
     async fn execute(
@@ -293,5 +305,27 @@ mod tests {
         assert_eq!(state.pool(pool).completed_requests.load(), 0);
         assert_eq!(state.pool(pool).final_errors.load(), 0);
         assert_eq!(state.pool(pool).total_duration_us_sum.load(), 0);
+    }
+
+    #[test]
+    fn contexts_resolve_pool_ids_against_their_own_generation() {
+        let shard = RoutingMetricsShard::new();
+        let v1 = test_config(&["users"]);
+        let v2 = test_config(&["aaa", "users"]);
+        let old = RoutingState::new(Arc::clone(&shard), Rc::new(noop_sink()), &v1);
+        let new = RoutingState::new(Arc::clone(&shard), Rc::new(noop_sink()), &v2);
+
+        let in_flight = old.context();
+        in_flight.select_pool(v1.pool_id("users").unwrap());
+        in_flight.finish(&Ok(get_miss()));
+
+        let users = new.pool(v2.pool_id("users").unwrap());
+        assert_eq!(users.completed_requests.load(), 1);
+        assert_eq!(
+            new.pool(v2.pool_id("aaa").unwrap())
+                .completed_requests
+                .load(),
+            0
+        );
     }
 }
