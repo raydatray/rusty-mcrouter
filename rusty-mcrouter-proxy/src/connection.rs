@@ -361,7 +361,6 @@ mod tests {
             &config,
             &MockBackendFactory::new(),
             &destination::DestinationConfig::default(),
-            routing_state.layout(),
         )
         .unwrap();
         let (handle, _inbox) = ProxyHandle::allocate(0);

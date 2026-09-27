@@ -84,7 +84,6 @@ mod tests {
             &config,
             &MockBackendFactory::new(),
             &destination::DestinationConfig::default(),
-            state.layout(),
         )
         .unwrap();
 
