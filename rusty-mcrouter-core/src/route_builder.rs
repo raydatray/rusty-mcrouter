@@ -20,14 +20,10 @@ use crate::{
         PrefixSelector, RootRoute, RootRouteOptions, Route, RoutePolicyMap, RouteTargetMap,
     },
     selectors::{Ch3, Crc32, Salted, Selector},
-    RoutingMetricsLayout,
 };
 
 #[derive(Debug, Error)]
 pub enum BuildError {
-    #[error("pool `{name}` is missing from the routing metrics layout")]
-    PoolMissingFromMetricsLayout { name: String },
-
     #[error("invalid default route: {prefix}")]
     DefaultRouteMissing { prefix: String },
 }
@@ -45,31 +41,23 @@ pub fn build_route<F>(
     config: &ConfigDocument,
     factory: &F,
     defaults: &destination::DestinationConfig,
-    metrics_layout: &RoutingMetricsLayout,
 ) -> Result<Rc<dyn DynRoute>>
 where
     F: BackendFactory,
 {
-    build_route_with_options(
-        config,
-        factory,
-        defaults,
-        metrics_layout,
-        &RootRouteOptions::default(),
-    )
+    build_route_with_options(config, factory, defaults, &RootRouteOptions::default())
 }
 
 pub fn build_route_with_options<F>(
     config: &ConfigDocument,
     factory: &F,
     defaults: &destination::DestinationConfig,
-    metrics_layout: &RoutingMetricsLayout,
     root_options: &RootRouteOptions,
 ) -> Result<Rc<dyn DynRoute>>
 where
     F: BackendFactory,
 {
-    let mut route_builder = RouteBuilder::new(config, factory, defaults, metrics_layout);
+    let mut route_builder = RouteBuilder::new(config, factory, defaults);
     route_builder.build_root(config.root(), root_options)
 }
 
@@ -80,7 +68,6 @@ where
     config: &'a ConfigDocument,
     factory: &'a F,
     defaults: &'a destination::DestinationConfig,
-    metrics_layout: &'a RoutingMetricsLayout,
     pool_cache: BTreeMap<PoolId, Vec<Rc<DestinationRoute<F::Backend>>>>,
 }
 
@@ -92,13 +79,11 @@ where
         config: &'a ConfigDocument,
         factory: &'a F,
         defaults: &'a destination::DestinationConfig,
-        metrics_layout: &'a RoutingMetricsLayout,
     ) -> Self {
         Self {
             config,
             factory,
             defaults,
-            metrics_layout,
             pool_cache: BTreeMap::new(),
         }
     }
@@ -258,12 +243,6 @@ where
         let pool_config = self.config.pool(pool_id);
         let pool_name = pool_config.name();
 
-        if self.metrics_layout.pool_name(pool_id) != Some(pool_name) {
-            return Err(BuildError::PoolMissingFromMetricsLayout {
-                name: pool_name.to_string(),
-            });
-        }
-
         let dest_cfg = pool_destination_config(self.defaults, pool_config);
         let pool_health = PoolHealth {
             fail_open: pool_config.tko_tracker().map(|config| PoolFailOpen {
@@ -383,7 +362,7 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
     use rusty_mcrouter_protocol::{Reply, Request};
 
-    use crate::{RoutingMetricsShard, RoutingState};
+    use crate::{RoutingMetricsLayout, RoutingMetricsShard, RoutingState};
 
     fn defaults() -> destination::DestinationConfig {
         destination::DestinationConfig::default()
@@ -401,7 +380,7 @@ mod tests {
         F: BackendFactory,
     {
         let layout = RoutingMetricsLayout::new(cfg);
-        let route = build_route(cfg, factory, &defaults(), &layout)?;
+        let route = build_route(cfg, factory, &defaults())?;
         let metrics = RoutingMetricsShard::new(layout);
         let state = RoutingState::new(Arc::clone(&metrics), noop_sink());
         Ok(BuiltRoute {
@@ -575,8 +554,7 @@ mod tests {
     #[test]
     fn plural_routes_require_the_default_alias_at_build_time() {
         let cfg = parse(r#"{ "routes": { "/other/cluster/": "NullRoute" } }"#).unwrap();
-        let layout = RoutingMetricsLayout::new(&cfg);
-        let error = build_route(&cfg, &MockBackendFactory::new(), &defaults(), &layout)
+        let error = build_route(&cfg, &MockBackendFactory::new(), &defaults())
             .err()
             .expect("missing default route should fail the build");
 
@@ -602,14 +580,9 @@ mod tests {
             default_route: "/b/b/".parse().unwrap(),
             send_invalid_to_default: true,
         };
-        let route = build_route_with_options(
-            &cfg,
-            &MockBackendFactory::new(),
-            &defaults(),
-            &layout,
-            &options,
-        )
-        .unwrap();
+        let route =
+            build_route_with_options(&cfg, &MockBackendFactory::new(), &defaults(), &options)
+                .unwrap();
         let metrics = RoutingMetricsShard::new(layout);
         let fixture = BuiltRoute {
             route,
@@ -654,7 +627,6 @@ mod tests {
                     &cfg,
                     &MockBackendFactory::new(),
                     &defaults(),
-                    &layout,
                     &options,
                 )
                 .unwrap();
@@ -697,14 +669,9 @@ mod tests {
             default_route: "/eu/a/".parse().unwrap(),
             send_invalid_to_default: false,
         };
-        let route = build_route_with_options(
-            &cfg,
-            &MockBackendFactory::new(),
-            &defaults(),
-            &layout,
-            &options,
-        )
-        .unwrap();
+        let route =
+            build_route_with_options(&cfg, &MockBackendFactory::new(), &defaults(), &options)
+                .unwrap();
         let metrics = RoutingMetricsShard::new(layout);
         let fixture = BuiltRoute {
             route,
@@ -745,7 +712,6 @@ mod tests {
                     &cfg,
                     &MockBackendFactory::new(),
                     &defaults(),
-                    &layout,
                     &options,
                 )
                 .unwrap();
@@ -782,20 +748,6 @@ mod tests {
         assert_eq!(reply, get_miss());
     }
 
-    #[test]
-    fn errors_when_pool_is_missing_from_metrics_layout() {
-        let cfg = parse(r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#)
-            .unwrap();
-        let layout = RoutingMetricsLayout::empty();
-        let err = build_route(&cfg, &MockBackendFactory::new(), &defaults(), &layout)
-            .err()
-            .expect("build should fail");
-        assert!(matches!(
-            err,
-            BuildError::PoolMissingFromMetricsLayout { ref name } if name == "P"
-        ));
-    }
-
     #[tokio::test]
     async fn builds_failover_route_with_pool_children() {
         let json = r#"{"pools": {"A": {"servers": ["a:1"]}, "B": {"servers": ["b:1"]}}, "route": {"type": "FailoverRoute", "children": ["PoolRoute|A", "PoolRoute|B"]}}"#;
@@ -830,8 +782,7 @@ mod tests {
         let json = r#"{"pools": {"P": {"servers": ["unused:1"]}}, "route": "PoolRoute|P"}"#;
         let cfg = parse(json).unwrap();
         let d = defaults();
-        let layout = RoutingMetricsLayout::new(&cfg);
-        let mut builder = RouteBuilder::new(&cfg, &factory, &d, &layout);
+        let mut builder = RouteBuilder::new(&cfg, &factory, &d);
         let pool = cfg.pool_id("P").unwrap();
         let d1 = builder.get_or_build_destinations(pool).unwrap();
         let d2 = builder.get_or_build_destinations(pool).unwrap();

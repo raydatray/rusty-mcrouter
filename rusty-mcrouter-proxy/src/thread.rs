@@ -88,7 +88,6 @@ pub fn proxy_thread_main(
             &shared.config,
             &factory,
             &shared.defaults,
-            routing_state.layout(),
             &shared.root_route_options,
         ) {
             Ok(r) => r,
