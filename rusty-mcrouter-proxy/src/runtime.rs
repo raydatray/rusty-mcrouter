@@ -172,7 +172,8 @@ mod tests {
     use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
     use rusty_mcrouter_backend::metrics::BackendMetricsShard;
     use rusty_mcrouter_backend::tko::TkoTrackerMap;
-    use rusty_mcrouter_core::{NullRoute, Route, RoutingMetricsLayout, RoutingMetricsShard};
+    use rusty_mcrouter_config::parse;
+    use rusty_mcrouter_core::{NullRoute, Route, RoutingMetricsShard};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss};
 
@@ -193,8 +194,8 @@ mod tests {
             BackendMetricsShard::new(),
             DestinationMetricsRegistry::new(),
         );
-        let layout = RoutingMetricsLayout::empty();
-        let state = RoutingState::new(RoutingMetricsShard::new(layout), noop_sink());
+        let config = parse(r#"{"route": "NullRoute"}"#).unwrap();
+        let state = RoutingState::new(RoutingMetricsShard::new(), Rc::new(noop_sink()), &config);
         let runtime = ProxyRuntime::new(
             0,
             NullRoute.into_dyn(),

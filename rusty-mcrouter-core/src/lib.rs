@@ -9,7 +9,7 @@ mod selectors;
 pub use crate::context::{RouteContext, RoutingState};
 pub use crate::events::{RoutingEvent, RoutingEventRecord, RoutingEventSink};
 pub use crate::metrics::{
-    FailoverErrorClass, FailoverPolicyKind, PoolMetrics, RoutingMetricsLayout, RoutingMetricsShard,
+    FailoverErrorClass, FailoverPolicyKind, PoolMetrics, PoolMetricsTable, RoutingMetricsShard,
 };
 pub use crate::route_builder::{build_route, build_route_with_options, BuildError};
 pub use crate::routes::{

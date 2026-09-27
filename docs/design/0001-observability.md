@@ -49,10 +49,12 @@ top-level request creates one context containing:
   sendable;
 - the route start time.
 
-the binary builds one immutable `RoutingMetricsLayout` from configured
-pool names. every proxy shard shares that layout, and route construction
-resolves pool names to bounded integer indexes once. the request path
-does no pool-name lookup and creates no metric cells.
+each route graph generation resolves its config's pools to the proxy's
+metric blocks by name, once, at build time (`RoutingMetricsShard::table_for`).
+the graph's `PoolId`s index that generation's table. the request path does no
+pool-name lookup and creates no metric cells. blocks are identified by pool
+name, so a pool that survives a config reload keeps its counters (design 0002
+§4).
 
 `Backend::prepare_send` performs the sole synchronous TKO gate and returns an
 unboxed future only when the destination is sendable. `DestinationRoute`

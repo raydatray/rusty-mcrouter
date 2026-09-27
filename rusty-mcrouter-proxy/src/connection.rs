@@ -328,7 +328,7 @@ mod tests {
     use rusty_mcrouter_backend::destination;
     use rusty_mcrouter_backend::test_support::{run_local, MockBackendFactory};
     use rusty_mcrouter_config::{parse, PoolId};
-    use rusty_mcrouter_core::{build_route, RoutingMetricsLayout, RoutingMetricsShard};
+    use rusty_mcrouter_core::{build_route, RoutingMetricsShard};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -342,7 +342,7 @@ mod tests {
     ) -> (
         tokio::net::TcpStream,
         tokio::task::JoinHandle<()>,
-        Arc<RoutingMetricsShard>,
+        Rc<RoutingState>,
         PoolId,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -354,9 +354,8 @@ mod tests {
             parse(r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#)
                 .unwrap();
         let pool = config.pool_id("pool").unwrap();
-        let layout = RoutingMetricsLayout::new(&config);
-        let routing_metrics = RoutingMetricsShard::new(layout);
-        let routing_state = RoutingState::new(Arc::clone(&routing_metrics), noop_sink());
+        let routing_state =
+            RoutingState::new(RoutingMetricsShard::new(), Rc::new(noop_sink()), &config);
         let route = build_route(
             &config,
             &MockBackendFactory::new(),
@@ -370,7 +369,7 @@ mod tests {
             server_stream,
             0,
             route,
-            routing_state,
+            Rc::clone(&routing_state),
             proxies,
             ThreadMode::SameThread,
             metrics,
@@ -378,7 +377,7 @@ mod tests {
         let task = tokio::task::spawn_local(async move {
             let _ = conn.run().await;
         });
-        (client, task, routing_metrics, pool)
+        (client, task, routing_state, pool)
     }
 
     async fn read_lines(client: &mut tokio::net::TcpStream, n: usize) -> Vec<String> {
@@ -402,7 +401,7 @@ mod tests {
     async fn frontend_metrics_account_a_pipelined_session() {
         run_local(async {
             let metrics = FrontendMetricsShard::new();
-            let (mut client, task, routing_metrics, pool) = session(Arc::clone(&metrics)).await;
+            let (mut client, task, routing, pool) = session(Arc::clone(&metrics)).await;
 
             client
                 .write_all(b"mg foo v\r\nmn\r\nnot_a_command\r\n")
@@ -429,9 +428,9 @@ mod tests {
                 "the CLIENT_ERROR is a client-visible error reply"
             );
             assert_eq!(metrics.processing.load(), 0);
-            assert_eq!(routing_metrics.pool(pool).requests.load(), 1);
-            assert_eq!(routing_metrics.pool(pool).completed_requests.load(), 1);
-            assert_eq!(routing_metrics.pool(pool).final_errors.load(), 0);
+            assert_eq!(routing.pool(pool).requests.load(), 1);
+            assert_eq!(routing.pool(pool).completed_requests.load(), 1);
+            assert_eq!(routing.pool(pool).final_errors.load(), 0);
 
             // client disconnect ends the session; the gauge must not leak
             drop(client);

@@ -2,6 +2,7 @@
 // the shard_source! macro; matrices, walks and direct reads are hand
 // written (unique shapes, one instance each).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,7 +10,9 @@ use rusty_mcrouter_backend::classify::ResultCode;
 use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
 use rusty_mcrouter_backend::metrics::BackendMetricsShard;
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
-use rusty_mcrouter_core::{FailoverErrorClass, FailoverPolicyKind, RoutingMetricsShard};
+use rusty_mcrouter_core::{
+    FailoverErrorClass, FailoverPolicyKind, PoolMetrics, RoutingMetricsShard,
+};
 use rusty_mcrouter_protocol::RequestKind;
 use rusty_mcrouter_proxy::{FrontendMetricsShard, ProxyShards};
 
@@ -185,44 +188,61 @@ impl MetricsSource for RoutingSource {
             );
         }
 
-        let Some(first) = self.shards.first() else {
-            return;
-        };
+        let mut pools = BTreeMap::<Arc<str>, PoolTotals>::new();
+        for shard in &self.shards {
+            for (name, block) in shard.pool_blocks() {
+                pools.entry(name).or_default().add(&block);
+            }
+        }
 
-        debug_assert!(self
-            .shards
-            .iter()
-            .all(|shard| Arc::ptr_eq(first.layout(), shard.layout())));
-
-        for (pool, name) in first.layout().pools() {
-            let labels = &[("pool", name)];
+        for (name, totals) in &pools {
+            let labels = &[("pool", &**name)];
 
             out.counter(
                 "rusty_mcrouter_pool_requests_total",
                 labels,
-                self.sum(|shard| shard.pool(pool).requests.load()),
+                totals.requests,
             );
             out.counter(
                 "rusty_mcrouter_pool_duration_us_sum_total",
                 labels,
-                self.sum(|shard| shard.pool(pool).duration_us_sum.load()),
+                totals.duration_us_sum,
             );
             out.counter(
                 "rusty_mcrouter_pool_completed_requests_total",
                 labels,
-                self.sum(|shard| shard.pool(pool).completed_requests.load()),
+                totals.completed_requests,
             );
             out.counter(
                 "rusty_mcrouter_pool_requests_failed_total",
                 labels,
-                self.sum(|shard| shard.pool(pool).final_errors.load()),
+                totals.final_errors,
             );
             out.counter(
                 "rusty_mcrouter_pool_total_duration_us_sum_total",
                 labels,
-                self.sum(|shard| shard.pool(pool).total_duration_us_sum.load()),
+                totals.total_duration_us_sum,
             );
         }
+    }
+}
+
+#[derive(Default)]
+struct PoolTotals {
+    requests: u64,
+    duration_us_sum: u64,
+    completed_requests: u64,
+    final_errors: u64,
+    total_duration_us_sum: u64,
+}
+
+impl PoolTotals {
+    fn add(&mut self, block: &PoolMetrics) {
+        self.requests += block.requests.load();
+        self.duration_us_sum += block.duration_us_sum.load();
+        self.completed_requests += block.completed_requests.load();
+        self.final_errors += block.final_errors.load();
+        self.total_duration_us_sum += block.total_duration_us_sum.load();
     }
 }
 
@@ -365,8 +385,7 @@ impl MetricsSource for SelfSource {
 #[cfg(test)]
 mod tests {
     use rusty_mcrouter_backend::tko::{DestToken, FailOpenThresholds};
-    use rusty_mcrouter_config::parse;
-    use rusty_mcrouter_core::RoutingMetricsLayout;
+    use rusty_mcrouter_config::{parse, ConfigDocument};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
     use super::*;
@@ -378,7 +397,7 @@ mod tests {
         registry.render()
     }
 
-    fn routing_layout(names: &[&str]) -> Arc<RoutingMetricsLayout> {
+    fn pools_config(names: &[&str]) -> ConfigDocument {
         let pools = names
             .iter()
             .map(|name| {
@@ -388,10 +407,7 @@ mod tests {
                 )
             })
             .collect::<serde_json::Map<_, _>>();
-        let config =
-            parse(&serde_json::json!({ "pools": pools, "route": "NullRoute" }).to_string())
-                .unwrap();
-        RoutingMetricsLayout::new(&config)
+        parse(&serde_json::json!({ "pools": pools, "route": "NullRoute" }).to_string()).unwrap()
     }
 
     #[test]
@@ -436,22 +452,20 @@ mod tests {
 
     #[test]
     fn routing_source_sums_shards_and_pool_metrics() {
-        let layout = routing_layout(&["primary", "backup"]);
-        let primary = layout
-            .pools()
-            .find_map(|(id, name)| (name == "primary").then_some(id))
-            .unwrap();
-        let s1 = RoutingMetricsShard::new(Arc::clone(&layout));
-        let s2 = RoutingMetricsShard::new(layout);
+        let config = pools_config(&["primary", "backup"]);
+        let primary = config.pool_id("primary").unwrap();
+        let s1 = RoutingMetricsShard::new();
+        let s2 = RoutingMetricsShard::new();
+        let (t1, t2) = (s1.table_for(&config), s2.table_for(&config));
 
         s1.dev_null_requests.add(2);
         s2.dev_null_requests.inc();
         s1.failover[FailoverPolicyKind::InOrder as usize].inc();
         s2.failover_exhausted[FailoverPolicyKind::InOrder as usize].inc();
         s2.failover_policy_errors[FailoverErrorClass::Tko as usize].add(3);
-        s1.pool(primary).requests.add(4);
-        s2.pool(primary).requests.add(5);
-        s2.pool(primary).final_errors.inc();
+        t1[primary].requests.add(4);
+        t2[primary].requests.add(5);
+        t2[primary].final_errors.inc();
 
         let text = render(RoutingSource {
             shards: vec![s1, s2],
@@ -468,8 +482,8 @@ mod tests {
 
     #[test]
     fn routing_source_escapes_configured_pool_names() {
-        let layout = routing_layout(&["quoted\"pool\\line\nnext"]);
-        let shard = RoutingMetricsShard::new(layout);
+        let shard = RoutingMetricsShard::new();
+        let _table = shard.table_for(&pools_config(&["quoted\"pool\\line\nnext"]));
 
         let text = render(RoutingSource {
             shards: vec![shard],
@@ -478,6 +492,25 @@ mod tests {
         assert!(text.contains(
             "rusty_mcrouter_pool_requests_total{pool=\"quoted\\\"pool\\\\line\\nnext\"} 0\n"
         ));
+    }
+
+    #[test]
+    fn routing_source_joins_shards_on_different_generations_by_name() {
+        let old = pools_config(&["users"]);
+        let new = pools_config(&["aaa", "users"]);
+        let s0 = RoutingMetricsShard::new();
+        let s1 = RoutingMetricsShard::new();
+        let t0 = s0.table_for(&new);
+        let t1 = s1.table_for(&old);
+        t0[new.pool_id("users").unwrap()].requests.add(2);
+        t1[old.pool_id("users").unwrap()].requests.add(3);
+
+        let text = render(RoutingSource {
+            shards: vec![s0, s1],
+        });
+
+        assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"users\"} 5\n"));
+        assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"aaa\"} 0\n"));
     }
 
     #[test]
@@ -535,11 +568,9 @@ mod tests {
 
     #[test]
     fn scrape_inputs_assemble_every_source_in_order() {
-        let layout = routing_layout(&["pool_a"]);
-        let proxies = vec![
-            ProxyShards::new(Arc::clone(&layout)),
-            ProxyShards::new(layout),
-        ];
+        let proxies = vec![ProxyShards::new(), ProxyShards::new()];
+        // a live generation on proxy 0 is what makes its pools scrapeable
+        let _generation = proxies[0].routing.table_for(&pools_config(&["pool_a"]));
         proxies[0]
             .backend
             .record_result(RequestKind::Get, ResultCode::Success);

@@ -10,9 +10,7 @@ use rusty_mcrouter_backend::{
     tko::TkoTrackerMap,
 };
 use rusty_mcrouter_config::ConfigDocument;
-use rusty_mcrouter_core::{
-    RootRouteOptions, RoutingEventSink, RoutingMetricsLayout, RoutingMetricsShard,
-};
+use rusty_mcrouter_core::{RootRouteOptions, RoutingEventSink, RoutingMetricsShard};
 use tokio::sync::mpsc::Receiver;
 
 use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, WorkerEventSink};
@@ -43,12 +41,18 @@ pub struct ProxyShards {
 }
 
 impl ProxyShards {
-    pub fn new(layout: Arc<RoutingMetricsLayout>) -> Self {
+    pub fn new() -> Self {
         Self {
             backend: BackendMetricsShard::new(),
             frontend: FrontendMetricsShard::new(),
-            routing: RoutingMetricsShard::new(layout),
+            routing: RoutingMetricsShard::new(),
         }
+    }
+}
+
+impl Default for ProxyShards {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

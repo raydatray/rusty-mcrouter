@@ -50,8 +50,7 @@ where
 
                 if let Some(pool) = self.pool {
                     context
-                        .metrics()
-                        .pool(pool)
+                        .pool_metrics(pool)
                         .duration_us_sum
                         .add(started.elapsed().as_micros() as u64);
                 }
@@ -61,7 +60,7 @@ where
         };
 
         if let Some(pool) = self.pool {
-            context.metrics().pool(pool).requests.inc();
+            context.pool_metrics(pool).requests.inc();
         }
 
         result.map_err(RouteError::from)
