@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::mpsc::SyncSender, sync::Arc};
 use rusty_mcrouter_backend::destination;
 use tokio::{runtime::Builder, task::LocalSet};
 
-use crate::generation::GenerationBuilder;
+use crate::generation::{GenerationBuilder, RouteSlot};
 use crate::runtime::ProxyRuntime;
 use crate::{
     ListenerConfig, ProxyInbox, ProxyShards, ProxyThreadConfig, Server, WorkerEvent,
@@ -89,8 +89,8 @@ pub fn proxy_thread_main(
             routing_metrics,
             routing_events,
         );
-        let generation = match builder.build(1, &shared.config) {
-            Ok(initial) => initial,
+        let routes = match builder.build(1, &shared.config) {
+            Ok(initial) => RouteSlot::new(initial),
             Err(e) => {
                 let _ = ready_tx.send(Err(anyhow::anyhow!("build_route failed: {e}")));
                 anyhow::bail!("build_route failed: {e}");
@@ -116,7 +116,7 @@ pub fn proxy_thread_main(
 
         let runtime = ProxyRuntime::new(
             proxy_id,
-            generation,
+            routes,
             builder,
             proxies,
             shared.thread_mode,

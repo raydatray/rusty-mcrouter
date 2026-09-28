@@ -7,13 +7,13 @@ use tokio::sync::mpsc::Receiver;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::connection::Connection;
-use crate::generation::{GenerationBuilder, RouteGeneration};
+use crate::generation::{GenerationBuilder, RouteSlot};
 use crate::routing::route_request;
 use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, ThreadMode};
 
 pub(crate) struct ProxyRuntime {
     proxy_id: usize,
-    generation: Rc<RouteGeneration>,
+    routes: Rc<RouteSlot>,
     builder: GenerationBuilder,
     proxies: ProxySet,
     thread_mode: ThreadMode,
@@ -31,7 +31,7 @@ impl ProxyRuntime {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         proxy_id: usize,
-        generation: Rc<RouteGeneration>,
+        routes: Rc<RouteSlot>,
         builder: GenerationBuilder,
         proxies: ProxySet,
         thread_mode: ThreadMode,
@@ -44,7 +44,7 @@ impl ProxyRuntime {
     ) -> Self {
         Self {
             proxy_id,
-            generation,
+            routes,
             builder,
             proxies,
             thread_mode,
@@ -109,17 +109,18 @@ impl ProxyRuntime {
 
     fn reconfigure(&mut self, generation: u64, config: &ConfigDocument) -> Result<(), BuildError> {
         debug_assert!(
-            generation > self.generation.generation,
+            generation > self.routes.current().generation,
             "generations only move forward"
         );
         let next = self.builder.build(generation, config)?;
-        self.generation = next;
+        drop(self.routes.replace(next));
         Ok(())
     }
 
     fn spawn_request(&mut self, request: ProxyRequest) {
-        let route = Rc::clone(&self.generation.route);
-        let state = Rc::clone(&self.generation.state);
+        let current = self.routes.current();
+        let route = Rc::clone(&current.route);
+        let state = Rc::clone(&current.state);
         self.route_tasks.spawn_local(async move {
             let reply = route_request(route, state, request.request).await;
             let _ = request.reply_tx.send(reply);
@@ -132,8 +133,7 @@ impl ProxyRuntime {
         let connection = Connection::new(
             stream,
             self.proxy_id,
-            Rc::clone(&self.generation.route),
-            Rc::clone(&self.generation.state),
+            Rc::clone(&self.routes),
             self.proxies.clone(),
             self.thread_mode,
             Arc::clone(&self.frontend_metrics),
@@ -223,7 +223,7 @@ mod tests {
         let initial = builder.build(1, &parse(config).unwrap()).unwrap();
         let runtime = ProxyRuntime::new(
             0,
-            initial,
+            RouteSlot::new(initial),
             builder,
             proxies,
             ThreadMode::SameThread,
