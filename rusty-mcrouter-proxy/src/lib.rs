@@ -4,6 +4,7 @@ mod config;
 mod connection;
 mod error;
 mod events;
+mod generation;
 mod handle;
 mod message;
 mod metrics;
