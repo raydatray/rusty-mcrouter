@@ -89,7 +89,7 @@ pub fn proxy_thread_main(
             routing_metrics,
             routing_events,
         );
-        let generation = match builder.build(&shared.config) {
+        let generation = match builder.build(1, &shared.config) {
             Ok(initial) => initial,
             Err(e) => {
                 let _ = ready_tx.send(Err(anyhow::anyhow!("build_route failed: {e}")));

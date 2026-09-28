@@ -1,7 +1,10 @@
 use std::net::TcpStream;
+use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
+use rusty_mcrouter_config::ConfigDocument;
+use rusty_mcrouter_core::BuildError;
 use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::{
@@ -81,6 +84,25 @@ impl ProxyHandle {
         acknowledgement
             .await
             .context("proxy exited before acknowledging shutdown")
+    }
+
+    /// Returns without waiting for the outcome, so a caller can enqueue on
+    /// every proxy before awaiting any of them.
+    pub async fn begin_reconfigure(
+        &self,
+        generation: u64,
+        config: Arc<ConfigDocument>,
+    ) -> anyhow::Result<oneshot::Receiver<std::result::Result<(), BuildError>>> {
+        let (applied, outcome) = oneshot::channel();
+        self.command_tx
+            .send(ProxyCommand::Reconfigure {
+                generation,
+                config,
+                applied,
+            })
+            .await
+            .context("proxy command channel closed")?;
+        Ok(outcome)
     }
 
     pub fn shutdown_blocking(&self) -> anyhow::Result<()> {

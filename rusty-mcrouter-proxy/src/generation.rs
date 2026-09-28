@@ -9,6 +9,7 @@ use rusty_mcrouter_core::{
 };
 
 pub(crate) struct RouteGeneration {
+    pub(crate) generation: u64,
     pub(crate) route: Rc<dyn DynRoute>,
     pub(crate) state: Rc<RoutingState>,
 }
@@ -41,7 +42,11 @@ impl GenerationBuilder {
     /// Must run while the current generation is still alive: destinations,
     /// gates and pool metrics dedup through weak maps, so building first is
     /// what hands the new graph the live connections, health and counters.
-    pub(crate) fn build(&self, config: &ConfigDocument) -> Result<Rc<RouteGeneration>, BuildError> {
+    pub(crate) fn build(
+        &self,
+        generation: u64,
+        config: &ConfigDocument,
+    ) -> Result<Rc<RouteGeneration>, BuildError> {
         // per generation, so its gate cache can't keep removed pools' gates alive
         let factory = DestinationFactory::new(Rc::clone(&self.destinations));
         let route = build_route_with_options(config, &factory, &self.defaults, &self.root_options)?;
@@ -50,6 +55,10 @@ impl GenerationBuilder {
             Rc::clone(&self.routing_events),
             config,
         );
-        Ok(Rc::new(RouteGeneration { route, state }))
+        Ok(Rc::new(RouteGeneration {
+            generation,
+            route,
+            state,
+        }))
     }
 }
