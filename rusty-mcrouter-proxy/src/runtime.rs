@@ -1,19 +1,18 @@
 use std::{net::TcpStream, rc::Rc, sync::Arc};
 
 use anyhow::Context;
-use rusty_mcrouter_backend::destination;
-use rusty_mcrouter_core::{DynRoute, RoutingState};
 use tokio::sync::mpsc::Receiver;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::connection::Connection;
+use crate::generation::{GenerationBuilder, RouteGeneration};
 use crate::routing::route_request;
 use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, ThreadMode};
 
 pub(crate) struct ProxyRuntime {
     proxy_id: usize,
-    route: Rc<dyn DynRoute>,
-    routing_state: Rc<RoutingState>,
+    generation: Rc<RouteGeneration>,
+    _builder: GenerationBuilder,
     proxies: ProxySet,
     thread_mode: ThreadMode,
     frontend_metrics: Arc<FrontendMetricsShard>,
@@ -24,15 +23,14 @@ pub(crate) struct ProxyRuntime {
     sweep_task: Option<JoinHandle<()>>,
     route_tasks: JoinSet<()>,
     connection_tasks: JoinSet<()>,
-    _destination_map: Rc<destination::Map>,
 }
 
 impl ProxyRuntime {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         proxy_id: usize,
-        route: Rc<dyn DynRoute>,
-        routing_state: Rc<RoutingState>,
+        generation: Rc<RouteGeneration>,
+        builder: GenerationBuilder,
         proxies: ProxySet,
         thread_mode: ThreadMode,
         frontend_metrics: Arc<FrontendMetricsShard>,
@@ -41,12 +39,11 @@ impl ProxyRuntime {
         work_rx: Receiver<TcpStream>,
         listener_task: Option<JoinHandle<anyhow::Result<()>>>,
         sweep_task: Option<JoinHandle<()>>,
-        destination_map: Rc<destination::Map>,
     ) -> Self {
         Self {
             proxy_id,
-            route,
-            routing_state,
+            generation,
+            _builder: builder,
             proxies,
             thread_mode,
             frontend_metrics,
@@ -57,7 +54,6 @@ impl ProxyRuntime {
             sweep_task,
             route_tasks: JoinSet::new(),
             connection_tasks: JoinSet::new(),
-            _destination_map: destination_map,
         }
     }
 
@@ -107,8 +103,8 @@ impl ProxyRuntime {
     }
 
     fn spawn_request(&mut self, request: ProxyRequest) {
-        let route = Rc::clone(&self.route);
-        let state = Rc::clone(&self.routing_state);
+        let route = Rc::clone(&self.generation.route);
+        let state = Rc::clone(&self.generation.state);
         self.route_tasks.spawn_local(async move {
             let reply = route_request(route, state, request.request).await;
             let _ = request.reply_tx.send(reply);
@@ -121,8 +117,8 @@ impl ProxyRuntime {
         let connection = Connection::new(
             stream,
             self.proxy_id,
-            Rc::clone(&self.route),
-            Rc::clone(&self.routing_state),
+            Rc::clone(&self.generation.route),
+            Rc::clone(&self.generation.state),
             self.proxies.clone(),
             self.thread_mode,
             Arc::clone(&self.frontend_metrics),
@@ -169,18 +165,23 @@ async fn wait_for_sweep(task: &mut Option<JoinHandle<()>>) -> anyhow::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
+    use std::time::Duration;
+
+    use rusty_mcrouter_backend::destination::{
+        self, DestinationConfig, DestinationMetricsRegistry,
+    };
     use rusty_mcrouter_backend::metrics::BackendMetricsShard;
+    use rusty_mcrouter_backend::test_support::run_local;
     use rusty_mcrouter_backend::tko::TkoTrackerMap;
     use rusty_mcrouter_config::parse;
-    use rusty_mcrouter_core::{NullRoute, Route, RoutingMetricsShard};
+    use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsShard};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss};
 
     use super::*;
     use crate::{ProxyHandle, ProxyInbox};
 
-    fn test_runtime() -> (ProxyRuntime, ProxyHandle) {
+    fn test_runtime(config: &str) -> (ProxyRuntime, ProxyHandle) {
         let (handle, inbox) = ProxyHandle::allocate(0);
         let ProxyInbox {
             work_rx,
@@ -188,18 +189,27 @@ mod tests {
             command_rx,
         } = inbox;
         let proxies = ProxySet::new(vec![handle.clone()]);
-        let tko = TkoTrackerMap::new(noop_sink());
         let map = destination::Map::new(
-            tko,
+            TkoTrackerMap::new(noop_sink()),
             BackendMetricsShard::new(),
             DestinationMetricsRegistry::new(),
         );
-        let config = parse(r#"{"route": "NullRoute"}"#).unwrap();
-        let state = RoutingState::new(RoutingMetricsShard::new(), Rc::new(noop_sink()), &config);
+        let defaults = DestinationConfig {
+            reply_timeout: Duration::from_millis(100),
+            ..DestinationConfig::default()
+        };
+        let builder = GenerationBuilder::new(
+            map,
+            defaults,
+            RootRouteOptions::default(),
+            RoutingMetricsShard::new(),
+            noop_sink(),
+        );
+        let initial = builder.build(&parse(config).unwrap()).unwrap();
         let runtime = ProxyRuntime::new(
             0,
-            NullRoute.into_dyn(),
-            state,
+            initial,
+            builder,
             proxies,
             ThreadMode::SameThread,
             FrontendMetricsShard::new(),
@@ -208,22 +218,20 @@ mod tests {
             work_rx,
             None,
             None,
-            map,
         );
         (runtime, handle)
     }
 
     #[tokio::test]
     async fn routes_requests_and_acknowledges_shutdown() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (runtime, handle) = test_runtime();
-                let task = tokio::task::spawn_local(runtime.run());
+        run_local(async {
+            let (runtime, handle) = test_runtime(r#"{"route": "NullRoute"}"#);
+            let task = tokio::task::spawn_local(runtime.run());
 
-                assert_eq!(handle.send_request(get(b"key")).await, get_miss());
-                handle.shutdown().await.unwrap();
-                task.await.unwrap().unwrap();
-            })
-            .await;
+            assert_eq!(handle.send_request(get(b"key")).await, get_miss());
+            handle.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+        })
+        .await;
     }
 }

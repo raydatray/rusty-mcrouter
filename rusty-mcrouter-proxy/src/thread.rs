@@ -1,9 +1,9 @@
-use std::{net::SocketAddr, rc::Rc, sync::mpsc::SyncSender, sync::Arc};
+use std::{net::SocketAddr, sync::mpsc::SyncSender, sync::Arc};
 
-use rusty_mcrouter_backend::{destination, DestinationFactory};
-use rusty_mcrouter_core::{build_route_with_options, RoutingState};
+use rusty_mcrouter_backend::destination;
 use tokio::{runtime::Builder, task::LocalSet};
 
+use crate::generation::GenerationBuilder;
 use crate::runtime::ProxyRuntime;
 use crate::{
     ListenerConfig, ProxyInbox, ProxyShards, ProxyThreadConfig, Server, WorkerEvent,
@@ -82,16 +82,15 @@ pub fn proxy_thread_main(
             Arc::clone(&shared.destinations),
         );
         let sweep_task = dest_map.spawn_idle_sweep(shared.sweep_interval);
-        let factory = DestinationFactory::new(Rc::clone(&dest_map));
-        let routing_state =
-            RoutingState::new(routing_metrics, Rc::new(routing_events), &shared.config);
-        let route = match build_route_with_options(
-            &shared.config,
-            &factory,
-            &shared.defaults,
-            &shared.root_route_options,
-        ) {
-            Ok(r) => r,
+        let builder = GenerationBuilder::new(
+            dest_map,
+            shared.defaults.clone(),
+            shared.root_route_options.clone(),
+            routing_metrics,
+            routing_events,
+        );
+        let generation = match builder.build(&shared.config) {
+            Ok(initial) => initial,
             Err(e) => {
                 let _ = ready_tx.send(Err(anyhow::anyhow!("build_route failed: {e}")));
                 anyhow::bail!("build_route failed: {e}");
@@ -117,8 +116,8 @@ pub fn proxy_thread_main(
 
         let runtime = ProxyRuntime::new(
             proxy_id,
-            route,
-            routing_state,
+            generation,
+            builder,
             proxies,
             shared.thread_mode,
             frontend_metrics,
@@ -127,7 +126,6 @@ pub fn proxy_thread_main(
             work_rx,
             listener_task,
             sweep_task,
-            dest_map,
         );
         let result = runtime.run().await;
 
