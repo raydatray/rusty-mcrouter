@@ -6,5 +6,7 @@ pub mod metrics;
 pub mod sources;
 
 pub use crate::bus::{channel, EventConsumer, EventSender};
-pub use crate::metrics::{ControlMetrics, MetricsRegistry, MetricsSource};
+pub use crate::metrics::{
+    ConfigMetrics, ControlMetrics, MetricsRegistry, MetricsSource, ReloadStage,
+};
 pub use crate::sources::ScrapeInputs;

@@ -147,7 +147,12 @@ upstream anchors: `mcrouter/routes/FailoverRoute.h:193-286,337-361`,
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| config_age, config_last_attempt, config_last_success, config_failures, configs_from_disk, config_full_attempt | defer | port with hot reload; mapping planned in design 0002 §observability |
+| config_last_success | port | gauge `rusty_mcrouter_config_last_success_timestamp_seconds` (design 0002) |
+| config_age | promql | `time() - rusty_mcrouter_config_last_success_timestamp_seconds` |
+| config_full_attempt | port | counter `rusty_mcrouter_config_reload_attempts_total`; reloads only, startup is generation 1 |
+| config_last_attempt | fold | into `rusty_mcrouter_config_reload_attempts_total` |
+| config_failures | port | counter `rusty_mcrouter_config_reload_failures_total{stage}`, stage = read/parse/validate/apply |
+| configs_from_disk | n/a | no backup-config mechanism (design 0002 non-goal) |
 | config_age_sr, config_last_sr_update | n/a | servicerouter |
 
 ## asynclog / distribution / axon / acl / misc
