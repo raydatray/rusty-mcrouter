@@ -597,6 +597,16 @@ rate(rusty_mcrouter_pool_completed_requests_total[5m])
 | `rusty_mcrouter_proxies` | gauge | — |
 | `rusty_mcrouter_events_dropped_total` | counter | — the bus watching itself |
 
+**config (design 0002, `ConfigMetrics`)**
+
+| metric | type | labels |
+|--------|------|--------|
+| `rusty_mcrouter_config_generation` | gauge | — 1 at startup, +1 per applied reload |
+| `rusty_mcrouter_config_reload_attempts_total` | counter | — |
+| `rusty_mcrouter_config_reload_failures_total` | counter | `stage` (read/parse/validate/apply) |
+| `rusty_mcrouter_config_last_reload_successful` | gauge | — 1 when the file on disk is what is running |
+| `rusty_mcrouter_config_last_success_timestamp_seconds` | gauge | — |
+
 boundaries that keep this list honest:
 
 - per-destination families are exported by default — realistic configs

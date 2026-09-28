@@ -1,11 +1,75 @@
 use std::fmt::Write;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusty_mcrouter_observability_primitives::Counter;
+use rusty_mcrouter_observability_primitives::{Counter, Gauge};
 
 #[derive(Default)]
 pub struct ControlMetrics {
     pub events_dropped: Counter,
     pub http_rejected: Counter,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ReloadStage {
+    Read = 0,
+    Parse,
+    Validate,
+    Apply,
+}
+
+impl ReloadStage {
+    pub const COUNT: usize = 4;
+    pub const ALL: [Self; Self::COUNT] = [Self::Read, Self::Parse, Self::Validate, Self::Apply];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Parse => "parse",
+            Self::Validate => "validate",
+            Self::Apply => "apply",
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct ConfigMetrics {
+    pub generation: Gauge,
+    pub reload_attempts: Counter,
+    pub reload_failures: [Counter; ReloadStage::COUNT],
+    /// 1 when the config file on disk is the one running.
+    pub last_reload_successful: Gauge,
+    pub last_success_unix_secs: Gauge,
+}
+
+impl ConfigMetrics {
+    pub fn started() -> Arc<Self> {
+        let metrics = Self::default();
+        metrics.applied(1);
+        Arc::new(metrics)
+    }
+
+    pub fn applied(&self, generation: u64) {
+        self.generation.set(generation as i64);
+        self.last_success_unix_secs.set(unix_now_secs());
+        self.in_sync();
+    }
+
+    pub fn in_sync(&self) {
+        self.last_reload_successful.set(1);
+    }
+
+    pub fn rejected(&self, stage: ReloadStage) {
+        self.reload_failures[stage as usize].inc();
+        self.last_reload_successful.set(0);
+    }
+}
+
+fn unix_now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
 pub trait MetricsSource: Send + Sync {

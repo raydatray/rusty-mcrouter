@@ -4,7 +4,7 @@ mod proxy;
 
 use rusty_mcrouter_backend::{destination::DestinationMetricsRegistry, tko::TkoTrackerMap};
 use rusty_mcrouter_config::parse_file;
-use rusty_mcrouter_observability::{channel, logging, ControlMetrics, ScrapeInputs};
+use rusty_mcrouter_observability::{channel, logging, ConfigMetrics, ControlMetrics, ScrapeInputs};
 use rusty_mcrouter_proxy::{ProxyShared, ThreadMode};
 
 use crate::args::Args;
@@ -52,6 +52,7 @@ fn main() -> anyhow::Result<()> {
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
         control: Arc::clone(&control_metrics),
+        config: ConfigMetrics::started(),
     }
     .into_registry();
 
