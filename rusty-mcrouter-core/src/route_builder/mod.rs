@@ -22,6 +22,9 @@ use crate::{
     selectors::{Ch3, Crc32, Salted, Selector},
 };
 
+mod validate;
+pub use validate::validate;
+
 #[derive(Debug, Error)]
 pub enum BuildError {
     #[error("invalid default route: {prefix}")]

@@ -11,7 +11,7 @@ pub use crate::events::{RoutingEvent, RoutingEventRecord, RoutingEventSink};
 pub use crate::metrics::{
     FailoverErrorClass, FailoverPolicyKind, PoolMetrics, PoolMetricsTable, RoutingMetricsShard,
 };
-pub use crate::route_builder::{build_route, build_route_with_options, BuildError};
+pub use crate::route_builder::{build_route, build_route_with_options, validate, BuildError};
 pub use crate::routes::{
     DestinationRoute, DynRoute, ErrorRoute, FailoverRoute, NullRoute, PoolRoute, RootRoute,
     RootRouteOptions, Route, RouteError, RouteFuture,
