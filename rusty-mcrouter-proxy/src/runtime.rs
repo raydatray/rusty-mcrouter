@@ -1,6 +1,8 @@
 use std::{net::TcpStream, rc::Rc, sync::Arc};
 
 use anyhow::Context;
+use rusty_mcrouter_config::ConfigDocument;
+use rusty_mcrouter_core::BuildError;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -12,7 +14,7 @@ use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, ThreadMo
 pub(crate) struct ProxyRuntime {
     proxy_id: usize,
     generation: Rc<RouteGeneration>,
-    _builder: GenerationBuilder,
+    builder: GenerationBuilder,
     proxies: ProxySet,
     thread_mode: ThreadMode,
     frontend_metrics: Arc<FrontendMetricsShard>,
@@ -43,7 +45,7 @@ impl ProxyRuntime {
         Self {
             proxy_id,
             generation,
-            _builder: builder,
+            builder,
             proxies,
             thread_mode,
             frontend_metrics,
@@ -68,6 +70,9 @@ impl ProxyRuntime {
                             self.shutdown().await;
                             let _ = acknowledged.send(());
                             return Ok(());
+                        }
+                        Some(ProxyCommand::Reconfigure { generation, config, applied }) => {
+                            let _ = applied.send(self.reconfigure(generation, &config));
                         }
                         None => anyhow::bail!("proxy command channel closed"),
                     }
@@ -100,6 +105,16 @@ impl ProxyRuntime {
                 }
             }
         }
+    }
+
+    fn reconfigure(&mut self, generation: u64, config: &ConfigDocument) -> Result<(), BuildError> {
+        debug_assert!(
+            generation > self.generation.generation,
+            "generations only move forward"
+        );
+        let next = self.builder.build(generation, config)?;
+        self.generation = next;
+        Ok(())
     }
 
     fn spawn_request(&mut self, request: ProxyRequest) {
@@ -171,12 +186,12 @@ mod tests {
         self, DestinationConfig, DestinationMetricsRegistry,
     };
     use rusty_mcrouter_backend::metrics::BackendMetricsShard;
-    use rusty_mcrouter_backend::test_support::run_local;
+    use rusty_mcrouter_backend::test_support::{run_local, scripted_backend_serial, Step};
     use rusty_mcrouter_backend::tko::TkoTrackerMap;
     use rusty_mcrouter_config::parse;
     use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsShard};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
-    use rusty_mcrouter_protocol::test_support::{get, get_miss};
+    use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
 
     use super::*;
     use crate::{ProxyHandle, ProxyInbox};
@@ -205,7 +220,7 @@ mod tests {
             RoutingMetricsShard::new(),
             noop_sink(),
         );
-        let initial = builder.build(&parse(config).unwrap()).unwrap();
+        let initial = builder.build(1, &parse(config).unwrap()).unwrap();
         let runtime = ProxyRuntime::new(
             0,
             initial,
@@ -222,6 +237,20 @@ mod tests {
         (runtime, handle)
     }
 
+    async fn reconfigure(
+        handle: &ProxyHandle,
+        generation: u64,
+        config: &str,
+    ) -> Result<(), BuildError> {
+        let config = Arc::new(parse(config).unwrap());
+        handle
+            .begin_reconfigure(generation, config)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn routes_requests_and_acknowledges_shutdown() {
         run_local(async {
@@ -229,6 +258,77 @@ mod tests {
             let task = tokio::task::spawn_local(runtime.run());
 
             assert_eq!(handle.send_request(get(b"key")).await, get_miss());
+            handle.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reconfigure_swaps_the_graph_before_acknowledging() {
+        run_local(async {
+            let (runtime, handle) = test_runtime(r#"{"route": "NullRoute"}"#);
+            let task = tokio::task::spawn_local(runtime.run());
+            assert_eq!(handle.send_request(get(b"key")).await, get_miss());
+
+            reconfigure(&handle, 2, r#"{"route": "ErrorRoute|two"}"#)
+                .await
+                .unwrap();
+            assert_eq!(handle.send_request(get(b"key")).await, server_error(b"two"));
+
+            handle.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn failed_reconfigure_keeps_the_current_generation() {
+        run_local(async {
+            let (runtime, handle) = test_runtime(r#"{"route": "NullRoute"}"#);
+            let task = tokio::task::spawn_local(runtime.run());
+
+            // plural routes without the default /././ prefix cannot build
+            let error = reconfigure(&handle, 2, r#"{"routes": {"/a/b/": "NullRoute"}}"#)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, BuildError::DefaultRouteMissing { .. }));
+            assert_eq!(handle.send_request(get(b"key")).await, get_miss());
+
+            handle.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn request_in_flight_across_a_swap_finishes_on_the_old_graph() {
+        run_local(async {
+            let server =
+                scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Hang]]).await;
+            let (runtime, handle) = test_runtime(&format!(
+                r#"{{"pools": {{"p": {{"servers": ["{}"]}}}}, "route": "PoolRoute|p"}}"#,
+                server.addr
+            ));
+            let task = tokio::task::spawn_local(runtime.run());
+
+            let in_flight = tokio::task::spawn_local({
+                let handle = handle.clone();
+                async move { handle.send_request(get(b"key")).await }
+            });
+            while server.accept_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+
+            reconfigure(&handle, 2, r#"{"route": "ErrorRoute|two"}"#)
+                .await
+                .unwrap();
+            assert_eq!(handle.send_request(get(b"key")).await, server_error(b"two"));
+            assert_eq!(
+                in_flight.await.unwrap(),
+                server_error(b"backend unavailable")
+            );
+
             handle.shutdown().await.unwrap();
             task.await.unwrap().unwrap();
         })
