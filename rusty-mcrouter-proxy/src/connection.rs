@@ -14,6 +14,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
 };
 
+use crate::generation::RouteSlot;
 use crate::routing::complete_route;
 use crate::{FrontendError, FrontendMetricsShard, ProxyHandle, ProxySet, ThreadMode};
 
@@ -28,10 +29,9 @@ const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
 pub struct Connection {
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
-    // routing context (set at creation time)
+    // routing context
     current_id: usize,
-    local_route: Rc<dyn DynRoute>,
-    routing_state: Rc<RoutingState>,
+    routes: Rc<RouteSlot>,
     proxies: ProxySet,
     mode: ThreadMode,
     // pipeline state
@@ -69,11 +69,10 @@ enum SlotOutcome {
 }
 
 impl Connection {
-    pub fn new(
+    pub(crate) fn new(
         stream: tokio::net::TcpStream,
         current_id: usize,
-        local_route: Rc<dyn DynRoute>,
-        routing_state: Rc<RoutingState>,
+        routes: Rc<RouteSlot>,
         proxies: ProxySet,
         mode: ThreadMode,
         metrics: Arc<FrontendMetricsShard>,
@@ -85,8 +84,7 @@ impl Connection {
             reader,
             writer,
             current_id,
-            local_route,
-            routing_state,
+            routes,
             proxies,
             mode,
             buf: BytesMut::with_capacity(READ_BUF_INITIAL_CAPACITY),
@@ -210,9 +208,10 @@ impl Connection {
     fn route_target(&self, request: &Request) -> RouteTarget {
         let handle = self.proxies.choose(self.mode, self.current_id, request);
         if handle.id() == self.current_id {
+            let generation = self.routes.current();
             RouteTarget::Local {
-                route: Rc::clone(&self.local_route),
-                routing_state: Rc::clone(&self.routing_state),
+                route: Rc::clone(&generation.route),
+                routing_state: Rc::clone(&generation.state),
             }
         } else {
             RouteTarget::Remote { handle }
@@ -333,43 +332,50 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+    use crate::generation::RouteGeneration;
 
-    /// a real Connection over a localhost socket pair, with a SameThread
-    /// route into a mock backend. the proxy handle channel is never used
-    /// (SameThread routes inline) but ProxySet demands one.
-    async fn session(
-        metrics: Arc<FrontendMetricsShard>,
-    ) -> (
-        tokio::net::TcpStream,
-        tokio::task::JoinHandle<()>,
-        Rc<RoutingState>,
-        PoolId,
-    ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (server_stream, _) = listener.accept().await.unwrap();
-
-        let config =
-            parse(r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#)
-                .unwrap();
-        let pool = config.pool_id("pool").unwrap();
-        let routing_state =
-            RoutingState::new(RoutingMetricsShard::new(), Rc::new(noop_sink()), &config);
+    fn generation(generation: u64, config: &str) -> Rc<RouteGeneration> {
+        let config = parse(config).unwrap();
         let route = build_route(
             &config,
             &MockBackendFactory::new(),
             &destination::DestinationConfig::default(),
         )
         .unwrap();
+        let state = RoutingState::new(RoutingMetricsShard::new(), Rc::new(noop_sink()), &config);
+        Rc::new(RouteGeneration {
+            generation,
+            route,
+            state,
+        })
+    }
+
+    const POOL_CONFIG: &str =
+        r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#;
+
+    fn pool_id() -> PoolId {
+        parse(POOL_CONFIG).unwrap().pool_id("pool").unwrap()
+    }
+
+    /// a real Connection over a localhost socket pair, with a SameThread
+    /// route into a mock backend. the proxy handle channel is never used
+    /// (SameThread routes inline) but ProxySet demands one.
+    async fn session(
+        metrics: Arc<FrontendMetricsShard>,
+        routes: Rc<RouteSlot>,
+    ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+
         let (handle, _inbox) = ProxyHandle::allocate(0);
         let proxies = ProxySet::new(vec![handle]);
 
         let conn = Connection::new(
             server_stream,
             0,
-            route,
-            Rc::clone(&routing_state),
+            routes,
             proxies,
             ThreadMode::SameThread,
             metrics,
@@ -377,7 +383,7 @@ mod tests {
         let task = tokio::task::spawn_local(async move {
             let _ = conn.run().await;
         });
-        (client, task, routing_state, pool)
+        (client, task)
     }
 
     async fn read_lines(client: &mut tokio::net::TcpStream, n: usize) -> Vec<String> {
@@ -401,7 +407,10 @@ mod tests {
     async fn frontend_metrics_account_a_pipelined_session() {
         run_local(async {
             let metrics = FrontendMetricsShard::new();
-            let (mut client, task, routing, pool) = session(Arc::clone(&metrics)).await;
+            let routes = RouteSlot::new(generation(1, POOL_CONFIG));
+            let routing = Rc::clone(&routes.current().state);
+            let pool = pool_id();
+            let (mut client, task) = session(Arc::clone(&metrics), routes).await;
 
             client
                 .write_all(b"mg foo v\r\nmn\r\nnot_a_command\r\n")
@@ -436,6 +445,26 @@ mod tests {
             drop(client);
             task.await.unwrap();
             assert_eq!(metrics.processing.load(), 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn existing_connection_uses_the_new_generation_on_its_next_request() {
+        run_local(async {
+            let routes = RouteSlot::new(generation(1, r#"{"route": "NullRoute"}"#));
+            let (mut client, _task) =
+                session(FrontendMetricsShard::new(), Rc::clone(&routes)).await;
+
+            client.write_all(b"mg foo v\r\n").await.unwrap();
+            assert_eq!(read_lines(&mut client, 1).await, ["EN"]);
+
+            let previous = routes.replace(generation(2, r#"{"route": "ErrorRoute|two"}"#));
+            assert_eq!(previous.generation, 1);
+            drop(previous);
+
+            client.write_all(b"mg foo v\r\n").await.unwrap();
+            assert_eq!(read_lines(&mut client, 1).await, ["SERVER_ERROR two"]);
         })
         .await;
     }
