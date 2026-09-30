@@ -34,9 +34,9 @@ scrape endpoint, per our OSS-alternatives philosophy.
 | process + exposition metadata | deferred |
 | remaining event domains | partial |
 
-config is currently loaded once at startup. hot reload is planned in
-design 0002. its lifecycle is control-plane work, so per §scope below it logs
-directly and exports metrics, rather than emitting bus events.
+config hot reload is implemented by design 0002. its lifecycle is
+control-plane work, so per §scope below it logs directly and exports the
+config metrics below, rather than emitting bus events.
 
 ## route-graph slice contract
 
@@ -701,5 +701,6 @@ healthy and failover metrics.
 - stock `process_*` collection remains deferred.
 - additional frontend/backend event families should be added only for
   rare transitions with a concrete operational consumer.
-- config reload commands, an admin HTTP API and graceful request draining are
-  deferred; the current control command surface contains shutdown only.
+- an admin HTTP API (including an explicit reload trigger) and graceful
+  request draining are deferred. config reload is file-driven (design 0002);
+  the control command surface contains shutdown only.

@@ -46,6 +46,11 @@ flowchart LR
 
 ## runtime ownership
 
+[`config.rs`](../../rusty-mcrouter/src/config.rs) owns file loading and byte
+parsing, shared by startup and the reloader.
+[`reload.rs`](../../rusty-mcrouter/src/reload.rs) owns watching for changes and
+applying them to running proxies.
+
 ```mermaid
 flowchart TB
     M[main process supervisor]
@@ -57,6 +62,7 @@ flowchart TB
     CT --> CR[ControlRuntime]
     CR --> EC[EventConsumer]
     CR --> MH[MetricsHttp]
+    CR --> RL[ConfigReloader]
 ```
 
 `Handle` means a cloneable mailbox. `Thread` means unique OS-thread ownership
@@ -71,8 +77,10 @@ thread's current-thread Tokio runtime.
 | event sender | best effort; bounded queue may shed |
 
 `ProxyRuntime` owns routed-request tasks, client connections, listener and
-destination-sweep tasks. `ControlRuntime` owns event presentation, the metrics
-listener and at most 32 concurrent metrics connection tasks. No OS thread or
+destination-sweep tasks, and the current route graph generation.
+`ControlRuntime` owns event presentation, the metrics listener, at most 32
+concurrent metrics connection tasks, and the config reloader, which sends new
+configs to proxies over their command channels. No OS thread or
 long-lived runtime task is intentionally detached. Wildcard routing is the
 exception for short-lived work: non-primary fanout targets run in detached
 local tasks and may be cancelled when their proxy thread stops.
@@ -122,7 +130,8 @@ three consequences of this design are:
 3. **clients see strict request order** - primary replies may complete out of order, but the frontend reserializes thru sequence-numbered slots before writing. wildcard secondaries have no client reply slot; their replies are discarded
 
 see [routing prefixes](routing-prefixes.md) for exact routing, key-prefix
-policies, fallback and wildcard fanout behavior.
+policies, fallback and wildcard fanout behavior, and
+[config reload](config-reload.md) for how config changes reach running proxies.
 
 ## divergences from mcrouter
 
