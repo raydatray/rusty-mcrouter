@@ -1,5 +1,15 @@
 [workspace]
-members = ["rusty-mcrouter", "rusty-mcrouter-config", "rusty-mcrouter-core", "rusty-mcrouter-observability", "rusty-mcrouter-observability-primitives", "rusty-mcrouter-backend", "rusty-mcrouter-protocol", "rusty-mcrouter-proxy"]
+members = [
+    "bin/rusty-mcrouter",
+    "crates/backend",
+    "crates/config",
+    "crates/core",
+    "crates/observability",
+    "crates/observability-primitives",
+    "crates/protocol",
+    "crates/proxy",
+]
+exclude = ["bench"]
 resolver = "2"
 
 [workspace.package]
@@ -18,6 +28,13 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 json_comments = "0.2"
 memchr = "2.7"
+rusty-mcrouter-backend = { path = "crates/backend" }
+rusty-mcrouter-config = { path = "crates/config" }
+rusty-mcrouter-core = { path = "crates/core" }
+rusty-mcrouter-observability = { path = "crates/observability" }
+rusty-mcrouter-observability-primitives = { path = "crates/observability-primitives" }
+rusty-mcrouter-protocol = { path = "crates/protocol" }
+rusty-mcrouter-proxy = { path = "crates/proxy" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"

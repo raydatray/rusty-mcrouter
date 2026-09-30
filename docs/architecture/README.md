@@ -2,17 +2,22 @@
 rusty-mcrouter is a memcached routing proxy. clients reach it via the **meta protocol**, and rusty-mcrouter routes each request thru a tree of route handles to a destination server, tracking server health and failing over along the way
 
 ## crates
-there are eight crates. dependencies point from lower-level primitives and fact owners toward
+the root Cargo workspace has eight packages: the executable in `bin/rusty-mcrouter/`
+and seven libraries in `crates/`. internal dependency paths are declared in the
+root manifest and inherited by each package. `bench/` is a separate workspace
+with its own lockfile and pinned load-generator dependencies.
+
+dependencies point from lower-level primitives and fact owners toward
 composition and presentation (`A --> B` means B depends on A):
 
-- **`rusty-mcrouter-protocol`** - the meta protocol codec, request and reply types, the encoders and decoders for both requests and replies and key parsing
-- **`rusty-mcrouter-config`** - config file parsing into pools, routes and policies
-- **`rusty-mcrouter-observability-primitives`** - std-only metric cells and event sink mechanics shared by fact-owning crates; no domain records or presentation logic
-- **`rusty-mcrouter-backend`** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
-- **`rusty-mcrouter-core`** - the routing graph, where a config file is transformed into a tree of route handles
-- **`rusty-mcrouter-proxy`** - the client-facing leg and orchestration: proxy runtimes, frontend protocol handling, connections and cross-thread dispatch
-- **`rusty-mcrouter-observability`** - event and metric components, Hyper-based `/metrics` handling and presentation
-- **`rusty-mcrouter`** - the binary composition layer: cli, process supervision and the control runtime
+- **[`rusty-mcrouter-protocol`](../../crates/protocol/)** - the meta protocol codec, request and reply types, the encoders and decoders for both requests and replies and key parsing
+- **[`rusty-mcrouter-config`](../../crates/config/)** - config file parsing into pools, routes and policies
+- **[`rusty-mcrouter-observability-primitives`](../../crates/observability-primitives/)** - std-only metric cells and event sink mechanics shared by fact-owning crates; no domain records or presentation logic
+- **[`rusty-mcrouter-backend`](../../crates/backend/)** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
+- **[`rusty-mcrouter-core`](../../crates/core/)** - the routing graph, where a config file is transformed into a tree of route handles
+- **[`rusty-mcrouter-proxy`](../../crates/proxy/)** - the client-facing leg and orchestration: proxy runtimes, frontend protocol handling, connections and cross-thread dispatch
+- **[`rusty-mcrouter-observability`](../../crates/observability/)** - event and metric components, Hyper-based `/metrics` handling and presentation
+- **[`rusty-mcrouter`](../../bin/rusty-mcrouter/)** - the binary composition layer: cli, process supervision and the control runtime
 
 ```mermaid
 flowchart LR
@@ -46,9 +51,9 @@ flowchart LR
 
 ## runtime ownership
 
-[`config.rs`](../../rusty-mcrouter/src/config.rs) owns file loading and byte
+[`config.rs`](../../bin/rusty-mcrouter/src/config.rs) owns file loading and byte
 parsing, shared by startup and the reloader.
-[`reload.rs`](../../rusty-mcrouter/src/reload.rs) owns watching for changes and
+[`reload.rs`](../../bin/rusty-mcrouter/src/reload.rs) owns watching for changes and
 applying them to running proxies.
 
 ```mermaid
