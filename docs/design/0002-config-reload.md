@@ -8,7 +8,7 @@ architecture: ../architecture/config-reload.md
 
 # 0002: hot config reload
 
-today the config file is read once in `main` (`bin/rusty-mcrouter/src/main.rs:28`)
+today the config file is read once at startup (`bin/rusty-mcrouter/src/app.rs`)
 and every proxy thread builds its route graph once
 (`crates/proxy/src/thread.rs:79-99`). this design adds hot reload:
 when the config file changes, validate it, then move every proxy to the new
@@ -70,7 +70,7 @@ structures are keyed by `PoolId`:
 |---|---|---|
 | pool TKO gates: `TkoTrackerMap::pool_tracker_for(id, ...)` (`crates/backend/src/backend.rs:111-112`, `tko/map.rs:52-70`) | `PoolId` | the new pool N dedups to the old pool N's gate. that is someone else's fail-open state; in debug builds it trips `debug_assert_eq!(existing.name(), pool_name)` (`tko/map.rs:60`) |
 | per-thread gate cache: `DestinationFactory.pool_gates` (`backend.rs:92`, `:105-115`), one factory per thread (`thread.rs:85`) | `PoolId` | same mix-up as the gates, and it holds every gate it has ever seen alive for the life of the thread, so a removed pool's gate never dies |
-| pool metrics: `RoutingMetricsShard::pool(id)` (`crates/core/src/metrics.rs:122-160`), built once from one layout (`bin/rusty-mcrouter/src/proxy.rs:82-89`) | `PoolId` index into a fixed `Vec` | a new layout means new shards. counters reset (breaking 0001's "never zeroed by us") and `RoutingSource` assumes all shards share one layout (`crates/observability/src/sources.rs:188-197`) |
+| pool metrics: `RoutingMetricsShard::pool(id)` (`crates/core/src/metrics.rs:122-160`), built once from one layout (`bin/rusty-mcrouter/src/proxy_fleet.rs:82-89`) | `PoolId` index into a fixed `Vec` | a new layout means new shards. counters reset (breaking 0001's "never zeroed by us") and `RoutingSource` assumes all shards share one layout (`crates/observability/src/sources.rs:188-197`) |
 | request attribution: `RouteContext.selected_pool: Cell<Option<PoolId>>` (`crates/core/src/context.rs:18-20`, `:55-59`) | `PoolId` | only safe if the index is resolved against the table of the context's own generation |
 
 the rule this design adopts: **`PoolId` never outlives the generation that
@@ -350,7 +350,7 @@ each slice leaves the tree green; reload is not reachable until slice 6.
 | dry-run validation | `crates/core/src/route_builder/validate.rs` |
 | generations, slot, builder | `crates/proxy/src/generation.rs`, `runtime.rs`, `connection.rs` |
 | config metrics | `crates/observability/src/metrics.rs`, `sources.rs` |
-| reloader | `bin/rusty-mcrouter/src/reload.rs`, wired in `control.rs` and `main.rs` |
+| reloader | `bin/rusty-mcrouter/src/reload.rs`, wired in `control.rs` and `app.rs` |
 
 the end-to-end contract is guarded by
 `config_reload_moves_existing_connections_and_rejects_bad_configs` and
