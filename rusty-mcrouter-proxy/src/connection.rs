@@ -1,8 +1,6 @@
-use std::sync::Arc;
-use std::{collections::BTreeMap, rc::Rc};
+use std::collections::BTreeMap;
 
 use bytes::{Bytes, BytesMut};
-use rusty_mcrouter_core::{DynRoute, RoutingState};
 use rusty_mcrouter_protocol::meta::{
     DecodedMetaCommand, MetaReplyEncoder, MetaReplyPlan, MetaRequestDecodeError, MetaRequestDecoder,
 };
@@ -14,9 +12,9 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
 };
 
-use crate::generation::RouteSlot;
-use crate::routing::complete_route;
-use crate::{FrontendError, FrontendMetricsShard, ProxyHandle, ProxySet, ThreadMode};
+use crate::context::ProxyContext;
+use crate::routing::dispatch;
+use crate::FrontendError;
 
 const READ_BUF_INITIAL_CAPACITY: usize = 4096;
 const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
@@ -26,14 +24,10 @@ const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
 /// - dispatch routable requests to a proxy (local inline or remote via the
 ///   proxy queue); answer `mn` and recoverable parse errors locally
 /// - encode replies against each slot's retained reply plan, in request order
-pub struct Connection {
+pub(crate) struct Connection {
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
-    // routing context
-    current_id: usize,
-    routes: Rc<RouteSlot>,
-    proxies: ProxySet,
-    mode: ThreadMode,
+    context: ProxyContext,
     // pipeline state
     buf: BytesMut,
     write_buf: BytesMut,
@@ -43,7 +37,6 @@ pub struct Connection {
     /// hop-local `MetaReplyPlan` (never routed, never crosses threads) and
     /// flips to `Ready` when its outcome exists.
     slots: BTreeMap<usize, Slot>,
-    metrics: Arc<FrontendMetricsShard>,
     next_seq: usize,
     next_write: usize,
     in_flight: usize,
@@ -69,30 +62,20 @@ enum SlotOutcome {
 }
 
 impl Connection {
-    pub(crate) fn new(
-        stream: tokio::net::TcpStream,
-        current_id: usize,
-        routes: Rc<RouteSlot>,
-        proxies: ProxySet,
-        mode: ThreadMode,
-        metrics: Arc<FrontendMetricsShard>,
-    ) -> Self {
+    pub(crate) fn new(stream: tokio::net::TcpStream, context: ProxyContext) -> Self {
         let (reader, writer) = stream.into_split();
         let (completed_tx, completed_rx) = mpsc::channel(COMPLETED_CHANNEL_CAPACITY);
+        context.metrics.client_connections.inc();
 
         Self {
             reader,
             writer,
-            current_id,
-            routes,
-            proxies,
-            mode,
+            context,
             buf: BytesMut::with_capacity(READ_BUF_INITIAL_CAPACITY),
             write_buf: BytesMut::new(),
             decoder: MetaRequestDecoder::new(),
             encoder: MetaReplyEncoder::new(),
             slots: BTreeMap::new(),
-            metrics,
             next_seq: 0,
             next_write: 0,
             in_flight: 0,
@@ -102,7 +85,7 @@ impl Connection {
         }
     }
 
-    pub async fn run(mut self) -> Result<(), FrontendError> {
+    pub(crate) async fn run(mut self) -> Result<(), FrontendError> {
         loop {
             if !self.input_closed {
                 self.drain_input();
@@ -150,8 +133,8 @@ impl Connection {
                     request,
                     reply_plan,
                 })) => {
-                    self.metrics.requests[request.kind() as usize].inc();
-                    self.metrics.processing.inc();
+                    self.context.metrics.requests[request.kind() as usize].inc();
+                    self.context.metrics.processing.inc();
                     let seq = self.take_seq();
                     self.slots.insert(
                         seq,
@@ -164,7 +147,7 @@ impl Connection {
                     self.submit_single(seq, request);
                 }
                 Ok(Some(DecodedMetaCommand::NoOp)) => {
-                    self.metrics.noops.inc();
+                    self.context.metrics.noops.inc();
                     let seq = self.take_seq();
                     self.slots.insert(seq, Slot::ready(SlotOutcome::NoOp));
                 }
@@ -172,7 +155,7 @@ impl Connection {
                 // one malformed command was consumed; its error joins the
                 // pipeline in order and decoding continues.
                 Err(MetaRequestDecodeError::Recoverable(error)) => {
-                    self.metrics.parse_errors.inc();
+                    self.context.metrics.parse_errors.inc();
                     let seq = self.take_seq();
                     self.slots
                         .insert(seq, Slot::ready(SlotOutcome::Reply(Reply::Error(error))));
@@ -195,35 +178,18 @@ impl Connection {
 
     fn complete(&mut self, seq: usize, reply: Reply) {
         self.in_flight = self.in_flight.saturating_sub(1);
-        self.metrics.processing.dec();
+        self.context.metrics.processing.dec();
         if let Some(slot) = self.slots.get_mut(&seq) {
             slot.state = SlotState::Ready(SlotOutcome::Reply(reply));
         }
     }
 
-    /// resolves `req`'s target
-    /// - which proxy handles it
-    /// - if its the same thread
-    /// - the local route
-    fn route_target(&self, request: &Request) -> RouteTarget {
-        let handle = self.proxies.choose(self.mode, self.current_id, request);
-        if handle.id() == self.current_id {
-            let generation = self.routes.current();
-            RouteTarget::Local {
-                route: Rc::clone(&generation.route),
-                routing_state: Rc::clone(&generation.state),
-            }
-        } else {
-            RouteTarget::Remote { handle }
-        }
-    }
-
     fn submit_single(&self, seq: usize, request: Request) {
-        let target = self.route_target(&request);
+        let target = self.context.target(&request);
         let completed_tx = self.completed_tx.clone();
 
         tokio::task::spawn_local(async move {
-            let reply = route_one(target, request).await;
+            let reply = dispatch(target, request).await;
 
             let _ = completed_tx.send((seq, reply)).await;
         });
@@ -248,7 +214,7 @@ impl Connection {
                 SlotOutcome::NoOp => self.encoder.encode_noop(&mut self.write_buf),
                 SlotOutcome::Reply(reply) => {
                     if matches!(reply, Reply::Error(_)) {
-                        self.metrics.failed.inc();
+                        self.context.metrics.failed.inc();
                     }
                     if self
                         .encoder
@@ -256,7 +222,7 @@ impl Connection {
                         .is_err()
                     {
                         if !matches!(reply, Reply::Error(_)) {
-                            self.metrics.failed.inc();
+                            self.context.metrics.failed.inc();
                         }
                         // the reply cannot satisfy this slot's plan (for
                         // example a backend omitted a projected field):
@@ -283,7 +249,9 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        self.metrics.processing.sub(self.in_flight as i64);
+        let metrics = &self.context.metrics;
+        metrics.processing.sub(self.in_flight as i64);
+        metrics.client_connections.dec();
     }
 }
 
@@ -296,43 +264,21 @@ impl Slot {
     }
 }
 
-enum RouteTarget {
-    Local {
-        route: Rc<dyn DynRoute>,
-        routing_state: Rc<RoutingState>,
-    },
-    Remote {
-        handle: ProxyHandle,
-    },
-}
-
-async fn route_one(target: RouteTarget, request: Request) -> Reply {
-    match target {
-        RouteTarget::Local {
-            route,
-            routing_state,
-        } => {
-            let context = routing_state.context();
-            let result = route.route_dyn(&context, request).await;
-            complete_route(context, result)
-        }
-        RouteTarget::Remote { handle } => handle.send_request(request).await,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use rusty_mcrouter_backend::destination;
     use rusty_mcrouter_backend::test_support::{run_local, MockBackendFactory};
     use rusty_mcrouter_config::{parse, PoolId};
-    use rusty_mcrouter_core::{build_route, RoutingMetricsShard};
+    use rusty_mcrouter_core::{build_route, RoutingMetricsShard, RoutingState};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::generation::RouteGeneration;
+    use crate::generation::{RouteGeneration, RouteSlot};
+    use crate::{FrontendMetricsShard, ProxyHandle};
 
     fn generation(generation: u64, config: &str) -> Rc<RouteGeneration> {
         let config = parse(config).unwrap();
@@ -370,16 +316,7 @@ mod tests {
         let (server_stream, _) = listener.accept().await.unwrap();
 
         let (handle, _inbox) = ProxyHandle::allocate(0);
-        let proxies = ProxySet::new(vec![handle]);
-
-        let conn = Connection::new(
-            server_stream,
-            0,
-            routes,
-            proxies,
-            ThreadMode::SameThread,
-            metrics,
-        );
+        let conn = Connection::new(server_stream, ProxyContext::solo(handle, routes, metrics));
         let task = tokio::task::spawn_local(async move {
             let _ = conn.run().await;
         });
@@ -437,14 +374,16 @@ mod tests {
                 "the CLIENT_ERROR is a client-visible error reply"
             );
             assert_eq!(metrics.processing.load(), 0);
+            assert_eq!(metrics.client_connections.load(), 1);
             assert_eq!(routing.pool(pool).requests.load(), 1);
             assert_eq!(routing.pool(pool).completed_requests.load(), 1);
             assert_eq!(routing.pool(pool).final_errors.load(), 0);
 
-            // client disconnect ends the session; the gauge must not leak
+            // client disconnect ends the session; the gauges must not leak
             drop(client);
             task.await.unwrap();
             assert_eq!(metrics.processing.load(), 0);
+            assert_eq!(metrics.client_connections.load(), 0);
         })
         .await;
     }

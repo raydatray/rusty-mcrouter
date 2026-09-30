@@ -192,7 +192,9 @@ sequenceDiagram
     forever (`connection.rs:33`, `:210-220`; `runtime.rs:118-129`). it would
     never see a reload.
   - it will hold `Rc<RouteSlot>` instead, and `route_target` will clone the
-    current `Rc<RouteGeneration>` per request.
+    current `Rc<RouteGeneration>` per request. (as built, the slot lives in
+    the per-thread `ProxyContext` each connection holds, and
+    `ProxyContext::target` does the per-request read.)
   - the borrow is taken only to clone and never across an `.await`; no
     locks, it is thread-local.
 - **pinning.** each request (and each detached wildcard secondary) holds its

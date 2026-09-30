@@ -3,11 +3,11 @@ use std::{net::SocketAddr, sync::mpsc::SyncSender, sync::Arc};
 use rusty_mcrouter_backend::destination;
 use tokio::{runtime::Builder, task::LocalSet};
 
+use crate::context::ProxyContext;
 use crate::generation::{GenerationBuilder, RouteSlot};
-use crate::runtime::ProxyRuntime;
+use crate::runtime::{BackgroundTasks, ProxyRuntime};
 use crate::{
-    ListenerConfig, ProxyInbox, ProxyShards, ProxyThreadConfig, Server, WorkerEvent,
-    WorkerEventRecord,
+    ListenerConfig, ProxyShards, ProxyThreadConfig, Server, WorkerEvent, WorkerEventRecord,
 };
 
 type ReadyEvent = anyhow::Result<Option<SocketAddr>>;
@@ -35,11 +35,6 @@ pub fn proxy_thread_main(
             routing_events,
             events,
         } = cfg;
-        let ProxyInbox {
-            work_rx,
-            request_rx,
-            command_rx,
-        } = inbox;
         let ProxyShards {
             backend: backend_metrics,
             frontend: frontend_metrics,
@@ -114,19 +109,18 @@ pub fn proxy_thread_main(
             })
         });
 
-        let runtime = ProxyRuntime::new(
+        let context = ProxyContext {
             proxy_id,
             routes,
-            builder,
             proxies,
-            shared.thread_mode,
-            frontend_metrics,
-            request_rx,
-            command_rx,
-            work_rx,
-            listener_task,
-            sweep_task,
-        );
+            thread_mode: shared.thread_mode,
+            metrics: frontend_metrics,
+        };
+        let tasks = BackgroundTasks {
+            listener: listener_task,
+            sweep: sweep_task,
+        };
+        let runtime = ProxyRuntime::new(context, builder, inbox, tasks);
         let result = runtime.run().await;
 
         events.emit(WorkerEventRecord {
