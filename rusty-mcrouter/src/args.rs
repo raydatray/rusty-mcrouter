@@ -19,6 +19,18 @@ pub(crate) struct Args {
     )]
     pub(crate) config: PathBuf,
 
+    // mcrouter: McrouterOptions::disable_reload_configs.
+    #[arg(long, help = "do not watch the config file for changes")]
+    pub(crate) disable_reload_configs: bool,
+
+    // mcrouter: McrouterOptions::reconfiguration_delay_ms.
+    #[arg(
+        long = "reconfiguration-delay-ms",
+        default_value_t = 1000,
+        help = "config file poll period, and the settle delay before applying a change, ms"
+    )]
+    reconfiguration_delay_ms: u64,
+
     // mcrouter supports address/port lists; rusty-mcrouter currently binds one endpoint.
     #[arg(
         long,
@@ -146,6 +158,10 @@ impl Args {
             self.num_proxies
         );
         anyhow::ensure!(self.server_timeout_ms > 0, "server_timeout_ms must be >= 1");
+        anyhow::ensure!(
+            self.reconfiguration_delay_ms > 0,
+            "reconfiguration_delay_ms must be >= 1"
+        );
         Ok(())
     }
 
@@ -180,6 +196,10 @@ impl Args {
 
     pub(crate) fn sweep_interval(&self) -> Duration {
         Duration::from_millis(self.reset_inactive_connection_interval)
+    }
+
+    pub(crate) fn reconfiguration_delay(&self) -> Duration {
+        Duration::from_millis(self.reconfiguration_delay_ms)
     }
 }
 
@@ -264,5 +284,23 @@ mod tests {
                 .is_err()
         );
         assert!(parse_args(&["--server-timeout", "0"]).validate().is_err());
+        assert!(parse_args(&["--reconfiguration-delay-ms", "0"])
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn reload_options_use_mcrouter_flag_names_and_defaults() {
+        let defaults = parse_args(&[]);
+        assert!(!defaults.disable_reload_configs);
+        assert_eq!(defaults.reconfiguration_delay(), Duration::from_secs(1));
+
+        let args = parse_args(&[
+            "--disable-reload-configs",
+            "--reconfiguration-delay-ms",
+            "20",
+        ]);
+        assert!(args.disable_reload_configs);
+        assert_eq!(args.reconfiguration_delay(), Duration::from_millis(20));
     }
 }

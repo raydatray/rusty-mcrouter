@@ -2,6 +2,7 @@ mod args;
 mod config;
 mod control;
 mod proxy;
+mod reload;
 
 use rusty_mcrouter_backend::{destination::DestinationMetricsRegistry, tko::TkoTrackerMap};
 use rusty_mcrouter_observability::{channel, logging, ConfigMetrics, ControlMetrics, ScrapeInputs};
@@ -10,6 +11,7 @@ use rusty_mcrouter_proxy::{ProxyShared, ThreadMode};
 use crate::args::Args;
 use crate::control::{ControlThread, ControlThreadConfig, ProcessEvent, Supervisor};
 use crate::proxy::{ProxyFleet, ProxyFleetConfig};
+use crate::reload::{ConfigReloader, ReloaderConfig};
 
 use std::{io::Write, sync::Arc};
 
@@ -23,9 +25,12 @@ fn main() -> anyhow::Result<()> {
     logging::init();
     let control_metrics = Arc::new(ControlMetrics::default());
     let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&control_metrics));
+    let (config_bytes, config) = config::load(&args.config)?;
+    let config = Arc::new(config);
+    let config_metrics = ConfigMetrics::started();
 
     let shared = Arc::new(ProxyShared {
-        config: Arc::new(config::load(&args.config)?.1),
+        config: Arc::clone(&config),
         tko_map: TkoTrackerMap::new(events.sink()),
         destinations: DestinationMetricsRegistry::new(),
         defaults: args.destination_defaults(),
@@ -52,9 +57,21 @@ fn main() -> anyhow::Result<()> {
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
         control: Arc::clone(&control_metrics),
-        config: ConfigMetrics::started(),
+        config: Arc::clone(&config_metrics),
     }
     .into_registry();
+
+    let reloader = (!args.disable_reload_configs).then(|| {
+        ConfigReloader::new(ReloaderConfig {
+            path: args.config.clone(),
+            delay: args.reconfiguration_delay(),
+            running: (config_bytes, config),
+            proxies: proxies.handles(),
+            defaults: args.destination_defaults(),
+            root_options: args.root_route_options(),
+            metrics: config_metrics,
+        })
+    });
 
     let (control_thread, metrics_bound) = match ControlThread::spawn(
         ControlThreadConfig {
@@ -62,6 +79,7 @@ fn main() -> anyhow::Result<()> {
             registry: Arc::new(registry),
             metrics_addr,
             metrics: control_metrics,
+            reloader,
         },
         &supervisor,
     ) {

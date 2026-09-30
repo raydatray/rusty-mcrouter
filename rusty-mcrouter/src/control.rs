@@ -9,11 +9,14 @@ use rusty_mcrouter_observability::{logging, ControlMetrics, EventConsumer, Metri
 // std mpsc for main's channels; tokio mpsc, module-qualified, for the runtime's
 use tokio::sync::{mpsc, oneshot};
 
+use crate::reload::ConfigReloader;
+
 pub struct ControlThreadConfig {
     pub events: EventConsumer,
     pub registry: Arc<MetricsRegistry>,
     pub metrics_addr: SocketAddr,
     pub metrics: Arc<ControlMetrics>,
+    pub reloader: Option<ConfigReloader>,
 }
 
 pub enum ProcessEvent {
@@ -146,6 +149,7 @@ struct ControlRuntime {
     command_rx: mpsc::Receiver<ControlCommand>,
     events: EventConsumer,
     metrics: MetricsHttp,
+    reloader: Option<ConfigReloader>,
     process_events: Sender<ProcessEvent>,
 }
 
@@ -175,6 +179,11 @@ impl ControlRuntime {
                     result?;
                 }
 
+                // only the cancel-safe tick races; the reload runs to completion
+                _ = tick(&mut self.reloader), if self.reloader.is_some() => {
+                    self.reloader.as_mut().expect("guarded by is_some").poll().await;
+                }
+
                 result = tokio::signal::ctrl_c() => {
                     result.context("listen for Ctrl-C")?;
                     let _ = self.process_events.send(ProcessEvent::ShutdownRequested);
@@ -189,6 +198,10 @@ impl ControlRuntime {
         }
         self.metrics.shutdown().await;
     }
+}
+
+async fn tick(reloader: &mut Option<ConfigReloader>) {
+    reloader.as_mut().expect("guarded by is_some").tick().await;
 }
 
 fn control_thread_main(
@@ -215,6 +228,7 @@ fn control_thread_main(
             registry,
             metrics_addr,
             metrics: control_metrics,
+            reloader,
         } = cfg;
 
         let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
@@ -234,6 +248,7 @@ fn control_thread_main(
             command_rx,
             events,
             metrics,
+            reloader,
             process_events,
         }
         .run()
@@ -265,6 +280,7 @@ mod tests {
             registry: Arc::new(MetricsRegistry::new()),
             metrics_addr,
             metrics,
+            reloader: None,
         };
         let (control, bound) = ControlThread::spawn(cfg, &supervisor)?;
         Ok((control, bound, events))
