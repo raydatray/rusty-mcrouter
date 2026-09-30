@@ -1,9 +1,9 @@
 mod args;
+mod config;
 mod control;
 mod proxy;
 
 use rusty_mcrouter_backend::{destination::DestinationMetricsRegistry, tko::TkoTrackerMap};
-use rusty_mcrouter_config::parse_file;
 use rusty_mcrouter_observability::{channel, logging, ConfigMetrics, ControlMetrics, ScrapeInputs};
 use rusty_mcrouter_proxy::{ProxyShared, ThreadMode};
 
@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&control_metrics));
 
     let shared = Arc::new(ProxyShared {
-        config: Arc::new(parse_file(&args.config)?),
+        config: Arc::new(config::load(&args.config)?.1),
         tko_map: TkoTrackerMap::new(events.sink()),
         destinations: DestinationMetricsRegistry::new(),
         defaults: args.destination_defaults(),
