@@ -146,6 +146,13 @@ impl ProxyFleet {
         self.shards.clone()
     }
 
+    pub fn handles(&self) -> Vec<ProxyHandle> {
+        self.threads
+            .iter()
+            .map(|thread| thread.handle.clone())
+            .collect()
+    }
+
     pub fn shutdown(self) -> anyhow::Result<()> {
         shutdown_all(self.threads)
     }
