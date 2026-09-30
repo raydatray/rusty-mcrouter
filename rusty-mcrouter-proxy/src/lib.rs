@@ -2,6 +2,7 @@
 
 mod config;
 mod connection;
+mod context;
 mod error;
 mod events;
 mod generation;

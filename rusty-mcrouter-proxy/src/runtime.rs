@@ -1,59 +1,43 @@
-use std::{net::TcpStream, rc::Rc, sync::Arc};
+use std::net::TcpStream;
 
 use anyhow::Context;
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::BuildError;
-use tokio::sync::mpsc::Receiver;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::connection::Connection;
-use crate::generation::{GenerationBuilder, RouteSlot};
+use crate::context::ProxyContext;
+use crate::generation::GenerationBuilder;
 use crate::routing::route_request;
-use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, ThreadMode};
+use crate::{ProxyCommand, ProxyInbox, ProxyRequest};
+
+/// Long-lived tasks the runtime supervises; either one exiting stops the proxy.
+pub(crate) struct BackgroundTasks {
+    pub(crate) listener: Option<JoinHandle<anyhow::Result<()>>>,
+    pub(crate) sweep: Option<JoinHandle<()>>,
+}
 
 pub(crate) struct ProxyRuntime {
-    proxy_id: usize,
-    routes: Rc<RouteSlot>,
+    context: ProxyContext,
     builder: GenerationBuilder,
-    proxies: ProxySet,
-    thread_mode: ThreadMode,
-    frontend_metrics: Arc<FrontendMetricsShard>,
-    request_rx: Receiver<ProxyRequest>,
-    command_rx: Receiver<ProxyCommand>,
-    work_rx: Receiver<TcpStream>,
-    listener_task: Option<JoinHandle<anyhow::Result<()>>>,
-    sweep_task: Option<JoinHandle<()>>,
+    inbox: ProxyInbox,
+    tasks: BackgroundTasks,
     route_tasks: JoinSet<()>,
     connection_tasks: JoinSet<()>,
 }
 
 impl ProxyRuntime {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        proxy_id: usize,
-        routes: Rc<RouteSlot>,
+        context: ProxyContext,
         builder: GenerationBuilder,
-        proxies: ProxySet,
-        thread_mode: ThreadMode,
-        frontend_metrics: Arc<FrontendMetricsShard>,
-        request_rx: Receiver<ProxyRequest>,
-        command_rx: Receiver<ProxyCommand>,
-        work_rx: Receiver<TcpStream>,
-        listener_task: Option<JoinHandle<anyhow::Result<()>>>,
-        sweep_task: Option<JoinHandle<()>>,
+        inbox: ProxyInbox,
+        tasks: BackgroundTasks,
     ) -> Self {
         Self {
-            proxy_id,
-            routes,
+            context,
             builder,
-            proxies,
-            thread_mode,
-            frontend_metrics,
-            request_rx,
-            command_rx,
-            work_rx,
-            listener_task,
-            sweep_task,
+            inbox,
+            tasks,
             route_tasks: JoinSet::new(),
             connection_tasks: JoinSet::new(),
         }
@@ -64,7 +48,7 @@ impl ProxyRuntime {
             tokio::select! {
                 biased;
 
-                command = self.command_rx.recv() => {
+                command = self.inbox.command_rx.recv() => {
                     match command {
                         Some(ProxyCommand::Shutdown { acknowledged }) => {
                             self.shutdown().await;
@@ -78,12 +62,12 @@ impl ProxyRuntime {
                     }
                 }
 
-                request = self.request_rx.recv() => {
+                request = self.inbox.request_rx.recv() => {
                     let request = request.context("proxy request channel closed")?;
                     self.spawn_request(request);
                 }
 
-                stream = self.work_rx.recv() => {
+                stream = self.inbox.work_rx.recv() => {
                     let stream = stream.context("proxy work channel closed")?;
                     self.spawn_connection(stream)?;
                 }
@@ -96,11 +80,11 @@ impl ProxyRuntime {
                     result.context("connection task panicked")?;
                 }
 
-                result = wait_for_listener(&mut self.listener_task), if self.listener_task.is_some() => {
+                result = wait_for_listener(&mut self.tasks.listener), if self.tasks.listener.is_some() => {
                     return result;
                 }
 
-                result = wait_for_sweep(&mut self.sweep_task), if self.sweep_task.is_some() => {
+                result = wait_for_sweep(&mut self.tasks.sweep), if self.tasks.sweep.is_some() => {
                     return result;
                 }
             }
@@ -109,20 +93,18 @@ impl ProxyRuntime {
 
     fn reconfigure(&mut self, generation: u64, config: &ConfigDocument) -> Result<(), BuildError> {
         debug_assert!(
-            generation > self.routes.current().generation,
+            generation > self.context.routes.current().generation,
             "generations only move forward"
         );
         let next = self.builder.build(generation, config)?;
-        drop(self.routes.replace(next));
+        drop(self.context.routes.replace(next));
         Ok(())
     }
 
     fn spawn_request(&mut self, request: ProxyRequest) {
-        let current = self.routes.current();
-        let route = Rc::clone(&current.route);
-        let state = Rc::clone(&current.state);
+        let generation = self.context.routes.current();
         self.route_tasks.spawn_local(async move {
-            let reply = route_request(route, state, request.request).await;
+            let reply = route_request(&generation, request.request).await;
             let _ = request.reply_tx.send(reply);
         });
     }
@@ -130,32 +112,22 @@ impl ProxyRuntime {
     fn spawn_connection(&mut self, stream: TcpStream) -> anyhow::Result<()> {
         let stream = tokio::net::TcpStream::from_std(stream)
             .context("could not register accepted stream on proxy runtime")?;
-        let connection = Connection::new(
-            stream,
-            self.proxy_id,
-            Rc::clone(&self.routes),
-            self.proxies.clone(),
-            self.thread_mode,
-            Arc::clone(&self.frontend_metrics),
-        );
-        let metrics = Arc::clone(&self.frontend_metrics);
-        metrics.client_connections.inc();
+        let connection = Connection::new(stream, self.context.clone());
         self.connection_tasks.spawn_local(async move {
             if let Err(error) = connection.run().await {
                 tracing::warn!(%error, "connection failed");
             }
-            metrics.client_connections.dec();
         });
         Ok(())
     }
 
     async fn shutdown(&mut self) {
-        self.request_rx.close();
-        self.work_rx.close();
-        if let Some(task) = self.listener_task.take() {
+        self.inbox.request_rx.close();
+        self.inbox.work_rx.close();
+        if let Some(task) = self.tasks.listener.take() {
             task.abort();
         }
-        if let Some(task) = self.sweep_task.take() {
+        if let Some(task) = self.tasks.sweep.take() {
             task.abort();
         }
         self.route_tasks.shutdown().await;
@@ -180,6 +152,7 @@ async fn wait_for_sweep(task: &mut Option<JoinHandle<()>>) -> anyhow::Result<()>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use rusty_mcrouter_backend::destination::{
@@ -194,16 +167,11 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
 
     use super::*;
-    use crate::{ProxyHandle, ProxyInbox};
+    use crate::generation::RouteSlot;
+    use crate::{FrontendMetricsShard, ProxyHandle};
 
     fn test_runtime(config: &str) -> (ProxyRuntime, ProxyHandle) {
         let (handle, inbox) = ProxyHandle::allocate(0);
-        let ProxyInbox {
-            work_rx,
-            request_rx,
-            command_rx,
-        } = inbox;
-        let proxies = ProxySet::new(vec![handle.clone()]);
         let map = destination::Map::new(
             TkoTrackerMap::new(noop_sink()),
             BackendMetricsShard::new(),
@@ -221,19 +189,16 @@ mod tests {
             noop_sink(),
         );
         let initial = builder.build(1, &parse(config).unwrap()).unwrap();
-        let runtime = ProxyRuntime::new(
-            0,
+        let context = ProxyContext::solo(
+            handle.clone(),
             RouteSlot::new(initial),
-            builder,
-            proxies,
-            ThreadMode::SameThread,
             FrontendMetricsShard::new(),
-            request_rx,
-            command_rx,
-            work_rx,
-            None,
-            None,
         );
+        let tasks = BackgroundTasks {
+            listener: None,
+            sweep: None,
+        };
+        let runtime = ProxyRuntime::new(context, builder, inbox, tasks);
         (runtime, handle)
     }
 
