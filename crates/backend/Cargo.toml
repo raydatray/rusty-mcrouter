@@ -13,13 +13,13 @@ testing = ["rusty-mcrouter-protocol/testing"]
 
 [dependencies]
 bytes.workspace = true
-rusty-mcrouter-config = { path = "../rusty-mcrouter-config" }
-rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives" }
-rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol" }
+rusty-mcrouter-config.workspace = true
+rusty-mcrouter-observability-primitives.workspace = true
+rusty-mcrouter-protocol.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "macros", "time"] }
 
 [dev-dependencies]
-rusty-mcrouter-observability-primitives = { path = "../rusty-mcrouter-observability-primitives", features = ["testing"] }
-rusty-mcrouter-protocol = { path = "../rusty-mcrouter-protocol", features = ["testing"] }
+rusty-mcrouter-observability-primitives = { workspace = true, features = ["testing"] }
+rusty-mcrouter-protocol = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -8,9 +8,9 @@ architecture: ../architecture/config-reload.md
 
 # 0002: hot config reload
 
-today the config file is read once in `main` (`rusty-mcrouter/src/main.rs:28`)
+today the config file is read once in `main` (`bin/rusty-mcrouter/src/main.rs:28`)
 and every proxy thread builds its route graph once
-(`rusty-mcrouter-proxy/src/thread.rs:79-99`). this design adds hot reload:
+(`crates/proxy/src/thread.rs:79-99`). this design adds hot reload:
 when the config file changes, validate it, then move every proxy to the new
 config. there is no restart, no dropped connections, and TKO state is
 preserved.
@@ -62,16 +62,16 @@ preserved.
 ## the hard part: `PoolId` is generation-relative
 
 `PoolId` is an index into one `ConfigDocument`'s pool list. that list is
-sorted by name (`rusty-mcrouter-config/src/document.rs:172-179`, `:251-257`),
+sorted by name (`crates/config/src/document.rs:172-179`, `:251-257`),
 so adding pool `aaa` renumbers every other pool. today, four long-lived
 structures are keyed by `PoolId`:
 
 | where | keyed by | what goes wrong across a reload |
 |---|---|---|
-| pool TKO gates: `TkoTrackerMap::pool_tracker_for(id, ...)` (`rusty-mcrouter-backend/src/backend.rs:111-112`, `tko/map.rs:52-70`) | `PoolId` | the new pool N dedups to the old pool N's gate. that is someone else's fail-open state; in debug builds it trips `debug_assert_eq!(existing.name(), pool_name)` (`tko/map.rs:60`) |
+| pool TKO gates: `TkoTrackerMap::pool_tracker_for(id, ...)` (`crates/backend/src/backend.rs:111-112`, `tko/map.rs:52-70`) | `PoolId` | the new pool N dedups to the old pool N's gate. that is someone else's fail-open state; in debug builds it trips `debug_assert_eq!(existing.name(), pool_name)` (`tko/map.rs:60`) |
 | per-thread gate cache: `DestinationFactory.pool_gates` (`backend.rs:92`, `:105-115`), one factory per thread (`thread.rs:85`) | `PoolId` | same mix-up as the gates, and it holds every gate it has ever seen alive for the life of the thread, so a removed pool's gate never dies |
-| pool metrics: `RoutingMetricsShard::pool(id)` (`rusty-mcrouter-core/src/metrics.rs:122-160`), built once from one layout (`rusty-mcrouter/src/proxy.rs:82-89`) | `PoolId` index into a fixed `Vec` | a new layout means new shards. counters reset (breaking 0001's "never zeroed by us") and `RoutingSource` assumes all shards share one layout (`rusty-mcrouter-observability/src/sources.rs:188-197`) |
-| request attribution: `RouteContext.selected_pool: Cell<Option<PoolId>>` (`rusty-mcrouter-core/src/context.rs:18-20`, `:55-59`) | `PoolId` | only safe if the index is resolved against the table of the context's own generation |
+| pool metrics: `RoutingMetricsShard::pool(id)` (`crates/core/src/metrics.rs:122-160`), built once from one layout (`bin/rusty-mcrouter/src/proxy.rs:82-89`) | `PoolId` index into a fixed `Vec` | a new layout means new shards. counters reset (breaking 0001's "never zeroed by us") and `RoutingSource` assumes all shards share one layout (`crates/observability/src/sources.rs:188-197`) |
+| request attribution: `RouteContext.selected_pool: Cell<Option<PoolId>>` (`crates/core/src/context.rs:18-20`, `:55-59`) | `PoolId` | only safe if the index is resolved against the table of the context's own generation |
 
 the rule this design adopts: **`PoolId` never outlives the generation that
 produced it. anything that outlives a generation is keyed by pool name.**
@@ -80,9 +80,9 @@ produced it. anything that outlives a generation is keyed by pool name.**
 
 ### 1. detect: `ConfigReloader` on the control runtime
 
-a new `ConfigReloader` in the binary (`rusty-mcrouter/src/reload.rs`) is one
+a new `ConfigReloader` in the binary (`bin/rusty-mcrouter/src/reload.rs`) is one
 more arm of the `ControlRuntime` select loop
-(`rusty-mcrouter/src/control.rs:153-184`).
+(`bin/rusty-mcrouter/src/control.rs:153-184`).
 
 - only a `tokio::time::Interval` tick races in the `select!`. `Interval::tick`
   is cancel-safe; a plain `sleep` would restart every time another arm fired,
@@ -131,7 +131,7 @@ every reconfiguration_delay:
 
 `parse` already validates structure, references, cycles, pool sizes and
 aliases (`document.rs:18-106`). the builder adds one real failure mode
-(`rusty-mcrouter-core/src/route_builder.rs:26-33`):
+(`crates/core/src/route_builder.rs:26-33`):
 
 - `DefaultRouteMissing`: a plural `routes` config lacks `--route-prefix`
   (`:118-123`). this is reachable by editing the config.
@@ -166,9 +166,9 @@ sequenceDiagram
 
 - **the command.** `ProxyCommand` gains
   `Reconfigure { generation, config: Arc<ConfigDocument>, applied: oneshot::Sender<Result<(), BuildError>> }`
-  (`rusty-mcrouter-proxy/src/message.rs:4-6`). the command channel is
+  (`crates/proxy/src/message.rs:4-6`). the command channel is
   reliable and prioritized ahead of requests
-  (`rusty-mcrouter-proxy/src/runtime.rs:66-78`, capacity 16 at
+  (`crates/proxy/src/runtime.rs:66-78`, capacity 16 at
   `handle.rs:17`).
 - **the reloader** sends to every proxy first, then awaits every ack, so
   cutover is near-simultaneous. mixed generations exist briefly, exactly as
@@ -219,7 +219,7 @@ sequenceDiagram
   - it keeps the scalar routing counters: dev-null and failover
     (`metrics.rs:126-129`)
   - it gains a scrape-visible `Mutex<BTreeMap<Arc<str>, Weak<PoolMetrics>>>`
-  - `ProxyShards::new` stops taking a layout (`proxy/src/config.rs:46-52`)
+  - `ProxyShards::new` stops taking a layout (`crates/proxy/src/config.rs:46-52`)
 - **a per-generation `PoolMetricsTable`** (`Vec<Arc<PoolMetrics>>` indexed by
   that generation's `PoolId`) replaces `RoutingMetricsLayout`.
   - `GenerationBuilder::build` resolves it by name: it takes the shard's lock once
@@ -261,7 +261,7 @@ sequenceDiagram
 | pool fail-open gate | pool name (after §5) | preserved; thresholds fixed at creation |
 | pool metric series | pool name (after §4) | continuous |
 | removed server | — | dropped when the last generation using it drops; emits `RemoveFromConfig` if it was responsible for a TKO (`destination/destination.rs:233-245`) |
-| `LeastFailuresPolicy` counters (`core/src/failover/policy.rs:32`) | the route | reset, as upstream; skipped for no-op reloads |
+| `LeastFailuresPolicy` counters (`crates/core/src/failover/policy.rs:32`) | the route | reset, as upstream; skipped for no-op reloads |
 | frontend/backend shards, `/metrics` registry | the proxy | untouched: nothing in them is config-shaped after §4 |
 
 ## failure semantics
@@ -345,16 +345,16 @@ each slice leaves the tree green; reload is not reachable until slice 6.
 
 | piece | lives in |
 |---|---|
-| name-keyed gates | `rusty-mcrouter-backend/src/tko/map.rs`, `backend.rs` |
-| pool blocks and generation tables | `rusty-mcrouter-core/src/metrics.rs`, `context.rs` |
-| dry-run validation | `rusty-mcrouter-core/src/route_builder/validate.rs` |
-| generations, slot, builder | `rusty-mcrouter-proxy/src/generation.rs`, `runtime.rs`, `connection.rs` |
-| config metrics | `rusty-mcrouter-observability/src/metrics.rs`, `sources.rs` |
-| reloader | `rusty-mcrouter/src/reload.rs`, wired in `control.rs` and `main.rs` |
+| name-keyed gates | `crates/backend/src/tko/map.rs`, `backend.rs` |
+| pool blocks and generation tables | `crates/core/src/metrics.rs`, `context.rs` |
+| dry-run validation | `crates/core/src/route_builder/validate.rs` |
+| generations, slot, builder | `crates/proxy/src/generation.rs`, `runtime.rs`, `connection.rs` |
+| config metrics | `crates/observability/src/metrics.rs`, `sources.rs` |
+| reloader | `bin/rusty-mcrouter/src/reload.rs`, wired in `control.rs` and `main.rs` |
 
 the end-to-end contract is guarded by
 `config_reload_moves_existing_connections_and_rejects_bad_configs` and
-`disabled_reloads_ignore_config_changes` in `rusty-mcrouter/tests/system_e2e.rs`.
+`disabled_reloads_ignore_config_changes` in `bin/rusty-mcrouter/tests/system_e2e.rs`.
 the first holds one client connection across a valid reload, a broken one and
 a restore, and asserts the pool series never resets.
 
@@ -375,7 +375,7 @@ a restore, and asserts the pool series never resets.
     next request use the new graph
   - a request in flight across the swap completes on the old graph
   - the ack arrives after the slot swap
-- **e2e** (`rusty-mcrouter/tests/system_e2e.rs`). `RouterProcess` needs a
+- **e2e** (`bin/rusty-mcrouter/tests/system_e2e.rs`). `RouterProcess` needs a
   config-rewrite helper; today it owns the temp path privately
   (`tests/support/mod.rs:14`, `:18-23`). writes go to a temp file plus a
   rename.

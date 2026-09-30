@@ -18,12 +18,23 @@ vibecoded [mcrouter](https://github.com/facebook/mcrouter) in rust
 - see [config reload](docs/architecture/config-reload.md) for what survives a reload and how failures are handled
 
 ## what's what:
-- `rusty-mcrouter-protocol/` — the meta protocol codec: semantic request/reply types, frontend encoder/decoder, backend encoder/decoder
-- `rusty-mcrouter-config/` — parses mcrouter-style json/jsonc config (pools + routes).
-- `rusty-mcrouter-observability-primitives/` — std-only `Counter`, `Gauge`, and `EventSink<T>` shared by fact owners.
-- `rusty-mcrouter-backend/` — the backend leg: memcached client, destinations, health tracking, and backend metrics.
-- `rusty-mcrouter-core/` — routing: root prefix selection, pool hashing, failover and destination routes, built from config.
-- `rusty-mcrouter-proxy/` — the frontend leg: client connections, proxy workers, and proxy-thread orchestration.
-- `rusty-mcrouter-observability/` — event logging, metrics aggregation, and the `/metrics` endpoint.
-- `rusty-mcrouter/` — the binary. cli, options, construct-and-wire startup, and the config reloader.
+- `bin/rusty-mcrouter/` — the binary. cli, options, construct-and-wire startup, and the config reloader.
+- `crates/protocol/` — the meta protocol codec: semantic request/reply types, frontend encoder/decoder, backend encoder/decoder
+- `crates/config/` — parses mcrouter-style json/jsonc config (pools + routes).
+- `crates/observability-primitives/` — std-only `Counter`, `Gauge`, and `EventSink<T>` shared by fact owners.
+- `crates/backend/` — the backend leg: memcached client, destinations, health tracking, and backend metrics.
+- `crates/core/` — routing: root prefix selection, pool hashing, failover and destination routes, built from config.
+- `crates/proxy/` — the frontend leg: client connections, proxy workers, and proxy-thread orchestration.
+- `crates/observability/` — event logging, metrics aggregation, and the `/metrics` endpoint.
+- `bench/` — an isolated Cargo workspace and Python harness for benchmarking (see `bench/README.md`).
 - `docs/` — design / architecture / mcrouter notes (see `docs/README.md`)
+
+the root `Cargo.toml` defines the application workspace and shared dependencies.
+packages keep their `rusty-mcrouter-*` names; executable packages live in `bin/`
+and libraries in `crates/`. each package uses the usual `src/` and `tests/` layout.
+
+```bash
+cargo build --locked -p rusty-mcrouter
+cargo test --workspace --locked
+cargo test --manifest-path bench/Cargo.toml --workspace --locked
+```

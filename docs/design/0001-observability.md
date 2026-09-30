@@ -675,7 +675,7 @@ the shipped slices are: owned TKO, routing, and worker event records;
 the bounded shedding bus; per-proxy frontend/backend/routing shards;
 shared per-destination blocks; live TKO/fail-open sources; the Hyper
 HTTP endpoint; and supervised binary construction/wiring. route instrumentation is
-guarded by `rusty-mcrouter/tests/route_graph_observability.rs`, which
+guarded by `bin/rusty-mcrouter/tests/route_graph_observability.rs`, which
 parses real config, builds a graph with mock backends, executes through
 the proxy boundary, renders the real `RoutingSource`, and asserts
 healthy and failover metrics.
