@@ -222,3 +222,205 @@ impl ConfigReloader {
         Ok(Outcome::Applied(generation))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use rusty_mcrouter_proxy::ProxyCommand;
+
+    use super::*;
+
+    const V1: &str = r#"{ "route": "NullRoute" }"#;
+    const V2: &str = r#"{ "route": "ErrorRoute|v2" }"#;
+
+    struct Fixture {
+        reloader: ConfigReloader,
+        path: PathBuf,
+        metrics: Arc<ConfigMetrics>,
+        applied: Arc<Mutex<Vec<(usize, u64)>>>,
+    }
+
+    impl Fixture {
+        fn new(name: &str, proxies: usize) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "rusty-mcrouter-reload-{}-{name}.json",
+                std::process::id()
+            ));
+            std::fs::write(&path, V1).unwrap();
+            let (bytes, document) = config::load(&path).unwrap();
+            let metrics = ConfigMetrics::started();
+            let applied = Arc::new(Mutex::new(Vec::new()));
+            let handles = (0..proxies)
+                .map(|id| fake_proxy(id, Arc::clone(&applied)))
+                .collect();
+
+            let reloader = ConfigReloader::new(ReloaderConfig {
+                path: path.clone(),
+                delay: Duration::from_millis(10),
+                running: (bytes, Arc::new(document)),
+                proxies: handles,
+                defaults: DestinationConfig::default(),
+                root_options: RootRouteOptions::default(),
+                metrics: Arc::clone(&metrics),
+            });
+            Self {
+                reloader,
+                path,
+                metrics,
+                applied,
+            }
+        }
+
+        fn write(&self, contents: &str) {
+            std::fs::write(&self.path, contents).unwrap();
+        }
+
+        /// one tick to see the change, one to apply it
+        async fn settle(&mut self) {
+            self.reloader.poll().await;
+            self.reloader.poll().await;
+        }
+
+        fn failures(&self, stage: ReloadStage) -> u64 {
+            self.metrics.reload_failures[stage as usize].load()
+        }
+
+        fn applied(&self) -> Vec<(usize, u64)> {
+            let mut applied = self.applied.lock().unwrap().clone();
+            applied.sort();
+            applied
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn fake_proxy(id: usize, applied: Arc<Mutex<Vec<(usize, u64)>>>) -> ProxyHandle {
+        let (handle, inbox) = ProxyHandle::allocate(id);
+        let mut commands = inbox.command_rx;
+        tokio::spawn(async move {
+            while let Some(command) = commands.recv().await {
+                if let ProxyCommand::Reconfigure {
+                    generation,
+                    applied: ack,
+                    ..
+                } = command
+                {
+                    applied.lock().unwrap().push((id, generation));
+                    let _ = ack.send(Ok(()));
+                }
+            }
+        });
+        handle
+    }
+
+    #[tokio::test]
+    async fn applies_a_changed_file_to_every_proxy() {
+        let mut fixture = Fixture::new("applies", 2);
+
+        fixture.write(V2);
+        fixture.reloader.poll().await;
+        assert!(fixture.applied().is_empty(), "the first tick only settles");
+        fixture.reloader.poll().await;
+
+        assert_eq!(fixture.applied(), [(0, 2), (1, 2)]);
+        assert_eq!(fixture.metrics.generation.load(), 2);
+        assert_eq!(fixture.metrics.reload_attempts.load(), 1);
+        assert_eq!(fixture.metrics.last_reload_successful.load(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_json_is_rejected_and_the_running_config_kept() {
+        let mut fixture = Fixture::new("invalid-json", 1);
+
+        fixture.write("{ not json");
+        fixture.settle().await;
+
+        assert!(fixture.applied().is_empty());
+        assert_eq!(fixture.failures(ReloadStage::Parse), 1);
+        assert_eq!(fixture.metrics.last_reload_successful.load(), 0);
+        assert_eq!(fixture.metrics.generation.load(), 1);
+    }
+
+    #[tokio::test]
+    async fn unbuildable_config_is_rejected_before_any_proxy_sees_it() {
+        let mut fixture = Fixture::new("unbuildable", 1);
+
+        // plural routes without the default /././ prefix
+        fixture.write(r#"{ "routes": { "/a/b/": "NullRoute" } }"#);
+        fixture.settle().await;
+
+        assert!(fixture.applied().is_empty());
+        assert_eq!(fixture.failures(ReloadStage::Validate), 1);
+    }
+
+    #[tokio::test]
+    async fn a_broken_edit_is_not_sticky() {
+        let mut fixture = Fixture::new("not-sticky", 1);
+
+        fixture.write("{ half written");
+        fixture.settle().await;
+        fixture.write(V2);
+        fixture.settle().await;
+
+        assert_eq!(fixture.applied(), [(0, 2)]);
+        assert_eq!(fixture.failures(ReloadStage::Parse), 1);
+        assert_eq!(fixture.metrics.last_reload_successful.load(), 1);
+    }
+
+    #[tokio::test]
+    async fn reverting_a_broken_edit_is_in_sync_without_a_new_generation() {
+        let mut fixture = Fixture::new("revert", 1);
+
+        fixture.write("{ broken");
+        fixture.settle().await;
+        fixture.write(V1);
+        fixture.settle().await;
+
+        assert!(fixture.applied().is_empty());
+        assert_eq!(fixture.metrics.last_reload_successful.load(), 1);
+        assert_eq!(fixture.metrics.generation.load(), 1);
+    }
+
+    #[tokio::test]
+    async fn cosmetic_edit_is_a_no_op() {
+        let mut fixture = Fixture::new("cosmetic", 1);
+
+        fixture.write("// same routes\n{ \"route\":   \"NullRoute\" }");
+        fixture.settle().await;
+
+        assert!(fixture.applied().is_empty());
+        assert_eq!(fixture.metrics.reload_attempts.load(), 1);
+        assert_eq!(fixture.metrics.last_reload_successful.load(), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_file_is_reported_once() {
+        let mut fixture = Fixture::new("missing", 1);
+
+        std::fs::remove_file(&fixture.path).unwrap();
+        for _ in 0..4 {
+            fixture.reloader.poll().await;
+        }
+
+        assert_eq!(fixture.failures(ReloadStage::Read), 1);
+        assert_eq!(fixture.metrics.generation.load(), 1);
+    }
+
+    #[tokio::test]
+    async fn generations_are_never_reused() {
+        let mut fixture = Fixture::new("generations", 1);
+
+        fixture.write(V2);
+        fixture.settle().await;
+        fixture.write(V1);
+        fixture.settle().await;
+
+        assert_eq!(fixture.applied(), [(0, 2), (0, 3)]);
+        assert_eq!(fixture.metrics.generation.load(), 3);
+    }
+}
