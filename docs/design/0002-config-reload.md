@@ -1,8 +1,9 @@
 ---
-status: planned
+status: implemented
 created: 2026-09-22
 updated: 2026-09-22
 reference: ../reference/config-reload.md
+architecture: ../architecture/config-reload.md
 ---
 
 # 0002: hot config reload
@@ -219,7 +220,7 @@ sequenceDiagram
   - `ProxyShards::new` stops taking a layout (`proxy/src/config.rs:46-52`)
 - **a per-generation `PoolMetricsTable`** (`Vec<Arc<PoolMetrics>>` indexed by
   that generation's `PoolId`) replaces `RoutingMetricsLayout`.
-  - `build_generation` resolves it by name: it takes the shard's lock once
+  - `GenerationBuilder::build` resolves it by name: it takes the shard's lock once
     per build, on the proxy thread, at control-plane frequency
   - it covers every configured pool, including unreferenced ones, as the
     layout does today
@@ -337,6 +338,23 @@ each slice leaves the tree green; reload is not reachable until slice 6.
 7. `[test]` end-to-end reload tests
 8. `[docs]` as-built `architecture/config-reload.md`; mark 0002 implemented;
    update 0001 §slice status
+
+## implementation record
+
+| piece | lives in |
+|---|---|
+| name-keyed gates | `rusty-mcrouter-backend/src/tko/map.rs`, `backend.rs` |
+| pool blocks and generation tables | `rusty-mcrouter-core/src/metrics.rs`, `context.rs` |
+| dry-run validation | `rusty-mcrouter-core/src/route_builder/validate.rs` |
+| generations, slot, builder | `rusty-mcrouter-proxy/src/generation.rs`, `runtime.rs`, `connection.rs` |
+| config metrics | `rusty-mcrouter-observability/src/metrics.rs`, `sources.rs` |
+| reloader | `rusty-mcrouter/src/reload.rs`, wired in `control.rs` and `main.rs` |
+
+the end-to-end contract is guarded by
+`config_reload_moves_existing_connections_and_rejects_bad_configs` and
+`disabled_reloads_ignore_config_changes` in `rusty-mcrouter/tests/system_e2e.rs`.
+the first holds one client connection across a valid reload, a broken one and
+a restore, and asserts the pool series never resets.
 
 ## test matrix
 
