@@ -52,6 +52,14 @@ impl RouterProcess {
     }
 }
 
+impl RouterProcess {
+    pub fn rewrite_config(&self, config: &str) {
+        let staging = self.config_path.with_extension("json.tmp");
+        std::fs::write(&staging, config).unwrap();
+        std::fs::rename(&staging, &self.config_path).unwrap();
+    }
+}
+
 impl Drop for RouterProcess {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.config_path);

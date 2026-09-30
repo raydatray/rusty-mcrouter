@@ -40,7 +40,7 @@ async fn scrape(addr: SocketAddr) -> String {
     response.split_once("\r\n\r\n").unwrap().1.to_string()
 }
 
-fn assert_series(body: &str, name: &str, labels: &[(&str, &str)], expected: u64) {
+fn series(name: &str, labels: &[(&str, &str)], value: u64) -> String {
     let mut rendered = String::from(name);
     if !labels.is_empty() {
         rendered.push('{');
@@ -52,8 +52,39 @@ fn assert_series(body: &str, name: &str, labels: &[(&str, &str)], expected: u64)
         }
         rendered.push('}');
     }
-    writeln!(rendered, " {expected}").unwrap();
+    writeln!(rendered, " {value}").unwrap();
+    rendered
+}
+
+fn assert_series(body: &str, name: &str, labels: &[(&str, &str)], expected: u64) {
+    let rendered = series(name, labels, expected);
     assert!(body.contains(&rendered), "missing {rendered:?} in:\n{body}");
+}
+
+async fn eventually_series(addr: SocketAddr, name: &str, labels: &[(&str, &str)], expected: u64) {
+    let rendered = series(name, labels, expected);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let body = scrape(addr).await;
+        if body.contains(&rendered) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never saw {rendered:?}; last scrape:\n{body}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn roundtrip(client: &mut TcpStream, request: &[u8], expected: &[u8]) {
+    client.write_all(request).await.unwrap();
+    let mut reply = vec![0; expected.len()];
+    tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut reply))
+        .await
+        .expect("timed out waiting for reply")
+        .unwrap();
+    assert_eq!(reply, expected, "got {:?}", String::from_utf8_lossy(&reply));
 }
 
 async fn start_router(config_body: &str, tag: u16) -> Stack {
@@ -595,4 +626,93 @@ async fn wildcard_fanout_deduplicates_inline_named_routes() {
     .await;
     eventually_gets(backend, b"named-dedup", b"xy").await;
     assert_stays_value(backend, b"named-dedup", b"xy").await;
+}
+
+fn single_pool_config(server: SocketAddr) -> String {
+    format!(r#"{{ "pools": {{ "p": {{ "servers": ["{server}"] }} }}, "route": "PoolRoute|p" }}"#)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_reload_moves_existing_connections_and_rejects_bad_configs() {
+    let first = spawn_mock_memcached().await;
+    let second = spawn_mock_memcached().await;
+    exchange(first, b"ms k 5\r\nfirst\r\n", b"HD\r\n").await;
+    exchange(second, b"ms k 6\r\nsecond\r\n", b"HD\r\n").await;
+
+    let router = start_router_with_args(
+        &single_pool_config(first),
+        first.port(),
+        1,
+        &["--reconfiguration-delay-ms", "20"],
+    )
+    .await;
+    let metrics = router.metrics_addr();
+    let mut client = TcpStream::connect(router.router_addr).await.unwrap();
+    roundtrip(&mut client, b"mg k v\r\n", b"VA 5\r\nfirst\r\n").await;
+
+    router.rewrite_config(&single_pool_config(second));
+    eventually_series(metrics, "rusty_mcrouter_config_generation", &[], 2).await;
+    roundtrip(&mut client, b"mg k v\r\n", b"VA 6\r\nsecond\r\n").await;
+
+    router.rewrite_config("{ not json");
+    eventually_series(
+        metrics,
+        "rusty_mcrouter_config_reload_failures_total",
+        &[("stage", "parse")],
+        1,
+    )
+    .await;
+    let body = scrape(metrics).await;
+    assert_series(
+        &body,
+        "rusty_mcrouter_config_last_reload_successful",
+        &[],
+        0,
+    );
+    assert_series(&body, "rusty_mcrouter_config_generation", &[], 2);
+    roundtrip(&mut client, b"mg k v\r\n", b"VA 6\r\nsecond\r\n").await;
+
+    router.rewrite_config(&single_pool_config(second));
+    eventually_series(
+        metrics,
+        "rusty_mcrouter_config_last_reload_successful",
+        &[],
+        1,
+    )
+    .await;
+    let body = scrape(metrics).await;
+    assert_series(&body, "rusty_mcrouter_config_generation", &[], 2);
+    // pool "p" survived every reload, so its series never reset
+    assert_series(
+        &body,
+        "rusty_mcrouter_pool_requests_total",
+        &[("pool", "p")],
+        3,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_reloads_ignore_config_changes() {
+    let first = spawn_mock_memcached().await;
+    let second = spawn_mock_memcached().await;
+    exchange(first, b"ms k 5\r\nfirst\r\n", b"HD\r\n").await;
+
+    let router = start_router_with_args(
+        &single_pool_config(first),
+        first.port(),
+        1,
+        &[
+            "--disable-reload-configs",
+            "--reconfiguration-delay-ms",
+            "20",
+        ],
+    )
+    .await;
+    router.rewrite_config(&single_pool_config(second));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let body = scrape(router.metrics_addr()).await;
+    assert_series(&body, "rusty_mcrouter_config_generation", &[], 1);
+    assert_series(&body, "rusty_mcrouter_config_reload_attempts_total", &[], 0);
+    exchange(router.router_addr, b"mg k v\r\n", b"VA 5\r\nfirst\r\n").await;
 }
