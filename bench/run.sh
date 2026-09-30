@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-image="rusty-mcrouter-bench:rust-1.91.1"
+image="rusty-mcrouter-bench:rust-1.98.1"
 profile="${BENCH_PROFILE:-smoke-4cpu}"
 arch="$(uname -m)"
 
