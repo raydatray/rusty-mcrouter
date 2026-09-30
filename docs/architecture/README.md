@@ -51,6 +51,14 @@ flowchart LR
 
 ## runtime ownership
 
+the executable's [`main.rs`](../../bin/rusty-mcrouter/src/main.rs) declares the
+binary modules and calls synchronous `app::run`.
+[`app.rs`](../../bin/rusty-mcrouter/src/app.rs) parses CLI options, loads the
+startup config, wires shared state, starts the proxy fleet and control thread,
+then waits for an exit event and joins them.
+[`proxy_fleet.rs`](../../bin/rusty-mcrouter/src/proxy_fleet.rs) owns launching
+and joining proxy threads; the frontend runtime lives in `crates/proxy/`.
+
 [`config.rs`](../../bin/rusty-mcrouter/src/config.rs) owns file loading and byte
 parsing, shared by startup and the reloader.
 [`reload.rs`](../../bin/rusty-mcrouter/src/reload.rs) owns watching for changes and
