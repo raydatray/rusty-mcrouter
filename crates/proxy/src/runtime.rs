@@ -5,7 +5,7 @@ use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::BuildError;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::connection::Connection;
+use crate::connection::{Connection, FrontendConnectionSetup};
 use crate::context::ProxyContext;
 use crate::generation::GenerationBuilder;
 use crate::routing::route_request;
@@ -112,7 +112,11 @@ impl ProxyRuntime {
     fn spawn_connection(&mut self, stream: TcpStream) -> anyhow::Result<()> {
         let stream = tokio::net::TcpStream::from_std(stream)
             .context("could not register accepted stream on proxy runtime")?;
-        let connection = Connection::new(stream, self.context.clone());
+        let connection = Connection::new(FrontendConnectionSetup {
+            stream,
+            context: self.context.clone(),
+            options: self.context.connection_options,
+        });
         self.connection_tasks.spawn_local(async move {
             if let Err(error) = connection.run().await {
                 tracing::warn!(%error, "connection failed");

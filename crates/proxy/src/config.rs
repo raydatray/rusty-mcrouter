@@ -72,6 +72,22 @@ pub struct ProxyShared {
     /// Idle-connection sweep interval; zero disables.
     pub sweep_interval: Duration,
     pub thread_mode: ThreadMode,
+    pub connection_options: FrontendConnectionOptions,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FrontendConnectionOptions {
+    pub read_buf_initial_capacity: usize,
+    pub completed_capacity: usize,
+}
+
+impl Default for FrontendConnectionOptions {
+    fn default() -> Self {
+        Self {
+            read_buf_initial_capacity: 4096,
+            completed_capacity: 1024,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

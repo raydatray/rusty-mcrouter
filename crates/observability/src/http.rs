@@ -16,28 +16,46 @@ use tokio::task::JoinSet;
 
 use crate::metrics::{ControlMetrics, MetricsRegistry};
 
-const MAX_HTTP_TASKS: usize = 32;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTENT_TYPE_VALUE: &str = "text/plain; version=0.0.4";
+
+#[derive(Clone, Copy, Debug)]
+pub struct MetricsHttpOptions {
+    pub max_connections: usize,
+    pub request_timeout: Duration,
+}
+
+impl Default for MetricsHttpOptions {
+    fn default() -> Self {
+        Self {
+            max_connections: 32,
+            request_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+pub struct MetricsHttpSetup {
+    pub listener: TcpListener,
+    pub registry: Arc<MetricsRegistry>,
+    pub metrics: Arc<ControlMetrics>,
+    pub options: MetricsHttpOptions,
+}
 
 pub struct MetricsHttp {
     listener: TcpListener,
     registry: Arc<MetricsRegistry>,
     tasks: JoinSet<anyhow::Result<()>>,
     metrics: Arc<ControlMetrics>,
+    options: MetricsHttpOptions,
 }
 
 impl MetricsHttp {
-    pub fn new(
-        listener: TcpListener,
-        registry: Arc<MetricsRegistry>,
-        metrics: Arc<ControlMetrics>,
-    ) -> Self {
+    pub fn new(setup: MetricsHttpSetup) -> Self {
         Self {
-            listener,
-            registry,
+            listener: setup.listener,
+            registry: setup.registry,
             tasks: JoinSet::new(),
-            metrics,
+            metrics: setup.metrics,
+            options: setup.options,
         }
     }
 
@@ -45,14 +63,15 @@ impl MetricsHttp {
         tokio::select! {
             accepted = self.listener.accept() => {
                 let (stream, _) = accepted.context("accept metrics connection")?;
-                if self.tasks.len() >= MAX_HTTP_TASKS {
+                if self.tasks.len() >= self.options.max_connections {
                     self.metrics.http_rejected.inc();
                     drop(stream);
                     return Ok(());
                 }
 
                 let registry = Arc::clone(&self.registry);
-                self.tasks.spawn(async move { serve_connection(stream, registry).await });
+                let timeout = self.options.request_timeout;
+                self.tasks.spawn(async move { serve_connection(stream, registry, timeout).await });
             }
 
             Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
@@ -80,12 +99,13 @@ impl MetricsHttp {
 pub async fn serve_connection(
     stream: TcpStream,
     registry: Arc<MetricsRegistry>,
+    request_timeout: Duration,
 ) -> anyhow::Result<()> {
     let io = TokioIo::new(stream);
     let service = service_fn(move |request| respond(request, Arc::clone(&registry)));
 
     tokio::time::timeout(
-        REQUEST_TIMEOUT,
+        request_timeout,
         http1::Builder::new()
             .keep_alive(false)
             .serve_connection(io, service),
@@ -133,11 +153,20 @@ mod tests {
     }
 
     async fn start() -> SocketAddr {
+        start_with_options(MetricsHttpOptions::default()).await
+    }
+
+    async fn start_with_options(options: MetricsHttpOptions) -> SocketAddr {
         let mut registry = MetricsRegistry::new();
         registry.register(Box::new(Static));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = MetricsHttp::new(listener, Arc::new(registry), Arc::default());
+        let server = MetricsHttp::new(MetricsHttpSetup {
+            listener,
+            registry: Arc::new(registry),
+            metrics: Arc::default(),
+            options,
+        });
         tokio::spawn(async move { server.run().await.unwrap() });
         addr
     }
@@ -183,5 +212,24 @@ mod tests {
         let _ = request(addr, "garbage\r\n\r\n").await;
         let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn configured_request_timeout_closes_an_idle_connection() {
+        let addr = start_with_options(MetricsHttpOptions {
+            request_timeout: Duration::from_millis(10),
+            ..MetricsHttpOptions::default()
+        })
+        .await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+            .await
+            .expect("configured HTTP timeout was ignored")
+            .unwrap();
+        assert!(response.is_empty());
+        assert!(request(addr, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .starts_with("HTTP/1.1 200 OK\r\n"));
     }
 }
