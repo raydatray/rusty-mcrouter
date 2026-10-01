@@ -11,10 +11,14 @@ pub struct Server {
 }
 
 impl Server {
+    pub fn new(listener: TcpListener) -> Self {
+        Self { listener }
+    }
+
     pub async fn bind(addr: impl ToSocketAddrs) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
 
-        Ok(Self { listener })
+        Ok(Self::new(listener))
     }
 
     pub async fn bind_reuseport(addr: impl ToSocketAddrs) -> Result<Self> {
@@ -35,7 +39,7 @@ impl Server {
             })
             .ok_or(FrontendError::NoAddresses)?;
 
-        Ok(Self { listener })
+        Ok(Self::new(listener))
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {

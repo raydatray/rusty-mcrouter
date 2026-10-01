@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread::{Builder, JoinHandle};
 
 use anyhow::Context;
-use rusty_mcrouter_observability::http::MetricsHttp;
+use rusty_mcrouter_observability::http::{MetricsHttp, MetricsHttpOptions, MetricsHttpSetup};
 use rusty_mcrouter_observability::{logging, ControlMetrics, EventConsumer, MetricsRegistry};
 // std mpsc for main's channels; tokio mpsc, module-qualified, for the runtime's
 use tokio::sync::{mpsc, oneshot};
@@ -261,7 +261,12 @@ fn control_thread_main(
             }
         };
         let bound = listener.local_addr()?;
-        let metrics = MetricsHttp::new(listener, registry, control_metrics);
+        let metrics = MetricsHttp::new(MetricsHttpSetup {
+            listener,
+            registry,
+            metrics: control_metrics,
+            options: MetricsHttpOptions::default(),
+        });
 
         let _ = ready_tx.send(Ok(bound));
         drop(ready_tx);

@@ -10,6 +10,9 @@ pub enum FrontendError {
 
     #[error("worker closed: {worker}")]
     WorkerClosed { worker: usize },
+
+    #[error("request task failed: {0}")]
+    RequestTask(#[from] tokio::task::JoinError),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, FrontendError>;

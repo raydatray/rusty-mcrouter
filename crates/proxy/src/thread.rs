@@ -120,6 +120,7 @@ pub fn proxy_thread_main(
             proxies,
             thread_mode: shared.thread_mode,
             metrics: frontend_metrics,
+            connection_options: shared.connection_options,
         };
         let tasks = BackgroundTasks {
             listener: listener_task,

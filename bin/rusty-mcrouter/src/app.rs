@@ -52,6 +52,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         root_route_options: args.root_route_options(),
         sweep_interval: args.sweep_interval(),
         thread_mode: ThreadMode::SameThread,
+        connection_options: Default::default(),
     });
 
     let supervisor = Supervisor::new();

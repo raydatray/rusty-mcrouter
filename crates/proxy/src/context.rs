@@ -4,7 +4,7 @@ use rusty_mcrouter_protocol::Request;
 
 use crate::generation::RouteSlot;
 use crate::routing::RouteTarget;
-use crate::{FrontendMetricsShard, ProxySet, ThreadMode};
+use crate::{FrontendConnectionOptions, FrontendMetricsShard, ProxySet, ThreadMode};
 
 /// This proxy thread as seen by its connections: identity, routing and
 /// frontend metrics. Thread-local; cloning is refcount bumps.
@@ -15,6 +15,7 @@ pub(crate) struct ProxyContext {
     pub(crate) proxies: ProxySet,
     pub(crate) thread_mode: ThreadMode,
     pub(crate) metrics: Arc<FrontendMetricsShard>,
+    pub(crate) connection_options: FrontendConnectionOptions,
 }
 
 impl ProxyContext {
@@ -45,6 +46,7 @@ impl ProxyContext {
             proxies: ProxySet::new(vec![handle]),
             thread_mode: ThreadMode::SameThread,
             metrics,
+            connection_options: FrontendConnectionOptions::default(),
         }
     }
 }

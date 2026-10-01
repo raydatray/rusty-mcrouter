@@ -10,14 +10,18 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
     sync::mpsc::{self, Receiver, Sender},
+    task::JoinSet,
 };
 
 use crate::context::ProxyContext;
 use crate::routing::dispatch;
-use crate::FrontendError;
+use crate::{FrontendConnectionOptions, FrontendError};
 
-const READ_BUF_INITIAL_CAPACITY: usize = 4096;
-const COMPLETED_CHANNEL_CAPACITY: usize = 1024;
+pub(crate) struct FrontendConnectionSetup {
+    pub(crate) stream: tokio::net::TcpStream,
+    pub(crate) context: ProxyContext,
+    pub(crate) options: FrontendConnectionOptions,
+}
 
 /// one client connection's lifecycle:
 /// - decode pipelined Meta commands
@@ -43,6 +47,7 @@ pub(crate) struct Connection {
     input_closed: bool,
     completed_tx: Sender<(usize, Reply)>,
     completed_rx: Receiver<(usize, Reply)>,
+    requests: JoinSet<()>,
 }
 
 struct Slot {
@@ -62,16 +67,21 @@ enum SlotOutcome {
 }
 
 impl Connection {
-    pub(crate) fn new(stream: tokio::net::TcpStream, context: ProxyContext) -> Self {
+    pub(crate) fn new(setup: FrontendConnectionSetup) -> Self {
+        let FrontendConnectionSetup {
+            stream,
+            context,
+            options,
+        } = setup;
         let (reader, writer) = stream.into_split();
-        let (completed_tx, completed_rx) = mpsc::channel(COMPLETED_CHANNEL_CAPACITY);
+        let (completed_tx, completed_rx) = mpsc::channel(options.completed_capacity);
         context.metrics.client_connections.inc();
 
         Self {
             reader,
             writer,
             context,
-            buf: BytesMut::with_capacity(READ_BUF_INITIAL_CAPACITY),
+            buf: BytesMut::with_capacity(options.read_buf_initial_capacity),
             write_buf: BytesMut::new(),
             decoder: MetaRequestDecoder::new(),
             encoder: MetaReplyEncoder::new(),
@@ -82,6 +92,7 @@ impl Connection {
             input_closed: false,
             completed_tx,
             completed_rx,
+            requests: JoinSet::new(),
         }
     }
 
@@ -119,6 +130,9 @@ impl Connection {
                         }
                         None => return Ok(()),
                     }
+                }
+                Some(result) = self.requests.join_next(), if !self.requests.is_empty() => {
+                    result?;
                 }
             }
         }
@@ -184,11 +198,11 @@ impl Connection {
         }
     }
 
-    fn submit_single(&self, seq: usize, request: Request) {
+    fn submit_single(&mut self, seq: usize, request: Request) {
         let target = self.context.target(&request);
         let completed_tx = self.completed_tx.clone();
 
-        tokio::task::spawn_local(async move {
+        self.requests.spawn_local(async move {
             let reply = dispatch(target, request).await;
 
             let _ = completed_tx.send((seq, reply)).await;
@@ -316,7 +330,11 @@ mod tests {
         let (server_stream, _) = listener.accept().await.unwrap();
 
         let (handle, _inbox) = ProxyHandle::allocate(0);
-        let conn = Connection::new(server_stream, ProxyContext::solo(handle, routes, metrics));
+        let conn = Connection::new(FrontendConnectionSetup {
+            stream: server_stream,
+            context: ProxyContext::solo(handle, routes, metrics),
+            options: FrontendConnectionOptions::default(),
+        });
         let task = tokio::task::spawn_local(async move {
             let _ = conn.run().await;
         });
