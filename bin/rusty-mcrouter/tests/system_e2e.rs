@@ -100,6 +100,41 @@ async fn start_router_with_args(
     RouterProcess::spawn(config_body, tag, num_proxies, extra_args).await
 }
 
+async fn startup_failure(
+    tag: u16,
+    listen_addr: SocketAddr,
+    metrics_addr: SocketAddr,
+) -> std::process::Output {
+    let path = std::env::temp_dir().join(format!(
+        "rusty-mcrouter-startup-failure-{}-{tag}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, r#"{ "route": "NullRoute" }"#).unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new(env!("CARGO_BIN_EXE_rusty-mcrouter"))
+            .arg("--config")
+            .arg(&path)
+            .arg("--listen")
+            .arg(listen_addr.to_string())
+            .arg("--metrics-addr")
+            .arg(metrics_addr.to_string())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    std::fs::remove_file(path).unwrap();
+    let output = output
+        .expect("router did not stop after startup failure")
+        .unwrap();
+    assert!(!output.status.success(), "router unexpectedly started");
+    assert!(
+        output.stdout.is_empty(),
+        "startup failure reported readiness"
+    );
+    output
+}
+
 async fn start_stack() -> Stack {
     let backend_addr = spawn_mock_memcached().await;
 
@@ -253,6 +288,31 @@ async fn ctrl_c_stops_proxy_and_control_threads_cleanly() {
         .await
         .expect("router did not stop after Ctrl-C");
     assert!(status.success(), "router exited with {status}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_bind_failure_is_reported_before_proxy_startup() {
+    let proxy_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let metrics_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let metrics_addr = metrics_listener.local_addr().unwrap();
+    let output = startup_failure(63_001, proxy_listener.local_addr().unwrap(), metrics_addr).await;
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!("bind({metrics_addr}) failed")),
+        "{stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_bind_failure_stops_the_already_started_control_thread() {
+    let proxy_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listen_addr = proxy_listener.local_addr().unwrap();
+    let output = startup_failure(63_002, listen_addr, "127.0.0.1:0".parse().unwrap()).await;
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!("bind({listen_addr}) failed")),
+        "{stderr}"
+    );
 }
 
 /// a dead backend marks hard on first contact (connect refused) and the

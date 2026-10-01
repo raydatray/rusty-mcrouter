@@ -53,9 +53,12 @@ flowchart LR
 
 the executable's [`main.rs`](../../bin/rusty-mcrouter/src/main.rs) declares the
 binary modules and calls synchronous `app::run`.
-[`app.rs`](../../bin/rusty-mcrouter/src/app.rs) parses CLI options, loads the
-startup config, wires shared state, starts the proxy fleet and control thread,
-then waits for an exit event and joins them.
+[`app.rs`](../../bin/rusty-mcrouter/src/app.rs) parses CLI options, initializes
+logging and observability state, and allocates each worker's handle, inbox and
+metric shards. it loads the startup config, wires shared state, starts the
+control thread before the proxy fleet, then waits for an exit event and joins
+them. the scrape registry and workers share the app-allocated metric shards;
+the reloader receives the app-allocated proxy handles.
 [`proxy_fleet.rs`](../../bin/rusty-mcrouter/src/proxy_fleet.rs) owns launching
 and joining proxy threads; the frontend runtime lives in `crates/proxy/`.
 
@@ -98,8 +101,14 @@ long-lived runtime task is intentionally detached. Wildcard routing is the
 exception for short-lived work: non-primary fanout targets run in detached
 local tasks and may be cancelled when their proxy thread stops.
 
-Startup binds listeners and waits for each thread's ready acknowledgement
-before printing `READY` and `METRICS`. Ctrl-C and unexpected thread exits are
+Startup first binds the control thread's metrics listener, so it can serve
+scrapes and consume events while proxies start. the control thread owns the
+reloader from startup, but polling waits for main's `ProxiesReady` command after
+every proxy acknowledges readiness. main then marks config generation 1 as
+applied and enables reloads before printing `READY` and `METRICS`. failed
+startup threads are joined, and a proxy startup failure stops control after
+the started proxies have been joined and their events can be drained.
+Ctrl-C and unexpected thread exits are
 reported to main. Main stops and joins proxy threads first, allowing their
 worker-stop events to reach the control runtime, then drains and joins the
 control thread.

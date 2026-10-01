@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::{mpsc::sync_channel, Arc};
 use std::thread::{Builder, JoinHandle};
 
+use anyhow::Context;
 use rusty_mcrouter_observability::EventSender;
 use rusty_mcrouter_proxy::{
     proxy_thread_main, ListenerConfig, ProxyHandle, ProxyInbox, ProxySet, ProxyShards, ProxyShared,
@@ -31,9 +32,16 @@ impl ProxyThread {
                 proxy_thread_main(config, ready_tx)
             })?;
 
-        let bound_addr = match ready_rx.recv() {
-            Ok(result) => result?,
-            Err(_) => anyhow::bail!("proxy-{proxy_id} died during startup"),
+        let started = ready_rx
+            .recv()
+            .with_context(|| format!("proxy-{proxy_id} died during startup"))
+            .and_then(|result| result);
+        let bound_addr = match started {
+            Ok(addr) => addr,
+            Err(error) => {
+                let _ = join.join();
+                return Err(error);
+            }
         };
 
         Ok((

@@ -17,6 +17,10 @@ rusty-mcrouter --config config.json --disable-reload-configs
 | `--reconfiguration-delay-ms` | 1000 | how often the file is checked, and how long a change settles before it is applied |
 | `--disable-reload-configs` | off | never reload; the startup config runs for the life of the process |
 
+the reloader is constructed with the control thread, which starts before the
+proxy fleet. polling begins only after every proxy is ready, keeping metrics
+and event handling available throughout worker startup.
+
 only pools and routes reload. every CLI option, including `--route-prefix`
 and the timeouts, is fixed at startup. to deploy a config, write it to a
 temporary file and rename it over the watched path, so the router never reads
@@ -93,7 +97,7 @@ an invalid config at startup still exits the process.
 
 | metric | meaning |
 |---|---|
-| `rusty_mcrouter_config_generation` | 1 at startup, +1 per applied reload |
+| `rusty_mcrouter_config_generation` | 0 while starting, 1 once all proxies are ready, +1 per applied reload |
 | `rusty_mcrouter_config_reload_attempts_total` | settled changes attempted |
 | `rusty_mcrouter_config_reload_failures_total{stage}` | rejected attempts by stage |
 | `rusty_mcrouter_config_last_reload_successful` | 1 when the file on disk is what is running |
