@@ -1,11 +1,11 @@
 use rusty_mcrouter_backend::{destination::DestinationMetricsRegistry, tko::TkoTrackerMap};
 use rusty_mcrouter_observability::{channel, logging, ConfigMetrics, ControlMetrics, ScrapeInputs};
-use rusty_mcrouter_proxy::{ProxyShards, ProxyShared, ThreadMode};
+use rusty_mcrouter_proxy::{ProxyHandle, ProxyShards, ProxyShared, ThreadMode};
 
 use crate::args::Args;
 use crate::config;
 use crate::control::{ControlThread, ControlThreadConfig, ProcessEvent, Supervisor};
-use crate::proxy_fleet::{ProxyFleet, ProxyFleetConfig};
+use crate::proxy_fleet::{ProxyFleet, ProxyFleetConfig, ProxyWorkerInputs};
 use crate::reload::{ConfigReloader, ReloaderConfig};
 
 use std::{io::Write, sync::Arc};
@@ -36,11 +36,22 @@ pub(crate) fn run() -> anyhow::Result<()> {
 
     let supervisor = Supervisor::new();
 
-    let proxy_shards: Vec<_> = (0..args.num_proxies).map(|_| ProxyShards::new()).collect();
+    let (workers, proxy_handles, proxy_shards): (Vec<_>, Vec<_>, Vec<_>) = (0..args.num_proxies)
+        .map(|id| {
+            let (handle, inbox) = ProxyHandle::allocate(id);
+            let shards = ProxyShards::new();
+            let worker = ProxyWorkerInputs {
+                handle: handle.clone(),
+                inbox,
+                shards: shards.clone(),
+            };
+            (worker, handle, shards)
+        })
+        .collect();
 
     let proxies = ProxyFleet::spawn(
         ProxyFleetConfig {
-            shards: proxy_shards.clone(),
+            workers,
             num_listening_sockets: args.num_listening_sockets,
             listen_addr,
             shared: Arc::clone(&shared),
@@ -63,7 +74,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
             path: args.config.clone(),
             delay: args.reconfiguration_delay(),
             running: (config_bytes, config),
-            proxies: proxies.handles(),
+            proxies: proxy_handles,
             defaults: args.destination_defaults(),
             root_options: args.root_route_options(),
             metrics: config_metrics,

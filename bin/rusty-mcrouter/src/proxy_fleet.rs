@@ -4,7 +4,7 @@ use std::thread::{Builder, JoinHandle};
 
 use rusty_mcrouter_observability::EventSender;
 use rusty_mcrouter_proxy::{
-    proxy_thread_main, ListenerConfig, ProxyHandle, ProxySet, ProxyShards, ProxyShared,
+    proxy_thread_main, ListenerConfig, ProxyHandle, ProxyInbox, ProxySet, ProxyShards, ProxyShared,
     ProxyThreadConfig,
 };
 
@@ -61,8 +61,14 @@ impl ProxyThread {
     }
 }
 
+pub struct ProxyWorkerInputs {
+    pub handle: ProxyHandle,
+    pub inbox: ProxyInbox,
+    pub shards: ProxyShards,
+}
+
 pub struct ProxyFleetConfig {
-    pub shards: Vec<ProxyShards>,
+    pub workers: Vec<ProxyWorkerInputs>,
     pub num_listening_sockets: usize,
     pub listen_addr: SocketAddr,
     pub shared: Arc<ProxyShared>,
@@ -77,19 +83,23 @@ pub struct ProxyFleet {
 impl ProxyFleet {
     /// on failure shuts down what it already started
     pub fn spawn(cfg: ProxyFleetConfig, supervisor: &Supervisor) -> anyhow::Result<Self> {
-        let shards = cfg.shards;
-        let num_proxies = shards.len();
-        let (handles, inboxes): (Vec<_>, Vec<_>) =
-            (0..num_proxies).map(ProxyHandle::allocate).unzip();
-        let proxies = ProxySet::new(handles.clone());
+        let proxies = ProxySet::new(
+            cfg.workers
+                .iter()
+                .map(|worker| worker.handle.clone())
+                .collect(),
+        );
 
         let use_reuseport = cfg.num_listening_sockets > 1;
-        let mut threads = Vec::with_capacity(num_proxies);
+        let mut threads = Vec::with_capacity(cfg.workers.len());
         let mut bound_addr: Option<SocketAddr> = None;
 
-        for (proxy_id, ((handle, inbox), shards)) in
-            handles.into_iter().zip(inboxes).zip(&shards).enumerate()
-        {
+        for (proxy_id, worker) in cfg.workers.into_iter().enumerate() {
+            let ProxyWorkerInputs {
+                handle,
+                inbox,
+                shards,
+            } = worker;
             let listener = (proxy_id < cfg.num_listening_sockets).then_some(ListenerConfig {
                 listen_addr: cfg.listen_addr,
                 use_reuseport,
@@ -97,7 +107,7 @@ impl ProxyFleet {
             let thread_cfg = ProxyThreadConfig {
                 proxy_id,
                 inbox,
-                shards: shards.clone(),
+                shards,
                 shared: Arc::clone(&cfg.shared),
                 proxies: proxies.clone(),
                 listener,
@@ -138,13 +148,6 @@ impl ProxyFleet {
 
     pub fn bound_addr(&self) -> SocketAddr {
         self.bound_addr
-    }
-
-    pub fn handles(&self) -> Vec<ProxyHandle> {
-        self.threads
-            .iter()
-            .map(|thread| thread.handle.clone())
-            .collect()
     }
 
     pub fn shutdown(self) -> anyhow::Result<()> {
