@@ -84,8 +84,8 @@ metrics and logs.
 ```mermaid
 flowchart TB
     M[main process supervisor]
-    M --> PT0[ProxyThread 0]
-    M --> PTN[ProxyThread N]
+    M --> PT0[ProxyThreadOwner 0]
+    M --> PTN[ProxyThreadOwner N]
     M --> CT[ControlThread]
     PT0 --> PW0[ProxyWorker]
     PTN --> PWN[ProxyWorker]
@@ -100,6 +100,10 @@ flowchart TB
 `Handle` means a cloneable mailbox. `Thread` means unique OS-thread ownership
 plus joining. `Runtime` means the actor and task state that lives on that
 thread's current-thread Tokio runtime.
+
+`ProxyThreadOwner` is external to the proxy runtime: it retains the command
+handle solely to stop and join its child, including on drop. ownership is
+established before the readiness wait so failed startup is guarded too.
 
 | path | delivery contract |
 |---|---|

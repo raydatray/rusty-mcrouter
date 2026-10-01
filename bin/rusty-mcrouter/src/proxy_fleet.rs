@@ -34,46 +34,38 @@ fn proxy_thread_main(
     local.block_on(&executor, worker.run())
 }
 
-pub struct ProxyThread {
+/// External lifetime owner; its handle is a cleanup capability, not a runtime input.
+pub struct ProxyThreadOwner {
     handle: ProxyHandle,
     join: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
-impl ProxyThread {
+impl ProxyThreadOwner {
     pub fn spawn(
         handle: ProxyHandle,
-        config: ProxyThreadSetup,
+        setup: ProxyThreadSetup,
         supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, Option<SocketAddr>)> {
-        let proxy_id = config.proxy_id;
+        let proxy_id = setup.proxy_id;
         let (ready_tx, ready_rx) = sync_channel(1);
         let exit = supervisor.exit_notifier(ProcessEvent::ProxyExited { id: proxy_id });
         let join = Builder::new()
             .name(format!("proxy-{proxy_id}"))
             .spawn(move || {
                 let _exit = exit;
-                proxy_thread_main(config, ready_tx)
+                proxy_thread_main(setup, ready_tx)
             })?;
 
-        let started = ready_rx
+        let owner = Self {
+            handle,
+            join: Some(join),
+        };
+        let bound_addr = ready_rx
             .recv()
             .with_context(|| format!("proxy-{proxy_id} died during startup"))
-            .and_then(|result| result);
-        let bound_addr = match started {
-            Ok(addr) => addr,
-            Err(error) => {
-                let _ = join.join();
-                return Err(error);
-            }
-        };
+            .and_then(|result| result)?;
 
-        Ok((
-            Self {
-                handle,
-                join: Some(join),
-            },
-            bound_addr,
-        ))
+        Ok((owner, bound_addr))
     }
 
     pub fn shutdown(mut self) -> anyhow::Result<()> {
@@ -96,7 +88,7 @@ impl ProxyThread {
     }
 }
 
-impl Drop for ProxyThread {
+impl Drop for ProxyThreadOwner {
     fn drop(&mut self) {
         let _ = self.stop();
     }
@@ -117,7 +109,7 @@ pub struct ProxyFleetSetup {
 }
 
 pub struct ProxyFleet {
-    threads: Vec<ProxyThread>,
+    threads: Vec<ProxyThreadOwner>,
     bound_addr: SocketAddr,
 }
 
@@ -154,7 +146,7 @@ impl ProxyFleet {
                 events: setup.events.sink(),
             };
 
-            ProxyThread::spawn(handle, thread_cfg, supervisor)
+            ProxyThreadOwner::spawn(handle, thread_cfg, supervisor)
         };
 
         let (threads, addresses): (Vec<_>, Vec<_>) = setup
@@ -238,7 +230,7 @@ mod tests {
             .zip(configurations)
             .enumerate()
             .map(|(proxy_id, ((handle, inbox), shared))| {
-                ProxyThread::spawn(
+                ProxyThreadOwner::spawn(
                     handle,
                     ProxyThreadSetup {
                         proxy_id,
