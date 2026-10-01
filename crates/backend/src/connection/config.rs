@@ -1,4 +1,21 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+
+use tokio::sync::mpsc::Receiver;
+
+use crate::connection::{types::ConnectionCommand, ConnectionEvent};
+use crate::metrics::BackendMetricsShard;
+
+pub struct ConnectionInbox {
+    pub(crate) rx: Receiver<ConnectionCommand>,
+}
+
+pub struct ConnectionSetup {
+    pub addr: Arc<str>,
+    pub options: BackendConnectionConfig,
+    pub inbox: ConnectionInbox,
+    pub events: Box<dyn Fn(ConnectionEvent)>,
+    pub metrics: Arc<BackendMetricsShard>,
+}
 
 #[derive(Clone, Debug)]
 pub struct BackendConnectionConfig {

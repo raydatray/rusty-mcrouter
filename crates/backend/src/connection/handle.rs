@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::{
@@ -11,12 +11,10 @@ use tokio::{
 
 use crate::{
     connection::{
-        actor::Connection,
         types::{Command, ConnectionCommand, Payload},
-        BackendConnectionConfig, ConnectionEvent,
+        BackendConnectionConfig, ConnectionInbox,
     },
     error::SendError,
-    metrics::BackendMetricsShard,
 };
 
 #[derive(Clone)]
@@ -26,18 +24,15 @@ pub struct ConnectionHandle {
 }
 
 impl ConnectionHandle {
-    pub fn spawn(
-        addr: Arc<str>,
-        cfg: BackendConnectionConfig,
-        events: Box<dyn Fn(ConnectionEvent)>,
-        shard_metrics: Arc<BackendMetricsShard>,
-    ) -> ConnectionHandle {
-        let (tx, rx) = mpsc::channel(cfg.max_pending);
-        let reply_timeout = cfg.reply_timeout;
-
-        tokio::task::spawn_local(Connection::new(addr, cfg, rx, events, shard_metrics).run());
-
-        ConnectionHandle { tx, reply_timeout }
+    pub fn allocate(options: &BackendConnectionConfig) -> (Self, ConnectionInbox) {
+        let (tx, rx) = mpsc::channel(options.max_pending);
+        (
+            Self {
+                tx,
+                reply_timeout: options.reply_timeout,
+            },
+            ConnectionInbox { rx },
+        )
     }
 
     pub async fn send(&self, request: Request) -> Result<Reply, SendError> {
@@ -80,14 +75,35 @@ impl ConnectionHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use rusty_mcrouter_protocol::test_support::{expect_get_value, expect_version, get, get_miss};
 
     use super::*;
-    use crate::connection::DownReason;
+    use crate::connection::{Connection, ConnectionEvent, ConnectionSetup, DownReason};
     use crate::error::{ConnectError, RequestError};
+    use crate::metrics::BackendMetricsShard;
     use crate::test_support::{
         event_log, run_local, scripted_backend_serial, ConnectionEventLog, ScriptedServer, Step,
     };
+
+    fn spawn_connection(
+        addr: Arc<str>,
+        options: BackendConnectionConfig,
+        events: Box<dyn Fn(ConnectionEvent)>,
+        metrics: Arc<BackendMetricsShard>,
+    ) -> ConnectionHandle {
+        let (handle, inbox) = ConnectionHandle::allocate(&options);
+        let connection = Connection::new(ConnectionSetup {
+            addr,
+            options,
+            inbox,
+            events,
+            metrics,
+        });
+        tokio::task::spawn_local(connection.run());
+        handle
+    }
 
     fn spawn_to(
         server: &ScriptedServer,
@@ -99,7 +115,7 @@ mod tests {
     ) {
         let (sink, log) = event_log();
         let metrics = BackendMetricsShard::new();
-        let handle = ConnectionHandle::spawn(
+        let handle = spawn_connection(
             Arc::from(server.addr.to_string()),
             cfg,
             sink,
@@ -325,12 +341,8 @@ mod tests {
             };
             let (sink, log) = event_log();
             let metrics = BackendMetricsShard::new();
-            let handle = ConnectionHandle::spawn(
-                Arc::from(addr.to_string()),
-                cfg,
-                sink,
-                Arc::clone(&metrics),
-            );
+            let handle =
+                spawn_connection(Arc::from(addr.to_string()), cfg, sink, Arc::clone(&metrics));
 
             let start = Instant::now();
             let result = handle.send(get(b"a")).await;
@@ -369,7 +381,7 @@ mod tests {
             };
             let (sink, log) = event_log();
             let metrics = BackendMetricsShard::new();
-            let handle = ConnectionHandle::spawn(
+            let handle = spawn_connection(
                 Arc::from("192.0.2.1:12345"),
                 cfg,
                 sink,
