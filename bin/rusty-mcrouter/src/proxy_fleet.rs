@@ -102,14 +102,14 @@ impl Drop for ProxyThread {
     }
 }
 
-pub struct ProxyWorkerInputs {
+pub struct ProxyWorkerResources {
     pub handle: ProxyHandle,
     pub inbox: ProxyInbox,
     pub shards: ProxyShards,
 }
 
-pub struct ProxyFleetConfig {
-    pub workers: Vec<ProxyWorkerInputs>,
+pub struct ProxyFleetSetup {
+    pub workers: Vec<ProxyWorkerResources>,
     pub num_listening_sockets: usize,
     pub listen_addr: SocketAddr,
     pub shared: Arc<ProxyShared>,
@@ -123,63 +123,55 @@ pub struct ProxyFleet {
 
 impl ProxyFleet {
     /// on failure shuts down what it already started
-    pub fn spawn(cfg: ProxyFleetConfig, supervisor: &Supervisor) -> anyhow::Result<Self> {
+    pub fn spawn(setup: ProxyFleetSetup, supervisor: &Supervisor) -> anyhow::Result<Self> {
         let proxies = ProxySet::new(
-            cfg.workers
+            setup
+                .workers
                 .iter()
                 .map(|worker| worker.handle.clone())
                 .collect(),
         );
 
-        let use_reuseport = cfg.num_listening_sockets > 1;
-        let mut threads = Vec::with_capacity(cfg.workers.len());
-        let mut bound_addr: Option<SocketAddr> = None;
-
-        for (proxy_id, worker) in cfg.workers.into_iter().enumerate() {
-            let ProxyWorkerInputs {
+        let use_reuseport = setup.num_listening_sockets > 1;
+        let spawn_worker = |(proxy_id, worker): (usize, ProxyWorkerResources)| {
+            let ProxyWorkerResources {
                 handle,
                 inbox,
                 shards,
             } = worker;
-            let listener = (proxy_id < cfg.num_listening_sockets).then_some(ListenerConfig {
-                listen_addr: cfg.listen_addr,
+            let listener = (proxy_id < setup.num_listening_sockets).then_some(ListenerConfig {
+                listen_addr: setup.listen_addr,
                 use_reuseport,
             });
             let thread_cfg = ProxyThreadSetup {
                 proxy_id,
                 inbox,
                 shards,
-                shared: Arc::clone(&cfg.shared),
+                shared: Arc::clone(&setup.shared),
                 proxies: proxies.clone(),
                 listener,
-                routing_events: cfg.events.sink(),
-                events: cfg.events.sink(),
+                routing_events: setup.events.sink(),
+                events: setup.events.sink(),
             };
 
-            match ProxyThread::spawn(handle, thread_cfg, supervisor) {
-                Ok((thread, addr)) => {
-                    if let Some(addr) = addr {
-                        bound_addr.get_or_insert(addr);
-                    }
-                    threads.push(thread);
-                }
-                Err(error) => {
-                    let _ = shutdown_all(threads);
-                    return Err(error);
-                }
-            }
-        }
+            ProxyThread::spawn(handle, thread_cfg, supervisor)
+        };
+
+        let (threads, addresses): (Vec<_>, Vec<_>) = setup
+            .workers
+            .into_iter()
+            .enumerate()
+            .map(spawn_worker)
+            .collect::<anyhow::Result<_>>()?;
 
         // threads keep their own clones; the queues stay open until they exit
-        drop((proxies, cfg.events));
+        drop((proxies, setup.events));
 
-        let bound_addr = match bound_addr {
-            Some(addr) => addr,
-            None => {
-                let _ = shutdown_all(threads);
-                anyhow::bail!("no proxy thread reported a bound address");
-            }
-        };
+        let bound_addr = addresses
+            .into_iter()
+            .flatten()
+            .next()
+            .context("no proxy thread reported a bound address")?;
 
         Ok(Self {
             threads,
@@ -192,19 +184,86 @@ impl ProxyFleet {
     }
 
     pub fn shutdown(self) -> anyhow::Result<()> {
-        shutdown_all(self.threads)
+        let mut outcome = Ok(());
+
+        for thread in self.threads {
+            let stopped = thread.shutdown();
+            outcome = outcome.and(stopped);
+        }
+
+        outcome
     }
 }
 
-fn shutdown_all(threads: Vec<ProxyThread>) -> anyhow::Result<()> {
-    let mut first_error = None;
-    for thread in threads {
-        if let Err(error) = thread.shutdown() {
-            first_error.get_or_insert(error);
-        }
-    }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, net::TcpListener, time::Duration};
+
+    use rusty_mcrouter_backend::{
+        destination::DestinationMetricsRegistry,
+        tko::{DestTokenAllocator, TkoTrackerMap},
+    };
+    use rusty_mcrouter_observability::{channel, ControlMetrics};
+    use rusty_mcrouter_proxy::ThreadMode;
+
+    use super::*;
+
+    #[test]
+    fn failed_collection_joins_previously_started_proxies() {
+        let (events, _consumer) = channel(8, Arc::new(ControlMetrics::default()));
+        let shared = |document: &str| {
+            Arc::new(ProxyShared {
+                tokens: Arc::new(DestTokenAllocator::new()),
+                config: Arc::new(crate::config::parse(document.as_bytes()).unwrap()),
+                tko_map: TkoTrackerMap::new(events.sink()),
+                destinations: DestinationMetricsRegistry::new(),
+                defaults: Default::default(),
+                root_route_options: Default::default(),
+                sweep_interval: Duration::ZERO,
+                thread_mode: ThreadMode::SameThread,
+                connection_options: Default::default(),
+            })
+        };
+        let configurations = [
+            shared(r#"{ "route": "NullRoute" }"#),
+            shared(r#"{ "routes": { "/a/b/": "NullRoute" } }"#),
+        ];
+        let (handles, inboxes): (Vec<_>, Vec<_>) = (0..2).map(ProxyHandle::allocate).unzip();
+        let peers = ProxySet::new(handles.clone());
+        let supervisor = Supervisor::new();
+        let bound = Cell::new(None);
+        let result = handles
+            .into_iter()
+            .zip(inboxes)
+            .zip(configurations)
+            .enumerate()
+            .map(|(proxy_id, ((handle, inbox), shared))| {
+                ProxyThread::spawn(
+                    handle,
+                    ProxyThreadSetup {
+                        proxy_id,
+                        inbox,
+                        shards: ProxyShards::new(),
+                        shared,
+                        proxies: peers.clone(),
+                        listener: (proxy_id == 0).then_some(ListenerConfig {
+                            listen_addr: "127.0.0.1:0".parse().unwrap(),
+                            use_reuseport: false,
+                        }),
+                        routing_events: events.sink(),
+                        events: events.sink(),
+                    },
+                    &supervisor,
+                )
+                .inspect(|(_, address)| {
+                    if address.is_some() {
+                        bound.set(*address);
+                    }
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>();
+        assert!(result.is_err());
+        TcpListener::bind(bound.get().expect("first proxy never started"))
+            .expect("failed collection left an earlier proxy listening");
     }
 }

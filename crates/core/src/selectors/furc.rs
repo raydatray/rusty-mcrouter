@@ -16,19 +16,18 @@ pub(crate) const FURC_MAX_POOL_SIZE: usize = 1 << FURC_SHIFT;
 // - seeded as `furc` seeds it
 // - tail handling mirrors the `switch (len & 7)` fallthrough
 fn murmur_hash_64a(key: &[u8], seed: u64) -> u64 {
-    let mut chunks = key.chunks_exact(8);
+    let (chunks, tail) = key.as_chunks::<8>();
 
-    let mut h = chunks
-        .by_ref()
-        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
-        .fold(seed ^ (key.len() as u64).wrapping_mul(M), |h, mut k| {
+    let mut h = chunks.iter().map(|chunk| u64::from_le_bytes(*chunk)).fold(
+        seed ^ (key.len() as u64).wrapping_mul(M),
+        |h, mut k| {
             k = k.wrapping_mul(M);
             k ^= k >> R;
             k = k.wrapping_mul(M);
             (h ^ k).wrapping_mul(M)
-        });
+        },
+    );
 
-    let tail = chunks.remainder();
     if !tail.is_empty() {
         let k = tail
             .iter()

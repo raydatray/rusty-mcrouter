@@ -21,6 +21,11 @@ the reloader is constructed with the control thread, which starts before the
 proxy fleet. polling begins only after every proxy is ready, keeping metrics
 and event handling available throughout worker startup.
 
+the app supplies the control inbox and proxy handles through setup values.
+worker threads construct their own route graphs using a `GenerationSetup`;
+each build gets a fresh backend factory over the worker's persistent destination
+map. config-application timestamps are supplied to metrics by the binary.
+
 only pools and routes reload. every CLI option, including `--route-prefix`
 and the timeouts, is fixed at startup. to deploy a config, write it to a
 temporary file and rename it over the watched path, so the router never reads

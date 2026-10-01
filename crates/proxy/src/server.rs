@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 
-use tokio::net::{lookup_host, TcpListener, TcpSocket, ToSocketAddrs};
+use tokio::net::{lookup_host, TcpListener, TcpSocket};
 
-use crate::{error::Result, FrontendError, ProxySet};
+use crate::{error::Result, FrontendError, ListenerConfig, ProxySet};
 
 const LISTEN_BACKLOG: u32 = 1024;
 
@@ -10,36 +10,32 @@ pub struct Server {
     listener: TcpListener,
 }
 
+pub async fn bind_listener(options: ListenerConfig) -> Result<TcpListener> {
+    if !options.use_reuseport {
+        return TcpListener::bind(options.listen_addr)
+            .await
+            .map_err(Into::into);
+    }
+    lookup_host(options.listen_addr)
+        .await?
+        .find_map(|addr| {
+            let socket = if addr.is_ipv4() {
+                TcpSocket::new_v4()
+            } else {
+                TcpSocket::new_v6()
+            }
+            .ok()?;
+            socket.set_reuseaddr(true).ok()?;
+            socket.set_reuseport(true).ok()?;
+            socket.bind(addr).ok()?;
+            socket.listen(LISTEN_BACKLOG).ok()
+        })
+        .ok_or(FrontendError::NoAddresses)
+}
+
 impl Server {
     pub fn new(listener: TcpListener) -> Self {
         Self { listener }
-    }
-
-    pub async fn bind(addr: impl ToSocketAddrs) -> Result<Self> {
-        let listener = TcpListener::bind(addr).await?;
-
-        Ok(Self::new(listener))
-    }
-
-    pub async fn bind_reuseport(addr: impl ToSocketAddrs) -> Result<Self> {
-        let listener = lookup_host(addr)
-            .await?
-            .find_map(|addr| {
-                let socket = if addr.is_ipv4() {
-                    TcpSocket::new_v4()
-                } else {
-                    TcpSocket::new_v6()
-                }
-                .ok()?;
-
-                socket.set_reuseaddr(true).ok()?;
-                socket.set_reuseport(true).ok()?;
-                socket.bind(addr).ok()?;
-                socket.listen(LISTEN_BACKLOG).ok()
-            })
-            .ok_or(FrontendError::NoAddresses)?;
-
-        Ok(Self::new(listener))
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -79,21 +75,30 @@ fn is_transient_accept_error(e: &std::io::Error) -> bool {
 mod tests {
     use super::*;
 
+    async fn bind(addr: SocketAddr, use_reuseport: bool) -> Result<Server> {
+        bind_listener(ListenerConfig {
+            listen_addr: addr,
+            use_reuseport,
+        })
+        .await
+        .map(Server::new)
+    }
+
     #[tokio::test]
     async fn bind_reuseport_allows_two_binds_on_same_port() {
-        let s1 = Server::bind_reuseport("127.0.0.1:0").await.unwrap();
+        let s1 = bind("127.0.0.1:0".parse().unwrap(), true).await.unwrap();
         let addr = s1.listener.local_addr().unwrap();
 
-        let s2 = Server::bind_reuseport(addr).await.unwrap();
+        let s2 = bind(addr, true).await.unwrap();
         assert_eq!(s2.listener.local_addr().unwrap(), addr);
     }
 
     #[tokio::test]
     async fn bind_reuseport_plain_bind_on_same_port_fails() {
-        let s1 = Server::bind_reuseport("127.0.0.1:0").await.unwrap();
+        let s1 = bind("127.0.0.1:0".parse().unwrap(), true).await.unwrap();
         let addr = s1.listener.local_addr().unwrap();
 
-        match Server::bind(addr).await {
+        match bind(addr, false).await {
             Ok(_) => {
                 panic!("plain bind without SO_REUSEPORT should fail when port is already bound")
             }
