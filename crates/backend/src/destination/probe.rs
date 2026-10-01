@@ -15,8 +15,13 @@ fn jitter(state: &mut u64) -> f64 {
         + (*state >> 11) as f64 / (1u64 << 53) as f64 * (PROBE_JITTER_MAX - PROBE_JITTER_MIN)
 }
 
-pub(crate) async fn probe_loop(dest: Weak<Destination>, initial: Duration, max: Duration) {
-    let mut rng = Weak::as_ptr(&dest) as u64 ^ initial.as_nanos() as u64; // get some randomness by taking the addr of the destination so we dont thundering herd
+pub(crate) async fn probe_loop(
+    dest: Weak<Destination>,
+    initial: Duration,
+    max: Duration,
+    seed: u64,
+) {
+    let mut rng = seed;
     let mut delay_ms = initial.as_millis() as u64;
     loop {
         let delay = Duration::from_millis((delay_ms as f64 * (1.0 + jitter(&mut rng))) as u64);
@@ -76,5 +81,17 @@ mod tests {
         for _ in 0..8 {
             assert_eq!(jitter(&mut a).to_bits(), jitter(&mut b).to_bits());
         }
+    }
+
+    #[test]
+    fn consecutive_destination_tokens_spread_initial_probe_delays() {
+        let allocator = crate::tko::DestTokenAllocator::new();
+        let delays: std::collections::HashSet<_> = (0..32)
+            .map(|_| {
+                let mut seed = allocator.allocate().probe_seed();
+                (10_000.0 * (1.0 + jitter(&mut seed))) as u64
+            })
+            .collect();
+        assert!(delays.len() >= 24, "probe delays clustered: {delays:?}");
     }
 }

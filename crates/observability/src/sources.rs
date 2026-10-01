@@ -427,7 +427,7 @@ impl MetricsSource for ConfigSource {
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_backend::tko::{DestToken, FailOpenThresholds};
+    use rusty_mcrouter_backend::tko::{DestTokenAllocator, FailOpenThresholds};
     use rusty_mcrouter_config::{parse, ConfigDocument};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
@@ -558,13 +558,14 @@ mod tests {
 
     #[test]
     fn tko_source_reflects_marks_and_gates() {
+        let allocator = DestTokenAllocator::new();
         let map = TkoTrackerMap::new(noop_sink());
         let tracker = map.tracker_for("10.0.0.1:11211", 3);
-        assert!(tracker.record_hard_failure(DestToken::allocate(), ResultCode::ConnectError));
+        assert!(tracker.record_hard_failure(allocator.allocate(), ResultCode::ConnectError));
 
         // soft mark on a second server for the kind="soft" gauge
         let soft = map.tracker_for("10.0.0.2:11211", 1);
-        assert!(soft.record_soft_failure(DestToken::allocate(), ResultCode::Timeout));
+        assert!(soft.record_soft_failure(allocator.allocate(), ResultCode::Timeout));
 
         // drive the gate directly into fail-open (enter=1: one slot
         // admitted, the next reservation flips the gate)

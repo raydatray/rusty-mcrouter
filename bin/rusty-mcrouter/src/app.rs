@@ -1,4 +1,7 @@
-use rusty_mcrouter_backend::{destination::DestinationMetricsRegistry, tko::TkoTrackerMap};
+use rusty_mcrouter_backend::{
+    destination::DestinationMetricsRegistry,
+    tko::{DestTokenAllocator, TkoTrackerMap},
+};
 use rusty_mcrouter_observability::{channel, logging, ConfigMetrics, ControlMetrics, ScrapeInputs};
 use rusty_mcrouter_proxy::{ProxyHandle, ProxyShards, ProxyShared, ThreadMode};
 
@@ -23,6 +26,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let config_metrics = Arc::new(ConfigMetrics::default());
     let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&control_metrics));
     let tko_map = TkoTrackerMap::new(events.sink());
+    let tokens = Arc::new(DestTokenAllocator::new());
     let destinations = DestinationMetricsRegistry::new();
     let (workers, proxy_handles, proxy_shards): (Vec<_>, Vec<_>, Vec<_>) = (0..args.num_proxies)
         .map(|id| {
@@ -40,6 +44,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let (config_bytes, config) = config::load(&args.config)?;
     let config = Arc::new(config);
     let shared = Arc::new(ProxyShared {
+        tokens,
         config: Arc::clone(&config),
         tko_map,
         destinations,

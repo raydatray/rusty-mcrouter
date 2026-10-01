@@ -8,4 +8,4 @@ pub use events::{TkoEvent, TkoEventRecord, TkoEventSink};
 pub use map::TkoTrackerMap;
 pub use metrics::GlobalTkoMetrics;
 pub use pool::{FailOpenThresholds, GateDecision, PoolTkoTracker};
-pub use tracker::{DestToken, TkoTracker};
+pub use tracker::{DestToken, DestTokenAllocator, TkoTracker};

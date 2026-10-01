@@ -7,7 +7,7 @@ use std::{
 use rusty_mcrouter_backend::{
     destination::{DestinationConfig, DestinationMetricsRegistry},
     metrics::BackendMetricsShard,
-    tko::TkoTrackerMap,
+    tko::{DestTokenAllocator, TkoTrackerMap},
 };
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::{RootRouteOptions, RoutingEventSink, RoutingMetricsShard};
@@ -57,6 +57,7 @@ impl Default for ProxyShards {
 }
 
 pub struct ProxyShared {
+    pub tokens: Arc<DestTokenAllocator>,
     pub config: Arc<ConfigDocument>,
     /// Cross-thread health: same-server destinations on different threads
     /// share health verdicts through it (atomics only).

@@ -123,7 +123,7 @@ mod tests {
 
     use super::*;
     use crate::classify::ResultCode;
-    use crate::tko::DestToken;
+    use crate::tko::{DestToken, DestTokenAllocator};
 
     #[test]
     fn tracker_for_dedups_to_same_arc() {
@@ -139,9 +139,10 @@ mod tests {
     /// FRESH tracker (dead state is not resurrected).
     #[test]
     fn dead_tracker_is_replaced_with_fresh_state() {
+        let allocator = DestTokenAllocator::new();
         let map = TkoTrackerMap::new(noop_sink());
         let a = map.tracker_for("s:1", 1);
-        assert!(a.record_soft_failure(DestToken::allocate(), ResultCode::Timeout));
+        assert!(a.record_soft_failure(allocator.allocate(), ResultCode::Timeout));
         assert!(a.is_tko());
         drop(a); // ~TkoTracker -> remove_dead
 
@@ -203,10 +204,11 @@ mod tests {
 
     #[test]
     fn sus_servers_reports_only_failing_trackers() {
+        let allocator = DestTokenAllocator::new();
         let map = TkoTrackerMap::new(noop_sink());
         let bad = map.tracker_for("bad:1", 3);
         let _good = map.tracker_for("good:1", 3);
-        assert!(!bad.record_soft_failure(DestToken::allocate(), ResultCode::Timeout));
+        assert!(!bad.record_soft_failure(allocator.allocate(), ResultCode::Timeout));
 
         let sus = map.sus_servers();
         assert_eq!(sus.len(), 1);
@@ -232,6 +234,7 @@ mod tests {
     /// case. The gauge draining to zero proves mark/unmark pairing.
     #[test]
     fn responsibility_is_unique_under_contention() {
+        let allocator = DestTokenAllocator::new();
         let map = TkoTrackerMap::new(noop_sink());
         let tracker = map.tracker_for("s:1", 3);
         let target_wins = 200u64;
@@ -241,8 +244,9 @@ mod tests {
             for _ in 0..8 {
                 let tracker = Arc::clone(&tracker);
                 let total_wins = &total_wins;
+                let allocator = &allocator;
                 s.spawn(move || {
-                    let token = DestToken::allocate();
+                    let token = allocator.allocate();
                     while total_wins.load(Ordering::SeqCst) < target_wins {
                         if tracker.record_soft_failure(token, ResultCode::Timeout) {
                             // we won responsibility: we and ONLY we may unmark
@@ -265,6 +269,7 @@ mod tests {
     /// ever, and full capacity still available afterwards.
     #[test]
     fn pool_reservation_undo_balances_under_contention() {
+        let allocator = DestTokenAllocator::new();
         let (sink, events) = recording_sink_with(|record: TkoEventRecord| record.event);
         let map = TkoTrackerMap::new(sink);
         let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 8, exit: 1 });
@@ -277,8 +282,9 @@ mod tests {
             for _ in 0..4 {
                 let tracker = Arc::clone(&tracker);
                 let total_wins = &total_wins;
+                let allocator = &allocator;
                 s.spawn(move || {
-                    let token = DestToken::allocate();
+                    let token = allocator.allocate();
                     while total_wins.load(Ordering::SeqCst) < target_wins {
                         if tracker.record_soft_failure(token, ResultCode::Timeout) {
                             assert!(tracker.record_success(token));
@@ -299,7 +305,7 @@ mod tests {
             let t = map.tracker_for(&format!("probe:{i}"), 1);
             t.set_pool_tracker(Arc::clone(&gate));
             assert!(
-                t.record_soft_failure(DestToken::allocate(), ResultCode::Timeout),
+                t.record_soft_failure(allocator.allocate(), ResultCode::Timeout),
                 "probe box {i} refused: pool count did not drain to zero"
             );
         }
@@ -311,6 +317,7 @@ mod tests {
     /// ExitFailOpen exactly once -> marking admitted again.
     #[test]
     fn fail_open_hysteresis_emits_enter_and_exit_exactly_once() {
+        let allocator = DestTokenAllocator::new();
         let (sink, events) = recording_sink_with(|record: TkoEventRecord| record.event);
         let map = TkoTrackerMap::new(sink);
         let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 3, exit: 1 });
@@ -319,7 +326,7 @@ mod tests {
             .map(|i| {
                 let t = map.tracker_for(&format!("s:{i}"), 1);
                 t.set_pool_tracker(Arc::clone(&gate));
-                (t, DestToken::allocate())
+                (t, allocator.allocate())
             })
             .collect();
 
@@ -369,9 +376,10 @@ mod tests {
     /// one, and the winner's token is the only one that can unmark.
     #[test]
     fn hard_failure_single_winner_under_contention() {
+        let allocator = DestTokenAllocator::new();
         let map = TkoTrackerMap::new(noop_sink());
         let tracker = map.tracker_for("s:1", 3);
-        let tokens: Vec<DestToken> = (0..8).map(|_| DestToken::allocate()).collect();
+        let tokens: Vec<DestToken> = (0..8).map(|_| allocator.allocate()).collect();
         let wins = AtomicUsize::new(0);
         let winner_idx = AtomicUsize::new(usize::MAX);
 
@@ -398,6 +406,7 @@ mod tests {
 
     #[test]
     fn sus_servers_does_not_deadlock_with_final_owner_drops() {
+        let allocator = Arc::new(DestTokenAllocator::new());
         const WORKERS: usize = 4;
         const ROUNDS: usize = 5_000;
 
@@ -408,6 +417,7 @@ mod tests {
         let mut threads = Vec::with_capacity(WORKERS + 1);
 
         for worker in 0..WORKERS {
+            let allocator = Arc::clone(&allocator);
             let map = Arc::clone(&map);
             let active = Arc::clone(&active);
             let start = Arc::clone(&start);
@@ -416,7 +426,7 @@ mod tests {
                 start.wait();
                 for round in 0..ROUNDS {
                     let tracker = map.tracker_for(&format!("churn:{worker}:{round}"), 3);
-                    tracker.record_soft_failure(DestToken::allocate(), ResultCode::Timeout);
+                    tracker.record_soft_failure(allocator.allocate(), ResultCode::Timeout);
                     std::thread::yield_now();
                     drop(tracker);
                 }

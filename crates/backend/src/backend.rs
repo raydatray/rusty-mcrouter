@@ -141,18 +141,24 @@ mod tests {
 
     use super::*;
     use crate::classify::ResultCode;
-    use crate::destination::DestinationMetricsRegistry;
+    use crate::destination::{
+        DestinationAssembler, DestinationAssemblerSetup, DestinationMapSetup,
+        DestinationMetricsRegistry,
+    };
     use crate::metrics::BackendMetricsShard;
     use crate::test_support::{run_local, scripted_backend_serial, Step};
-    use crate::tko::{DestToken, TkoTrackerMap};
+    use crate::tko::{DestTokenAllocator, TkoTrackerMap};
 
     fn factory() -> (Arc<TkoTrackerMap>, DestinationFactory) {
         let tko = TkoTrackerMap::new(noop_sink());
-        let factory = DestinationFactory::new(Map::new(
-            Arc::clone(&tko),
-            BackendMetricsShard::new(),
-            DestinationMetricsRegistry::new(),
-        ));
+        let factory = DestinationFactory::new(Map::new(DestinationMapSetup {
+            tko_map: Arc::clone(&tko),
+            assembler: DestinationAssembler::new(DestinationAssemblerSetup {
+                tokens: Arc::new(DestTokenAllocator::new()),
+                metrics: DestinationMetricsRegistry::new(),
+                shard_metrics: BackendMetricsShard::new(),
+            }),
+        }));
         (tko, factory)
     }
 
@@ -198,6 +204,7 @@ mod tests {
     #[tokio::test]
     async fn gated_pool_attaches_fail_open_gate() {
         run_local(async {
+            let allocator = DestTokenAllocator::new();
             let (_tko, factory) = factory();
             let cfg = destination::DestinationConfig::default();
             let pool = PoolHealth {
@@ -213,10 +220,10 @@ mod tests {
 
             assert!(a
                 .tracker()
-                .record_hard_failure(DestToken::allocate(), ResultCode::ConnectError));
+                .record_hard_failure(allocator.allocate(), ResultCode::ConnectError));
             assert!(
                 !b.tracker()
-                    .record_hard_failure(DestToken::allocate(), ResultCode::ConnectError),
+                    .record_hard_failure(allocator.allocate(), ResultCode::ConnectError),
                 "both servers must share the pool's one-slot gate"
             );
         })

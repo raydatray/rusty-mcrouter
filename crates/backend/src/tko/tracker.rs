@@ -16,11 +16,35 @@ use crate::{
 pub struct DestToken(u64);
 
 pub(crate) const TOKEN_BASE: u64 = 1 << 10;
-static NEXT_TOKEN: AtomicU64 = AtomicU64::new(TOKEN_BASE);
-
 impl DestToken {
-    pub fn allocate() -> DestToken {
-        DestToken(NEXT_TOKEN.fetch_add(2, Ordering::Relaxed))
+    pub(crate) fn probe_seed(self) -> u64 {
+        // Mix adjacent identifiers before xorshift so first probes also spread out.
+        let seed = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let seed = (seed ^ (seed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let seed = (seed ^ (seed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (seed ^ (seed >> 31)).max(1)
+    }
+}
+
+pub struct DestTokenAllocator {
+    next: AtomicU64,
+}
+
+impl Default for DestTokenAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DestTokenAllocator {
+    pub fn new() -> Self {
+        Self {
+            next: AtomicU64::new(TOKEN_BASE),
+        }
+    }
+
+    pub fn allocate(&self) -> DestToken {
+        DestToken(self.next.fetch_add(2, Ordering::Relaxed))
     }
 }
 
@@ -328,8 +352,9 @@ mod tests {
 
     #[test]
     fn token_allocation_is_even_monotonic_and_above_token_base() {
-        let a = DestToken::allocate();
-        let b = DestToken::allocate();
+        let allocator = DestTokenAllocator::new();
+        let a = allocator.allocate();
+        let b = allocator.allocate();
         assert_eq!(a.0 % 2, 0, "tokens must be even: LSB is the hard bit");
         assert_eq!(b.0 % 2, 0);
         assert!(b.0 > a.0);
@@ -341,8 +366,9 @@ mod tests {
     /// the 3rd consecutive one.
     #[test]
     fn marks_soft_only_on_consecutive_threshold_failures() {
+        let allocator = DestTokenAllocator::new();
         let (_map, t) = tracker(3);
-        let dest = DestToken::allocate();
+        let dest = allocator.allocate();
 
         assert!(!t.record_soft_failure(dest, ResultCode::Timeout));
         assert!(!t.record_soft_failure(dest, ResultCode::Timeout));
@@ -363,9 +389,10 @@ mod tests {
     /// (a straggler reply from a pre-mark request) must NOT unmark.
     #[test]
     fn straggler_success_never_unmarks() {
+        let allocator = DestTokenAllocator::new();
         let (map, t) = tracker(1);
-        let owner = DestToken::allocate();
-        let straggler = DestToken::allocate();
+        let owner = allocator.allocate();
+        let straggler = allocator.allocate();
 
         assert!(t.record_soft_failure(owner, ResultCode::Timeout));
         assert!(t.is_soft_tko());
@@ -381,8 +408,9 @@ mod tests {
 
     #[test]
     fn hard_failure_marks_instantly_and_repeat_is_noop() {
+        let allocator = DestTokenAllocator::new();
         let (map, t) = tracker(3);
-        let dest = DestToken::allocate();
+        let dest = allocator.allocate();
 
         assert!(t.record_hard_failure(dest, ResultCode::ConnectError));
         assert!(t.is_hard_tko());
@@ -403,14 +431,15 @@ mod tests {
     /// gate.
     #[test]
     fn soft_to_hard_conversion_moves_globals_but_not_pool_count() {
+        let allocator = DestTokenAllocator::new();
         let map = TkoTrackerMap::new(noop_sink());
         let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 2, exit: 1 });
         let a = map.tracker_for("a:11211", 1);
         let b = map.tracker_for("b:11211", 1);
         a.set_pool_tracker(Arc::clone(&gate));
         b.set_pool_tracker(Arc::clone(&gate));
-        let tok_a = DestToken::allocate();
-        let tok_b = DestToken::allocate();
+        let tok_a = allocator.allocate();
+        let tok_b = allocator.allocate();
 
         assert!(a.record_soft_failure(tok_a, ResultCode::Timeout)); // pool slot 1
         assert!(!a.record_hard_failure(tok_a, ResultCode::ConnectError)); // convert
@@ -429,9 +458,10 @@ mod tests {
 
     #[test]
     fn hard_failure_does_not_take_over_anothers_soft_tko() {
+        let allocator = DestTokenAllocator::new();
         let (_map, t) = tracker(1);
-        let owner = DestToken::allocate();
-        let other = DestToken::allocate();
+        let owner = allocator.allocate();
+        let other = allocator.allocate();
 
         assert!(t.record_soft_failure(owner, ResultCode::Timeout));
         assert!(!t.record_hard_failure(other, ResultCode::ConnectError));
@@ -443,9 +473,10 @@ mod tests {
 
     #[test]
     fn remove_destination_unmarks_owner_only() {
+        let allocator = DestTokenAllocator::new();
         let (map, t) = tracker(1);
-        let owner = DestToken::allocate();
-        let other = DestToken::allocate();
+        let owner = allocator.allocate();
+        let other = allocator.allocate();
 
         assert!(t.record_soft_failure(owner, ResultCode::Timeout));
         assert!(!t.remove_destination(other));
@@ -459,6 +490,7 @@ mod tests {
     /// keeps failing naturally instead of being marked.
     #[test]
     fn gate_refusal_leaves_word_unmarked() {
+        let allocator = DestTokenAllocator::new();
         let map = TkoTrackerMap::new(noop_sink());
         let gate = map.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
         let a = map.tracker_for("a:11211", 1);
@@ -466,8 +498,8 @@ mod tests {
         a.set_pool_tracker(Arc::clone(&gate));
         b.set_pool_tracker(Arc::clone(&gate));
 
-        assert!(a.record_soft_failure(DestToken::allocate(), ResultCode::Timeout));
-        let tok_b = DestToken::allocate();
+        assert!(a.record_soft_failure(allocator.allocate(), ResultCode::Timeout));
+        let tok_b = allocator.allocate();
         assert!(!b.record_soft_failure(tok_b, ResultCode::Timeout)); // refused
         assert!(!b.is_tko());
         assert!(!b.record_hard_failure(tok_b, ResultCode::ConnectError)); // also refused
