@@ -5,6 +5,11 @@ use tokio::sync::mpsc::Receiver;
 use crate::connection::{types::ConnectionCommand, ConnectionEvent};
 use crate::metrics::BackendMetricsShard;
 
+pub struct ConnectionResources {
+    pub handle: crate::connection::ConnectionHandle,
+    pub task: tokio::task::JoinHandle<()>,
+}
+
 pub struct ConnectionInbox {
     pub(crate) rx: Receiver<ConnectionCommand>,
 }

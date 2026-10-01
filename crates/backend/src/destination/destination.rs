@@ -1,7 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     future::Future,
-    rc::{Rc, Weak},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -11,10 +11,7 @@ use tokio::time::Instant;
 use crate::destination::probe::probe_loop;
 use crate::{
     classify::{code_of, ResultCode},
-    connection::{
-        BackendConnectionConfig, Connection, ConnectionEvent, ConnectionHandle, ConnectionSetup,
-        DownReason,
-    },
+    connection::{ConnectionEvent, ConnectionHandle, ConnectionResources, DownReason},
     destination::{DestinationConfig, DestinationKey, DestinationMetrics},
     error::{ConnectError, LocalError, SendError},
     metrics::BackendMetricsShard,
@@ -22,11 +19,22 @@ use crate::{
     Backend, PreparedSend, TkoRejection,
 };
 
+pub struct DestinationSetup {
+    pub key: DestinationKey,
+    pub options: DestinationConfig,
+    pub token: DestToken,
+    pub tracker: Arc<TkoTracker>,
+    pub connection: ConnectionResources,
+    pub metrics: Arc<DestinationMetrics>,
+    pub shard_metrics: Arc<BackendMetricsShard>,
+}
+
 pub struct Destination {
     key: DestinationKey,
     token: DestToken,
     tracker: Arc<TkoTracker>,
     conn: ConnectionHandle,
+    connection_task: tokio::task::JoinHandle<()>,
     cfg: DestinationConfig,
     probe: RefCell<Option<tokio::task::JoinHandle<()>>>,
     metrics: Arc<DestinationMetrics>,
@@ -35,53 +43,19 @@ pub struct Destination {
 }
 
 impl Destination {
-    pub fn new(
-        key: DestinationKey,
-        cfg: DestinationConfig,
-        tracker: Arc<TkoTracker>,
-        metrics: Arc<DestinationMetrics>,
-        shard_metrics: Arc<BackendMetricsShard>,
-    ) -> Rc<Self> {
-        Rc::new_cyclic(|weak: &Weak<Destination>| {
-            let events = {
-                let weak = weak.clone();
-                Box::new(move |ev| {
-                    if let Some(dest) = weak.upgrade() {
-                        dest.on_conn_event(ev);
-                    }
-                }) as Box<dyn Fn(ConnectionEvent)>
-            };
-
-            let connection_cfg = BackendConnectionConfig {
-                connect_timeout: Some(cfg.connect_timeout),
-                connect_timeout_retries: cfg.connect_timeout_retries,
-                write_timeout: Some(cfg.reply_timeout),
-                reply_timeout: Some(cfg.reply_timeout),
-                ..BackendConnectionConfig::default()
-            };
-
-            let addr = Arc::clone(&key.addr);
-            let (conn, inbox) = ConnectionHandle::allocate(&connection_cfg);
-            let connection = Connection::new(ConnectionSetup {
-                addr,
-                options: connection_cfg,
-                inbox,
-                events,
-                metrics: Arc::clone(&shard_metrics),
-            });
-            tokio::task::spawn_local(connection.run());
-            Destination {
-                key,
-                token: DestToken::allocate(),
-                tracker,
-                conn,
-                cfg,
-                probe: RefCell::new(None),
-                metrics,
-                shard_metrics,
-                last_active: Cell::new(Instant::now()),
-            }
-        })
+    pub fn new(setup: DestinationSetup) -> Self {
+        Self {
+            key: setup.key,
+            token: setup.token,
+            tracker: setup.tracker,
+            conn: setup.connection.handle,
+            connection_task: setup.connection.task,
+            cfg: setup.options,
+            probe: RefCell::new(None),
+            metrics: setup.metrics,
+            shard_metrics: setup.shard_metrics,
+            last_active: Cell::new(Instant::now()),
+        }
     }
 
     pub(crate) fn is_tko(&self) -> bool {
@@ -171,7 +145,7 @@ impl Destination {
         self.tracker.record_success(self.token);
     }
 
-    fn on_conn_event(self: &Rc<Self>, ev: ConnectionEvent) {
+    pub(crate) fn on_conn_event(self: &Rc<Self>, ev: ConnectionEvent) {
         match ev {
             ConnectionEvent::Up => {
                 self.metrics.connects.inc();
@@ -249,6 +223,7 @@ impl Drop for Destination {
         if let Some(task) = self.probe.borrow_mut().take() {
             task.abort();
         }
+        self.connection_task.abort();
     }
 }
 
@@ -277,7 +252,7 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::{get, store};
 
     use super::*;
-    use crate::destination::DestinationMetricsRegistry;
+    use crate::destination::{DestinationAssembler, DestinationMetricsRegistry};
     use crate::test_support::{run_local, scripted_backend_serial, ScriptedServer, Step};
     use crate::tko::{TkoEventRecord, TkoTrackerMap};
 
@@ -326,12 +301,11 @@ mod tests {
             addr,
             reply_timeout: cfg.reply_timeout,
         };
-        let dest = Destination::new(
+        let dest = DestinationAssembler::new(BackendMetricsShard::new()).spawn_destination(
             key,
             cfg,
             Arc::clone(&tracker),
             metrics,
-            BackendMetricsShard::new(),
         );
         (map, tracker, dest, events)
     }
@@ -344,6 +318,24 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         panic!("condition not met within 2s");
+    }
+
+    #[tokio::test]
+    async fn dropping_destination_stops_its_actor_even_with_a_retained_handle() {
+        run_local(async {
+            let server = scripted_backend_serial(vec![]).await;
+            let (_map, _tracker, destination, _events) = dest_for(&server, cfg(3, 1000, 10_000));
+            let handle = destination.conn.clone();
+            let task = destination.connection_task.abort_handle();
+            drop(destination);
+            wait_until(|| task.is_finished()).await;
+            assert!(matches!(
+                handle.send_probe().await,
+                Err(SendError::Local(LocalError::Shutdown))
+            ));
+            assert_eq!(server.accept_count(), 0);
+        })
+        .await;
     }
 
     /// A marked destination fails fast: no connect, no write, no I/O at all.
@@ -508,12 +500,11 @@ mod tests {
                 addr: addr_b,
                 reply_timeout: Duration::from_millis(1000),
             };
-            let dest_b = Destination::new(
+            let dest_b = DestinationAssembler::new(BackendMetricsShard::new()).spawn_destination(
                 key_b,
                 cfg(3, 1000, 10_000),
                 Arc::clone(&tracker),
                 metrics_b,
-                BackendMetricsShard::new(),
             );
 
             let _ = send(&dest_a, get(b"a")).await;
@@ -552,12 +543,11 @@ mod tests {
                 addr,
                 reply_timeout: Duration::from_millis(1000),
             };
-            let dest = Destination::new(
+            let dest = DestinationAssembler::new(Arc::clone(&shard)).spawn_destination(
                 key,
                 cfg(3, 1000, 10_000),
                 Arc::clone(&tracker),
                 metrics,
-                Arc::clone(&shard),
             );
 
             let get_cell = |code: ResultCode| {
