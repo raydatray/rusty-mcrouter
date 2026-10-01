@@ -842,7 +842,7 @@ mod tests {
     fn oversized_store_swallows_body_before_server_error() {
         let value_len = MAX_VALUE_BYTES + 1;
         let mut input = format!("ms key {value_len}\r\n").into_bytes();
-        input.extend(std::iter::repeat(b'x').take(value_len));
+        input.extend(std::iter::repeat_n(b'x', value_len));
         input.extend_from_slice(b"\r\nmn\r\n");
         let mut decoder = MetaRequestDecoder::new();
         let mut src = BytesMut::from(input.as_slice());
@@ -1020,7 +1020,7 @@ mod tests {
         );
 
         let mut oversized = Vec::from(&b"mg "[..]);
-        oversized.extend(std::iter::repeat(b'k').take(MAX_KEY_BYTES + 1));
+        oversized.extend(std::iter::repeat_n(b'k', MAX_KEY_BYTES + 1));
         oversized.extend_from_slice(b"\r\n");
         assert_eq!(
             decode_error(&oversized),
@@ -1031,14 +1031,14 @@ mod tests {
     #[test]
     fn enforces_opaque_length_limit() {
         let mut accepted = Vec::from(&b"mg key O"[..]);
-        accepted.extend(std::iter::repeat(b'x').take(MAX_OPAQUE_BYTES));
+        accepted.extend(std::iter::repeat_n(b'x', MAX_OPAQUE_BYTES));
         accepted.extend_from_slice(b"\r\n");
         let (request, reply_plan) = test_support::command(&accepted);
         expect_get_request(request);
         assert_eq!(reply_plan.opaque.unwrap().len(), MAX_OPAQUE_BYTES);
 
         let mut rejected = Vec::from(&b"mg key O"[..]);
-        rejected.extend(std::iter::repeat(b'x').take(MAX_OPAQUE_BYTES + 1));
+        rejected.extend(std::iter::repeat_n(b'x', MAX_OPAQUE_BYTES + 1));
         rejected.extend_from_slice(b"\r\n");
         assert_eq!(
             decode_error(&rejected),
@@ -1099,7 +1099,7 @@ mod tests {
         let hint_len = MAX_COMMAND_LINE_BYTES - prefix.len() - 1;
         let mut input = Vec::with_capacity(MAX_COMMAND_LINE_BYTES);
         input.extend_from_slice(prefix);
-        input.extend(std::iter::repeat(b'x').take(hint_len));
+        input.extend(std::iter::repeat_n(b'x', hint_len));
         input.push(b'\n');
         assert_eq!(input.len(), MAX_COMMAND_LINE_BYTES);
 

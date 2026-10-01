@@ -25,5 +25,5 @@ pub use crate::handle::ProxyHandle;
 pub use crate::message::{ProxyCommand, ProxyRequest};
 pub use crate::metrics::FrontendMetricsShard;
 pub use crate::proxy_set::ProxySet;
-pub use crate::server::Server;
+pub use crate::server::{bind_listener, Server};
 pub use crate::worker::ProxyWorker;

@@ -33,6 +33,10 @@ the root `Cargo.toml` defines the application workspace and shared dependencies.
 packages keep their `rusty-mcrouter-*` names; executable packages live in `bin/`
 and libraries in `crates/`. each package uses the usual `src/` and `tests/` layout.
 
+runtime construction uses explicit setup/resources: app-owned shared state and
+mailboxes flow into worker-local assembly, while actors expose construction and
+execution separately. see [dependency ownership](docs/architecture/README.md#construction-and-dependency-ownership).
+
 ```bash
 cargo build --locked -p rusty-mcrouter
 cargo test --workspace --locked

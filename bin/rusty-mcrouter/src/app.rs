@@ -10,7 +10,7 @@ use rusty_mcrouter_proxy::{ProxyHandle, ProxyShards, ProxyShared, ThreadMode};
 use crate::args::Args;
 use crate::config;
 use crate::control::{ControlHandle, ControlThread, ControlThreadSetup, ProcessEvent, Supervisor};
-use crate::proxy_fleet::{ProxyFleet, ProxyFleetConfig, ProxyWorkerInputs};
+use crate::proxy_fleet::{ProxyFleet, ProxyFleetSetup, ProxyWorkerResources};
 use crate::reload::{ConfigReloader, ReloaderSetup, RunningConfig};
 
 use std::{
@@ -44,7 +44,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         .map(|id| {
             let (handle, inbox) = ProxyHandle::allocate(id);
             let shards = ProxyShards::new();
-            let worker = ProxyWorkerInputs {
+            let worker = ProxyWorkerResources {
                 handle: handle.clone(),
                 inbox,
                 shards: shards.clone(),
@@ -111,7 +111,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     )?;
 
     let proxies = match ProxyFleet::spawn(
-        ProxyFleetConfig {
+        ProxyFleetSetup {
             workers,
             num_listening_sockets: args.num_listening_sockets,
             listen_addr,

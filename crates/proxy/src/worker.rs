@@ -7,7 +7,8 @@ use crate::context::ProxyContext;
 use crate::generation::{GenerationBuilder, GenerationSetup, RouteSlot};
 use crate::runtime::{BackgroundTasks, ProxyRuntime};
 use crate::{
-    ProxyInbox, ProxyThreadSetup, Server, WorkerEvent, WorkerEventRecord, WorkerEventSink,
+    bind_listener, ProxyInbox, ProxyThreadSetup, Server, WorkerEvent, WorkerEventRecord,
+    WorkerEventSink,
 };
 
 /// Thread-local worker state, constructed inside its owner's Tokio LocalSet.
@@ -26,12 +27,11 @@ impl ProxyWorker {
     pub async fn build(setup: ProxyThreadSetup) -> anyhow::Result<Self> {
         let server = match setup.listener {
             Some(listener) => {
-                let result = if listener.use_reuseport {
-                    Server::bind_reuseport(listener.listen_addr).await
-                } else {
-                    Server::bind(listener.listen_addr).await
-                };
-                Some(result.with_context(|| format!("bind({}) failed", listener.listen_addr))?)
+                let addr = listener.listen_addr;
+                let listener = bind_listener(listener)
+                    .await
+                    .with_context(|| format!("bind({addr}) failed"))?;
+                Some(Server::new(listener))
             }
             None => None,
         };

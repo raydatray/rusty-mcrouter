@@ -60,7 +60,10 @@ control thread before the proxy fleet, then waits for an exit event and joins
 them. the scrape registry and workers share the app-allocated metric shards;
 the reloader receives the app-allocated proxy handles.
 [`proxy_fleet.rs`](../../bin/rusty-mcrouter/src/proxy_fleet.rs) owns launching
-and joining proxy threads; the frontend runtime lives in `crates/proxy/`.
+and joining proxy threads. both proxy and control executors are created by the
+binary's thread wrappers. [`ProxyWorker`](../../crates/proxy/src/worker.rs)
+builds thread-local proxy state and runs the frontend runtime; `ControlWorker`
+builds and runs control services in the binary.
 
 [`config.rs`](../../bin/rusty-mcrouter/src/config.rs) owns file loading and byte
 parsing, shared by startup and the reloader.
@@ -73,9 +76,11 @@ flowchart TB
     M --> PT0[ProxyThread 0]
     M --> PTN[ProxyThread N]
     M --> CT[ControlThread]
-    PT0 --> PR0[ProxyRuntime]
-    PTN --> PRN[ProxyRuntime]
-    CT --> CR[ControlRuntime]
+    PT0 --> PW0[ProxyWorker]
+    PTN --> PWN[ProxyWorker]
+    PW0 --> PR0[ProxyRuntime]
+    PWN --> PRN[ProxyRuntime]
+    CT --> CR[ControlWorker]
     CR --> EC[EventConsumer]
     CR --> MH[MetricsHttp]
     CR --> RL[ConfigReloader]
@@ -94,7 +99,7 @@ thread's current-thread Tokio runtime.
 
 `ProxyRuntime` owns routed-request tasks, client connections, listener and
 destination-sweep tasks, and the current route graph generation.
-`ControlRuntime` owns event presentation, the metrics listener, at most 32
+`ControlWorker` owns event presentation, the metrics listener, at most 32
 concurrent metrics connection tasks, and the config reloader, which sends new
 configs to proxies over their command channels. No OS thread or
 long-lived runtime task is intentionally detached. Wildcard routing is the
@@ -112,6 +117,39 @@ Ctrl-C and unexpected thread exits are
 reported to main. Main stops and joins proxy threads first, allowing their
 worker-stop events to reach the control runtime, then drains and joins the
 control thread.
+
+## construction and dependency ownership
+
+- `Config` and `Options` describe behavior; `Setup` carries constructor inputs;
+  `Resources` groups allocated dependencies such as handles, inboxes and shards.
+- `new` assembles supplied dependencies and component-owned working state.
+  mailbox allocation and task activation are explicit `allocate` and `spawn`
+  operations; actors execute through `run`.
+- backend `Connection` receives a `ConnectionSetup`. `DestinationAssembler`
+  wires its weak event callback, spawns the connection, and supplies a
+  `DestinationSetup`. the destination owns and aborts the connection and probe
+  tasks when its last reference drops.
+- each worker's destination map receives its assembler. the app owns one shared
+  destination-token allocator, and supplies the event bus and metric registries.
+  probe seeds are reproducibly mixed from allocated tokens.
+- `GenerationBuilder` receives `GenerationSetup` and creates a fresh
+  `DestinationFactory` for each graph, preserving generation-local gate caches
+  while the map reuses live destinations across reloads.
+- frontend sessions receive their socket, proxy context and connection options.
+  sessions own their request tasks, buffers, codecs and pipeline bookkeeping.
+  frontend servers and metrics HTTP receive already-bound listeners; binding is
+  performed during worker preparation.
+- proxy listener and idle-sweep tasks begin in `ProxyWorker::run`. background
+  task owners abort on drop, and thread owners stop and join on drop. explicit
+  shutdown still reports errors, and stops proxies before control.
+- process metadata and config-application timestamps are supplied by the binary;
+  metric sources do not read the wall clock. control inboxes are app-allocated,
+  just like proxy inboxes.
+
+shared resources use `Arc`; route graphs, destinations and their connection
+callbacks remain worker-local with `Rc`. the existing `Backend` and
+`BackendFactory` traits support production, mock and validation implementations.
+TCP and filesystem operations remain concrete.
 
 ## request lifecycle
 ```mermaid
