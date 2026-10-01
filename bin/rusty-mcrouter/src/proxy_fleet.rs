@@ -62,7 +62,7 @@ impl ProxyThread {
 }
 
 pub struct ProxyFleetConfig {
-    pub num_proxies: usize,
+    pub shards: Vec<ProxyShards>,
     pub num_listening_sockets: usize,
     pub listen_addr: SocketAddr,
     pub shared: Arc<ProxyShared>,
@@ -71,21 +71,20 @@ pub struct ProxyFleetConfig {
 
 pub struct ProxyFleet {
     threads: Vec<ProxyThread>,
-    shards: Vec<ProxyShards>,
     bound_addr: SocketAddr,
 }
 
 impl ProxyFleet {
     /// on failure shuts down what it already started
     pub fn spawn(cfg: ProxyFleetConfig, supervisor: &Supervisor) -> anyhow::Result<Self> {
+        let shards = cfg.shards;
+        let num_proxies = shards.len();
         let (handles, inboxes): (Vec<_>, Vec<_>) =
-            (0..cfg.num_proxies).map(ProxyHandle::allocate).unzip();
+            (0..num_proxies).map(ProxyHandle::allocate).unzip();
         let proxies = ProxySet::new(handles.clone());
-        // created here so the scrape sources hold the same Arcs the threads write
-        let shards: Vec<_> = (0..cfg.num_proxies).map(|_| ProxyShards::new()).collect();
 
         let use_reuseport = cfg.num_listening_sockets > 1;
-        let mut threads = Vec::with_capacity(cfg.num_proxies);
+        let mut threads = Vec::with_capacity(num_proxies);
         let mut bound_addr: Option<SocketAddr> = None;
 
         for (proxy_id, ((handle, inbox), shards)) in
@@ -133,17 +132,12 @@ impl ProxyFleet {
 
         Ok(Self {
             threads,
-            shards,
             bound_addr,
         })
     }
 
     pub fn bound_addr(&self) -> SocketAddr {
         self.bound_addr
-    }
-
-    pub fn shards(&self) -> Vec<ProxyShards> {
-        self.shards.clone()
     }
 
     pub fn handles(&self) -> Vec<ProxyHandle> {
