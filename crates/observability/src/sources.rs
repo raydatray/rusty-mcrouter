@@ -15,9 +15,7 @@ use rusty_mcrouter_core::{
 use rusty_mcrouter_protocol::RequestKind;
 use rusty_mcrouter_proxy::{FrontendMetricsShard, ProxyShards};
 
-use crate::metrics::{
-    ConfigMetrics, ControlMetrics, MetricsRegistry, MetricsSource, MetricsText, ReloadStage,
-};
+use crate::metrics::{ControlMetrics, MetricsRegistry, MetricsSource, MetricsText};
 use crate::shard_source;
 
 #[derive(Clone, Copy, Debug)]
@@ -32,7 +30,7 @@ pub struct ScrapeInputs {
     pub tko_map: Arc<TkoTrackerMap>,
     pub destinations: Arc<DestinationMetricsRegistry>,
     pub control: Arc<ControlMetrics>,
-    pub config: Arc<ConfigMetrics>,
+    pub additional_sources: Vec<Box<dyn MetricsSource>>,
 }
 
 impl ScrapeInputs {
@@ -72,9 +70,9 @@ impl ScrapeInputs {
             num_proxies: self.metadata.num_proxies,
             start_unix_secs: self.metadata.start_unix_secs,
         }));
-        registry.register(Box::new(ConfigSource {
-            metrics: self.config,
-        }));
+        for source in self.additional_sources {
+            registry.register(source);
+        }
         registry
     }
 }
@@ -391,43 +389,6 @@ impl MetricsSource for SelfSource {
     }
 }
 
-pub struct ConfigSource {
-    pub metrics: Arc<ConfigMetrics>,
-}
-
-impl MetricsSource for ConfigSource {
-    fn encode(&self, out: &mut MetricsText) {
-        let metrics = &self.metrics;
-        out.gauge(
-            "rusty_mcrouter_config_generation",
-            &[],
-            metrics.generation.load(),
-        );
-        out.counter(
-            "rusty_mcrouter_config_reload_attempts_total",
-            &[],
-            metrics.reload_attempts.load(),
-        );
-        for stage in ReloadStage::ALL {
-            out.counter(
-                "rusty_mcrouter_config_reload_failures_total",
-                &[("stage", stage.label())],
-                metrics.reload_failures[stage as usize].load(),
-            );
-        }
-        out.gauge(
-            "rusty_mcrouter_config_last_reload_successful",
-            &[],
-            metrics.last_reload_successful.load(),
-        );
-        out.gauge(
-            "rusty_mcrouter_config_last_success_timestamp_seconds",
-            &[],
-            metrics.last_success_unix_secs.load(),
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use rusty_mcrouter_backend::tko::{DestTokenAllocator, FailOpenThresholds};
@@ -441,6 +402,14 @@ mod tests {
         let mut registry = MetricsRegistry::new();
         registry.register(Box::new(source));
         registry.render()
+    }
+
+    struct InjectedSource;
+
+    impl MetricsSource for InjectedSource {
+        fn encode(&self, out: &mut MetricsText) {
+            out.gauge("injected_metric", &[], 1);
+        }
     }
 
     fn pools_config(names: &[&str]) -> ConfigDocument {
@@ -635,7 +604,7 @@ mod tests {
             tko_map: TkoTrackerMap::new(noop_sink()),
             destinations: DestinationMetricsRegistry::new(),
             control,
-            config: ConfigMetrics::started(1_700_000_000),
+            additional_sources: vec![Box::new(InjectedSource)],
         }
         .into_registry()
         .render();
@@ -652,7 +621,7 @@ mod tests {
             position("rusty_mcrouter_tko{kind=\"soft\"} 0\n"),
             position("rusty_mcrouter_events_dropped_total 1\n"),
             position("rusty_mcrouter_proxies 2\n"),
-            position("rusty_mcrouter_config_generation 1\n"),
+            position("injected_metric 1\n"),
         ];
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{text}");
         assert!(text.contains("rusty_mcrouter_requests_failed_total 1\n"));
@@ -678,44 +647,6 @@ mod tests {
                  rusty_mcrouter_build_info{{version=\"{}\"}} 1\n",
                 env!("CARGO_PKG_VERSION")
             )
-        );
-    }
-
-    #[test]
-    fn config_source_golden() {
-        let metrics = Arc::new(ConfigMetrics::default());
-        metrics.applied(3, 1_700_000_000);
-        metrics.reload_attempts.add(3);
-        metrics.rejected(ReloadStage::Parse);
-
-        assert_eq!(
-            render(ConfigSource { metrics }),
-            "rusty_mcrouter_config_generation 3\n\
-             rusty_mcrouter_config_reload_attempts_total 3\n\
-             rusty_mcrouter_config_reload_failures_total{stage=\"read\"} 0\n\
-             rusty_mcrouter_config_reload_failures_total{stage=\"parse\"} 1\n\
-             rusty_mcrouter_config_reload_failures_total{stage=\"validate\"} 0\n\
-             rusty_mcrouter_config_reload_failures_total{stage=\"apply\"} 0\n\
-             rusty_mcrouter_config_last_reload_successful 0\n\
-             rusty_mcrouter_config_last_success_timestamp_seconds 1700000000\n"
-        );
-    }
-
-    #[test]
-    fn config_metrics_return_to_in_sync() {
-        let metrics = ConfigMetrics::started(1_700_000_000);
-        assert_eq!(metrics.generation.load(), 1);
-        assert_eq!(metrics.last_reload_successful.load(), 1);
-        assert!(metrics.last_success_unix_secs.load() > 0);
-
-        metrics.rejected(ReloadStage::Read);
-        assert_eq!(metrics.last_reload_successful.load(), 0);
-        metrics.in_sync();
-        assert_eq!(metrics.last_reload_successful.load(), 1);
-        assert_eq!(
-            metrics.generation.load(),
-            1,
-            "in sync is not a new generation"
         );
     }
 }

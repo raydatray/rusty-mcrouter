@@ -12,6 +12,7 @@ workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rusty-mcrouter-config.workspace = true
+rusty-mcrouter-control.workspace = true
 rusty-mcrouter-backend.workspace = true
 rusty-mcrouter-core.workspace = true
 rusty-mcrouter-observability.workspace = true

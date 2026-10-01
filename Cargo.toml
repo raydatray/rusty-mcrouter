@@ -3,6 +3,7 @@ members = [
     "bin/rusty-mcrouter",
     "crates/backend",
     "crates/config",
+    "crates/control",
     "crates/core",
     "crates/observability",
     "crates/observability-primitives",
@@ -30,6 +31,7 @@ json_comments = "0.2"
 memchr = "2.7"
 rusty-mcrouter-backend = { path = "crates/backend" }
 rusty-mcrouter-config = { path = "crates/config" }
+rusty-mcrouter-control = { path = "crates/control" }
 rusty-mcrouter-core = { path = "crates/core" }
 rusty-mcrouter-observability = { path = "crates/observability" }
 rusty-mcrouter-observability-primitives = { path = "crates/observability-primitives" }
