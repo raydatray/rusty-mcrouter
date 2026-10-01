@@ -167,7 +167,7 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
 
     use super::*;
-    use crate::generation::RouteSlot;
+    use crate::generation::{GenerationSetup, RouteSlot};
     use crate::{FrontendMetricsShard, ProxyHandle};
 
     fn test_runtime(config: &str) -> (ProxyRuntime, ProxyHandle) {
@@ -186,13 +186,13 @@ mod tests {
             reply_timeout: Duration::from_millis(100),
             ..DestinationConfig::default()
         };
-        let builder = GenerationBuilder::new(
-            map,
+        let builder = GenerationBuilder::new(GenerationSetup {
+            destinations: map,
             defaults,
-            RootRouteOptions::default(),
-            RoutingMetricsShard::new(),
-            noop_sink(),
-        );
+            root_options: RootRouteOptions::default(),
+            metrics: RoutingMetricsShard::new(),
+            events: noop_sink(),
+        });
         let initial = builder.build(1, &parse(config).unwrap()).unwrap();
         let context = ProxyContext::solo(
             handle.clone(),
