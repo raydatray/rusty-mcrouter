@@ -3,15 +3,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use rusty_mcrouter_backend::destination::DestinationConfig;
 use rusty_mcrouter_config::ConfigDocument;
-use rusty_mcrouter_control::{ConfigMetrics, ReloadStage};
 use rusty_mcrouter_core::RootRouteOptions;
 use rusty_mcrouter_proxy::ProxyHandle;
 use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
 
-use crate::config;
+use crate::{ConfigMetrics, ReloadStage};
+
+fn parse_config(bytes: &[u8]) -> anyhow::Result<ConfigDocument> {
+    let text = std::str::from_utf8(bytes).context("config is not valid UTF-8")?;
+    Ok(rusty_mcrouter_config::parse(text)?)
+}
 
 pub struct RunningConfig {
     pub bytes: Vec<u8>,
@@ -28,7 +32,7 @@ pub struct ReloaderSetup {
     pub metrics: Arc<ConfigMetrics>,
 }
 
-/// See docs/design/0002-config-reload.md.
+/// Watches settled config changes and coordinates generation application across proxies.
 pub struct ConfigReloader {
     path: PathBuf,
     delay: Duration,
@@ -185,7 +189,7 @@ impl ConfigReloader {
         }
 
         let document =
-            config::parse(&bytes).map_err(|error| Rejected::new(ReloadStage::Parse, error))?;
+            parse_config(&bytes).map_err(|error| Rejected::new(ReloadStage::Parse, error))?;
         if document == *self.running.document {
             self.running.bytes = bytes;
             return Ok(Outcome::Unchanged);
@@ -256,7 +260,8 @@ mod tests {
                 std::process::id()
             ));
             std::fs::write(&path, V1).unwrap();
-            let (bytes, document) = config::load(&path).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let document = parse_config(&bytes).unwrap();
             let metrics = ConfigMetrics::started(1);
             let applied = Arc::new(Mutex::new(Vec::new()));
             let handles = (0..proxies)

@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::thread::{Builder, JoinHandle};
 
 use anyhow::Context;
+use rusty_mcrouter_control::ConfigReloader;
 use rusty_mcrouter_observability::http::{MetricsHttp, MetricsHttpOptions, MetricsHttpSetup};
 use rusty_mcrouter_observability::{logging, ControlMetrics, EventConsumer, MetricsRegistry};
 // std mpsc for main's channels; tokio mpsc, module-qualified, for the runtime's
 use tokio::sync::{mpsc, oneshot};
 
-use crate::reload::ConfigReloader;
 use crate::startup::report_startup;
 
 pub struct ControlInbox {
@@ -296,14 +296,11 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
-    use rusty_mcrouter_control::ConfigMetrics;
+    use rusty_mcrouter_control::{ConfigMetrics, ReloaderSetup, RunningConfig};
     use rusty_mcrouter_observability::{channel, EventSender};
     use rusty_mcrouter_proxy::{ProxyCommand, ProxyHandle};
 
-    use crate::{
-        config,
-        reload::{ReloaderSetup, RunningConfig},
-    };
+    use crate::config;
 
     use super::*;
 

@@ -2,7 +2,9 @@ use rusty_mcrouter_backend::{
     destination::DestinationMetricsRegistry,
     tko::{DestTokenAllocator, TkoTrackerMap},
 };
-use rusty_mcrouter_control::{ConfigMetrics, ConfigSource};
+use rusty_mcrouter_control::{
+    ConfigMetrics, ConfigReloader, ConfigSource, ReloaderSetup, RunningConfig,
+};
 use rusty_mcrouter_observability::{
     channel, logging, ControlMetrics, ProcessMetadata, ScrapeInputs,
 };
@@ -12,7 +14,6 @@ use crate::args::Args;
 use crate::config;
 use crate::control::{ControlHandle, ControlThread, ControlThreadSetup, ProcessEvent, Supervisor};
 use crate::proxy_fleet::{ProxyFleet, ProxyFleetSetup, ProxyWorkerResources};
-use crate::reload::{ConfigReloader, ReloaderSetup, RunningConfig};
 
 use std::{
     io::Write,

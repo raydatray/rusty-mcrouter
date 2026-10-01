@@ -9,5 +9,15 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
+rusty-mcrouter-backend.workspace = true
+rusty-mcrouter-config.workspace = true
+rusty-mcrouter-core.workspace = true
 rusty-mcrouter-observability.workspace = true
 rusty-mcrouter-observability-primitives.workspace = true
+rusty-mcrouter-proxy.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
