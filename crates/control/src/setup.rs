@@ -13,4 +13,5 @@ pub struct ControlSetup {
     pub metrics: Arc<ControlMetrics>,
     pub reloader: Option<ConfigReloader>,
     pub http_options: MetricsHttpOptions,
+    pub request_shutdown: Box<dyn Fn() + Send + Sync>,
 }
