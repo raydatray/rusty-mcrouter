@@ -9,31 +9,26 @@ use std::{
 use tokio::time::Instant;
 
 use crate::{
-    destination::{
-        Destination, DestinationAssembler, DestinationConfig, DestinationKey,
-        DestinationMetricsRegistry,
-    },
-    metrics::BackendMetricsShard,
+    destination::{Destination, DestinationAssembler, DestinationConfig, DestinationKey},
     tko::{PoolTkoTracker, TkoTrackerMap},
 };
 
+pub struct DestinationMapSetup {
+    pub tko_map: Arc<TkoTrackerMap>,
+    pub assembler: DestinationAssembler,
+}
+
 pub struct Map {
     tko_map: Arc<TkoTrackerMap>,
-    metrics_registry: Arc<DestinationMetricsRegistry>,
-    shard_metrics: Arc<BackendMetricsShard>,
+    assembler: DestinationAssembler,
     destinations: RefCell<HashMap<DestinationKey, Weak<Destination>>>,
 }
 
 impl Map {
-    pub fn new(
-        tko_map: Arc<TkoTrackerMap>,
-        shard_metrics: Arc<BackendMetricsShard>,
-        metrics_registry: Arc<DestinationMetricsRegistry>,
-    ) -> Rc<Self> {
+    pub fn new(setup: DestinationMapSetup) -> Rc<Self> {
         Rc::new(Self {
-            tko_map,
-            shard_metrics,
-            metrics_registry,
+            tko_map: setup.tko_map,
+            assembler: setup.assembler,
             destinations: RefCell::new(HashMap::new()),
         })
     }
@@ -63,13 +58,9 @@ impl Map {
             tracker.set_pool_tracker(gate);
         }
 
-        let metrics = self.metrics_registry.metrics_for(&tracker);
-        let dest = DestinationAssembler::new(Arc::clone(&self.shard_metrics)).spawn_destination(
-            key.clone(),
-            cfg.clone(),
-            tracker,
-            metrics,
-        );
+        let dest = self
+            .assembler
+            .spawn_destination(key.clone(), cfg.clone(), tracker);
 
         self.destinations
             .borrow_mut()
@@ -122,9 +113,11 @@ mod tests {
 
     use super::*;
     use crate::classify::ResultCode;
+    use crate::destination::{DestinationAssemblerSetup, DestinationMetricsRegistry};
     use crate::error::{RequestError, SendError};
+    use crate::metrics::BackendMetricsShard;
     use crate::test_support::{run_local, scripted_backend_serial, Step};
-    use crate::tko::{DestToken, FailOpenThresholds};
+    use crate::tko::{DestTokenAllocator, FailOpenThresholds};
     use crate::Backend;
 
     async fn send(dest: &Rc<Destination>, request: Request) -> Result<Reply, SendError> {
@@ -139,11 +132,14 @@ mod tests {
     }
 
     fn test_map() -> Rc<Map> {
-        Map::new(
-            tko_map(),
-            BackendMetricsShard::new(),
-            DestinationMetricsRegistry::new(),
-        )
+        Map::new(DestinationMapSetup {
+            tko_map: tko_map(),
+            assembler: DestinationAssembler::new(DestinationAssemblerSetup {
+                tokens: Arc::new(DestTokenAllocator::new()),
+                metrics: DestinationMetricsRegistry::new(),
+                shard_metrics: BackendMetricsShard::new(),
+            }),
+        })
     }
 
     fn test_cfg() -> DestinationConfig {
@@ -218,12 +214,16 @@ mod tests {
     #[tokio::test]
     async fn dedup_attaches_gate_to_existing_destination() {
         run_local(async {
+            let allocator = Arc::new(DestTokenAllocator::new());
             let tko = tko_map();
-            let map = Map::new(
-                Arc::clone(&tko),
-                BackendMetricsShard::new(),
-                DestinationMetricsRegistry::new(),
-            );
+            let map = Map::new(DestinationMapSetup {
+                tko_map: Arc::clone(&tko),
+                assembler: DestinationAssembler::new(DestinationAssemblerSetup {
+                    tokens: Arc::clone(&allocator),
+                    metrics: DestinationMetricsRegistry::new(),
+                    shard_metrics: BackendMetricsShard::new(),
+                }),
+            });
             let gate = tko.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
 
             let a1 = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
@@ -241,10 +241,10 @@ mod tests {
             );
             assert!(a1
                 .tracker()
-                .record_hard_failure(DestToken::allocate(), ResultCode::ConnectError));
+                .record_hard_failure(allocator.allocate(), ResultCode::ConnectError));
             assert!(
                 !b.tracker()
-                    .record_hard_failure(DestToken::allocate(), ResultCode::ConnectError),
+                    .record_hard_failure(allocator.allocate(), ResultCode::ConnectError),
                 "gate slot must have been consumed through the EXISTING destination"
             );
         })

@@ -9,9 +9,9 @@ mod map;
 mod metrics;
 mod probe;
 
-pub use assembler::DestinationAssembler;
+pub use assembler::{DestinationAssembler, DestinationAssemblerSetup};
 pub use config::DestinationConfig;
 pub use destination::{Destination, DestinationSetup};
 pub use key::DestinationKey;
-pub use map::Map;
+pub use map::{DestinationMapSetup, Map};
 pub use metrics::{DestinationMetrics, DestinationMetricsRegistry};

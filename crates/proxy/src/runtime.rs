@@ -160,7 +160,7 @@ mod tests {
     };
     use rusty_mcrouter_backend::metrics::BackendMetricsShard;
     use rusty_mcrouter_backend::test_support::{run_local, scripted_backend_serial, Step};
-    use rusty_mcrouter_backend::tko::TkoTrackerMap;
+    use rusty_mcrouter_backend::tko::{DestTokenAllocator, TkoTrackerMap};
     use rusty_mcrouter_config::parse;
     use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsShard};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
@@ -172,11 +172,16 @@ mod tests {
 
     fn test_runtime(config: &str) -> (ProxyRuntime, ProxyHandle) {
         let (handle, inbox) = ProxyHandle::allocate(0);
-        let map = destination::Map::new(
-            TkoTrackerMap::new(noop_sink()),
-            BackendMetricsShard::new(),
-            DestinationMetricsRegistry::new(),
-        );
+        let map = destination::Map::new(destination::DestinationMapSetup {
+            tko_map: TkoTrackerMap::new(noop_sink()),
+            assembler: destination::DestinationAssembler::new(
+                destination::DestinationAssemblerSetup {
+                    tokens: Arc::new(DestTokenAllocator::new()),
+                    metrics: DestinationMetricsRegistry::new(),
+                    shard_metrics: BackendMetricsShard::new(),
+                },
+            ),
+        });
         let defaults = DestinationConfig {
             reply_timeout: Duration::from_millis(100),
             ..DestinationConfig::default()

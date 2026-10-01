@@ -71,11 +71,16 @@ pub fn proxy_thread_main(
         // thread-local and never shared across threads. Backends are lazy:
         // building over dead servers succeeds, they just start life failing
         // (and TKO via the shared tracker map).
-        let dest_map = destination::Map::new(
-            Arc::clone(&shared.tko_map),
-            backend_metrics,
-            Arc::clone(&shared.destinations),
-        );
+        let dest_map = destination::Map::new(destination::DestinationMapSetup {
+            tko_map: Arc::clone(&shared.tko_map),
+            assembler: destination::DestinationAssembler::new(
+                destination::DestinationAssemblerSetup {
+                    tokens: Arc::clone(&shared.tokens),
+                    metrics: Arc::clone(&shared.destinations),
+                    shard_metrics: backend_metrics,
+                },
+            ),
+        });
         let sweep_task = dest_map.spawn_idle_sweep(shared.sweep_interval);
         let builder = GenerationBuilder::new(
             dest_map,
