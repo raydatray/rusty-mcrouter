@@ -18,13 +18,14 @@ vibecoded [mcrouter](https://github.com/facebook/mcrouter) in rust
 - see [config reload](docs/architecture/config-reload.md) for what survives a reload and how failures are handled
 
 ## what's what:
-- `bin/rusty-mcrouter/` — the binary. cli, options, construct-and-wire startup, and the config reloader.
+- `bin/rusty-mcrouter/` — the binary. cli, construct-and-wire startup, executor/thread ownership, signals, and supervision.
 - `crates/protocol/` — the meta protocol codec: semantic request/reply types, frontend encoder/decoder, backend encoder/decoder
 - `crates/config/` — parses mcrouter-style json/jsonc config (pools + routes).
 - `crates/observability-primitives/` — std-only `Counter`, `Gauge`, and `EventSink<T>` shared by fact owners.
 - `crates/backend/` — the backend leg: memcached client, destinations, health tracking, and backend metrics.
 - `crates/core/` — routing: root prefix selection, pool hashing, failover and destination routes, built from config.
 - `crates/proxy/` — the frontend leg: client connections, proxy workers, and proxy-thread orchestration.
+- `crates/control/` — control runtime, command mailboxes, config reload coordination, and reload-owned metrics/reporting.
 - `crates/observability/` — event logging, metrics aggregation, and the `/metrics` endpoint.
 - `bench/` — an isolated Cargo workspace and Python harness for benchmarking (see `bench/README.md`).
 - `docs/` — design / architecture / mcrouter notes (see `docs/README.md`)

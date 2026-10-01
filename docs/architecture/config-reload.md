@@ -24,7 +24,13 @@ and event handling available throughout worker startup.
 the app supplies the control inbox and proxy handles through setup values.
 worker threads construct their own route graphs using a `GenerationSetup`;
 each build gets a fresh backend factory over the worker's persistent destination
-map. config-application timestamps are supplied to metrics by the binary.
+map. the control reloader owns reload logging and metric updates, including the
+timestamp of a successful apply. the binary only supplies its setup and marks
+the initial config applied once proxy startup completes.
+
+the implementation lives in [`crates/control/src/reload.rs`](../../crates/control/src/reload.rs).
+its metric data and source projection also belong to control; the app registers
+that source through observability's generic metric-source interface.
 
 only pools and routes reload. every CLI option, including `--route-prefix`
 and the timeouts, is fixed at startup. to deploy a config, write it to a
