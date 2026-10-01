@@ -11,12 +11,19 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::reload::ConfigReloader;
 
-pub struct ControlThreadConfig {
+pub struct ControlInbox {
+    command_rx: mpsc::Receiver<ControlCommand>,
+}
+
+pub struct ControlThreadSetup {
+    pub inbox: ControlInbox,
     pub events: EventConsumer,
     pub registry: Arc<MetricsRegistry>,
     pub metrics_addr: SocketAddr,
     pub metrics: Arc<ControlMetrics>,
     pub reloader: Option<ConfigReloader>,
+    pub process_events: Sender<ProcessEvent>,
+    pub http_options: MetricsHttpOptions,
 }
 
 pub enum ProcessEvent {
@@ -85,6 +92,11 @@ pub struct ControlHandle {
 }
 
 impl ControlHandle {
+    pub fn allocate() -> (Self, ControlInbox) {
+        let (command_tx, command_rx) = mpsc::channel(CONTROL_COMMAND_CAPACITY);
+        (Self { command_tx }, ControlInbox { command_rx })
+    }
+
     fn proxies_ready_blocking(&self) -> anyhow::Result<()> {
         self.command_tx
             .blocking_send(ControlCommand::ProxiesReady)
@@ -109,17 +121,15 @@ pub struct ControlThread {
 
 impl ControlThread {
     pub fn spawn(
-        cfg: ControlThreadConfig,
+        handle: ControlHandle,
+        cfg: ControlThreadSetup,
         supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, SocketAddr)> {
-        let (command_tx, command_rx) = mpsc::channel(CONTROL_COMMAND_CAPACITY);
-        let handle = ControlHandle { command_tx };
         let (ready_tx, ready_rx) = sync_channel::<ReadyEvent>(1);
         let exit = supervisor.exit_notifier(ProcessEvent::ControlExited);
-        let process_events = supervisor.sender();
         let join = Builder::new().name("control".into()).spawn(move || {
             let _exit = exit;
-            control_thread_main(cfg, command_rx, ready_tx, process_events)
+            control_thread_main(cfg, ready_tx)
         })?;
 
         let started = ready_rx
@@ -227,10 +237,8 @@ async fn tick(reloader: &mut Option<ConfigReloader>) {
 }
 
 fn control_thread_main(
-    cfg: ControlThreadConfig,
-    command_rx: mpsc::Receiver<ControlCommand>,
+    cfg: ControlThreadSetup,
     ready_tx: SyncSender<ReadyEvent>,
-    process_events: Sender<ProcessEvent>,
 ) -> anyhow::Result<()> {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -245,12 +253,15 @@ fn control_thread_main(
     };
 
     runtime.block_on(async move {
-        let ControlThreadConfig {
+        let ControlThreadSetup {
+            inbox,
             events,
             registry,
             metrics_addr,
             metrics: control_metrics,
             reloader,
+            process_events,
+            http_options,
         } = cfg;
 
         let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
@@ -265,14 +276,14 @@ fn control_thread_main(
             listener,
             registry,
             metrics: control_metrics,
-            options: MetricsHttpOptions::default(),
+            options: http_options,
         });
 
         let _ = ready_tx.send(Ok(bound));
         drop(ready_tx);
 
         ControlRuntime {
-            command_rx,
+            command_rx: inbox.command_rx,
             events,
             metrics,
             reloader,
@@ -293,7 +304,10 @@ mod tests {
     use rusty_mcrouter_observability::{channel, ConfigMetrics, EventSender};
     use rusty_mcrouter_proxy::{ProxyCommand, ProxyHandle};
 
-    use crate::{config, reload::ReloaderConfig};
+    use crate::{
+        config,
+        reload::{ReloaderSetup, RunningConfig},
+    };
 
     use super::*;
 
@@ -308,14 +322,18 @@ mod tests {
         let metrics = Arc::new(ControlMetrics::default());
         let (events, consumer) = channel(8, Arc::clone(&metrics));
         let supervisor = Supervisor::new();
-        let cfg = ControlThreadConfig {
+        let (handle, inbox) = ControlHandle::allocate();
+        let cfg = ControlThreadSetup {
+            inbox,
             events: consumer,
             registry: Arc::new(MetricsRegistry::new()),
             metrics_addr,
             metrics,
             reloader: None,
+            process_events: supervisor.sender(),
+            http_options: MetricsHttpOptions::default(),
         };
-        let (control, bound) = ControlThread::spawn(cfg, &supervisor)?;
+        let (control, bound) = ControlThread::spawn(handle, cfg, &supervisor)?;
         Ok((control, bound, events))
     }
 
@@ -375,24 +393,33 @@ mod tests {
         let config_metrics = Arc::new(ConfigMetrics::default());
         let (_events, consumer) = channel(8, Arc::clone(&metrics));
         let (proxy, mut inbox) = ProxyHandle::allocate(0);
-        let reloader = ConfigReloader::new(ReloaderConfig {
+        let reloader = ConfigReloader::new(ReloaderSetup {
             path: path.clone(),
             delay: Duration::from_millis(5),
-            running: (initial.to_vec(), Arc::new(config::parse(initial).unwrap())),
+            running: RunningConfig {
+                bytes: initial.to_vec(),
+                document: Arc::new(config::parse(initial).unwrap()),
+            },
             proxies: vec![proxy],
             defaults: Default::default(),
             root_options: Default::default(),
             metrics: Arc::clone(&config_metrics),
         });
+        let supervisor = Supervisor::new();
+        let (handle, inbox_control) = ControlHandle::allocate();
         let (control, bound) = ControlThread::spawn(
-            ControlThreadConfig {
+            handle,
+            ControlThreadSetup {
+                inbox: inbox_control,
                 events: consumer,
                 registry: Arc::new(MetricsRegistry::new()),
                 metrics_addr: ephemeral(),
                 metrics,
                 reloader: Some(reloader),
+                process_events: supervisor.sender(),
+                http_options: MetricsHttpOptions::default(),
             },
-            &Supervisor::new(),
+            &supervisor,
         )
         .unwrap();
 
@@ -410,7 +437,7 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
         assert_eq!(config_metrics.reload_attempts.load(), 0);
 
-        config_metrics.applied(1);
+        config_metrics.applied(1, 1);
         control.proxies_ready().unwrap();
         let command = tokio::runtime::Builder::new_current_thread()
             .enable_time()

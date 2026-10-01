@@ -9,4 +9,4 @@ pub use crate::bus::{channel, EventConsumer, EventSender};
 pub use crate::metrics::{
     ConfigMetrics, ControlMetrics, MetricsRegistry, MetricsSource, ReloadStage,
 };
-pub use crate::sources::ScrapeInputs;
+pub use crate::sources::{ProcessMetadata, ScrapeInputs};
