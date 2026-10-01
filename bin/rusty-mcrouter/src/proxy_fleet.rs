@@ -1,15 +1,38 @@
 use std::net::SocketAddr;
-use std::sync::{mpsc::sync_channel, Arc};
+use std::sync::{
+    mpsc::{sync_channel, SyncSender},
+    Arc,
+};
 use std::thread::{Builder, JoinHandle};
 
 use anyhow::Context;
 use rusty_mcrouter_observability::EventSender;
 use rusty_mcrouter_proxy::{
-    proxy_thread_main, ListenerConfig, ProxyHandle, ProxyInbox, ProxySet, ProxyShards, ProxyShared,
-    ProxyThreadConfig,
+    ListenerConfig, ProxyHandle, ProxyInbox, ProxySet, ProxyShards, ProxyShared, ProxyThreadSetup,
+    ProxyWorker,
 };
 
 use crate::control::{ProcessEvent, Supervisor};
+use crate::startup::report_startup;
+
+fn proxy_thread_main(
+    setup: ProxyThreadSetup,
+    ready_tx: SyncSender<anyhow::Result<Option<SocketAddr>>>,
+) -> anyhow::Result<()> {
+    let prepared = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .context("create proxy executor")
+        .and_then(|executor| {
+            let local = tokio::task::LocalSet::new();
+            let worker = local.block_on(&executor, ProxyWorker::build(setup))?;
+            Ok((executor, local, worker))
+        });
+    let (executor, local, worker) =
+        report_startup(prepared, ready_tx, |(_, _, worker)| worker.bound_addr())?;
+    local.block_on(&executor, worker.run())
+}
 
 pub struct ProxyThread {
     handle: ProxyHandle,
@@ -19,7 +42,7 @@ pub struct ProxyThread {
 impl ProxyThread {
     pub fn spawn(
         handle: ProxyHandle,
-        config: ProxyThreadConfig,
+        config: ProxyThreadSetup,
         supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, Option<SocketAddr>)> {
         let proxy_id = config.proxy_id;
@@ -54,18 +77,28 @@ impl ProxyThread {
     }
 
     pub fn shutdown(mut self) -> anyhow::Result<()> {
-        let shutdown = if self.join.as_ref().is_some_and(JoinHandle::is_finished) {
+        self.stop()
+    }
+
+    fn stop(&mut self) -> anyhow::Result<()> {
+        let Some(join) = self.join.take() else {
+            return Ok(());
+        };
+        let shutdown = if join.is_finished() {
             Ok(())
         } else {
             self.handle.shutdown_blocking()
         };
-        let joined = self
-            .join
-            .take()
-            .expect("proxy thread exists")
+        let joined = join
             .join()
             .map_err(|_| anyhow::anyhow!("proxy thread panicked"))?;
         shutdown.and(joined)
+    }
+}
+
+impl Drop for ProxyThread {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -112,7 +145,7 @@ impl ProxyFleet {
                 listen_addr: cfg.listen_addr,
                 use_reuseport,
             });
-            let thread_cfg = ProxyThreadConfig {
+            let thread_cfg = ProxyThreadSetup {
                 proxy_id,
                 inbox,
                 shards,

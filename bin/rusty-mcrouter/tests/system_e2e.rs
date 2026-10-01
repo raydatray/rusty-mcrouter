@@ -104,12 +104,13 @@ async fn startup_failure(
     tag: u16,
     listen_addr: SocketAddr,
     metrics_addr: SocketAddr,
+    config: &str,
 ) -> std::process::Output {
     let path = std::env::temp_dir().join(format!(
         "rusty-mcrouter-startup-failure-{}-{tag}.json",
         std::process::id()
     ));
-    std::fs::write(&path, r#"{ "route": "NullRoute" }"#).unwrap();
+    std::fs::write(&path, config).unwrap();
     let output = tokio::time::timeout(
         Duration::from_secs(5),
         Command::new(env!("CARGO_BIN_EXE_rusty-mcrouter"))
@@ -295,7 +296,13 @@ async fn metrics_bind_failure_is_reported_before_proxy_startup() {
     let proxy_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let metrics_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let metrics_addr = metrics_listener.local_addr().unwrap();
-    let output = startup_failure(63_001, proxy_listener.local_addr().unwrap(), metrics_addr).await;
+    let output = startup_failure(
+        63_001,
+        proxy_listener.local_addr().unwrap(),
+        metrics_addr,
+        r#"{ "route": "NullRoute" }"#,
+    )
+    .await;
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains(&format!("bind({metrics_addr}) failed")),
@@ -307,12 +314,32 @@ async fn metrics_bind_failure_is_reported_before_proxy_startup() {
 async fn proxy_bind_failure_stops_the_already_started_control_thread() {
     let proxy_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listen_addr = proxy_listener.local_addr().unwrap();
-    let output = startup_failure(63_002, listen_addr, "127.0.0.1:0".parse().unwrap()).await;
+    let output = startup_failure(
+        63_002,
+        listen_addr,
+        "127.0.0.1:0".parse().unwrap(),
+        r#"{ "route": "NullRoute" }"#,
+    )
+    .await;
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains(&format!("bind({listen_addr}) failed")),
         "{stderr}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn route_build_failure_is_reported_and_control_stops() {
+    let output = startup_failure(
+        63_003,
+        "127.0.0.1:0".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+        r#"{ "routes": { "/a/b/": "NullRoute" } }"#,
+    )
+    .await;
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("build_route failed"), "{stderr}");
+    assert!(stderr.contains("invalid default route"), "{stderr}");
 }
 
 /// a dead backend marks hard on first contact (connect refused) and the
