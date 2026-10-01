@@ -9,7 +9,10 @@ use std::{
 use tokio::time::Instant;
 
 use crate::{
-    destination::{Destination, DestinationConfig, DestinationKey, DestinationMetricsRegistry},
+    destination::{
+        Destination, DestinationAssembler, DestinationConfig, DestinationKey,
+        DestinationMetricsRegistry,
+    },
     metrics::BackendMetricsShard,
     tko::{PoolTkoTracker, TkoTrackerMap},
 };
@@ -61,12 +64,11 @@ impl Map {
         }
 
         let metrics = self.metrics_registry.metrics_for(&tracker);
-        let dest = Destination::new(
+        let dest = DestinationAssembler::new(Arc::clone(&self.shard_metrics)).spawn_destination(
             key.clone(),
             cfg.clone(),
             tracker,
             metrics,
-            Arc::clone(&self.shard_metrics),
         );
 
         self.destinations
