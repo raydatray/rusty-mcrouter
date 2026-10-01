@@ -2,8 +2,8 @@
 rusty-mcrouter is a memcached routing proxy. clients reach it via the **meta protocol**, and rusty-mcrouter routes each request thru a tree of route handles to a destination server, tracking server health and failing over along the way
 
 ## crates
-the root Cargo workspace has eight packages: the executable in `bin/rusty-mcrouter/`
-and seven libraries in `crates/`. internal dependency paths are declared in the
+the root Cargo workspace has nine packages: the executable in `bin/rusty-mcrouter/`
+and eight libraries in `crates/`. internal dependency paths are declared in the
 root manifest and inherited by each package. `bench/` is a separate workspace
 with its own lockfile and pinned load-generator dependencies.
 
@@ -17,7 +17,8 @@ composition and presentation (`A --> B` means B depends on A):
 - **[`rusty-mcrouter-core`](../../crates/core/)** - the routing graph, where a config file is transformed into a tree of route handles
 - **[`rusty-mcrouter-proxy`](../../crates/proxy/)** - the client-facing leg and orchestration: proxy runtimes, frontend protocol handling, connections and cross-thread dispatch
 - **[`rusty-mcrouter-observability`](../../crates/observability/)** - event and metric components, Hyper-based `/metrics` handling and presentation
-- **[`rusty-mcrouter`](../../bin/rusty-mcrouter/)** - the binary composition layer: cli, process supervision and the control runtime
+- **[`rusty-mcrouter-control`](../../crates/control/)** - control runtime, commands, configuration reload coordination and its fact-owned metric data and projection
+- **[`rusty-mcrouter`](../../bin/rusty-mcrouter/)** - the binary composition layer: cli, executor/thread ownership, process signals and supervision
 
 ```mermaid
 flowchart LR
@@ -28,6 +29,7 @@ flowchart LR
     C[rusty-mcrouter-core]
     X[rusty-mcrouter-proxy]
     O[rusty-mcrouter-observability]
+    T[rusty-mcrouter-control]
     R[rusty-mcrouter]
 
     P --> B
@@ -44,6 +46,13 @@ flowchart LR
     B --> R
     X --> R
     O --> R
+    K --> T
+    B --> T
+    C --> T
+    X --> T
+    O --> T
+    Q --> T
+    T --> R
     Q --> B
     Q --> X
     Q --> O
@@ -62,13 +71,15 @@ the reloader receives the app-allocated proxy handles.
 [`proxy_fleet.rs`](../../bin/rusty-mcrouter/src/proxy_fleet.rs) owns launching
 and joining proxy threads. both proxy and control executors are created by the
 binary's thread wrappers. [`ProxyWorker`](../../crates/proxy/src/worker.rs)
-builds thread-local proxy state and runs the frontend runtime; `ControlWorker`
-builds and runs control services in the binary.
+builds thread-local proxy state and runs the frontend runtime;
+[`ControlRuntime`](../../crates/control/src/runtime.rs) builds and runs control
+services in the control crate. the binary's control wrapper pins that runtime
+future while forwarding Ctrl-C to process supervision.
 
-[`config.rs`](../../bin/rusty-mcrouter/src/config.rs) owns file loading and byte
-parsing, shared by startup and the reloader.
-[`reload.rs`](../../bin/rusty-mcrouter/src/reload.rs) owns watching for changes and
-applying them to running proxies.
+[`config.rs`](../../bin/rusty-mcrouter/src/config.rs) loads the startup config.
+[`control/reload.rs`](../../crates/control/src/reload.rs) owns watching for changes,
+parsing, validating and applying them to running proxies, and reporting reload
+metrics and logs.
 
 ```mermaid
 flowchart TB
@@ -80,7 +91,7 @@ flowchart TB
     PTN --> PWN[ProxyWorker]
     PW0 --> PR0[ProxyRuntime]
     PWN --> PRN[ProxyRuntime]
-    CT --> CR[ControlWorker]
+    CT --> CR[ControlRuntime]
     CR --> EC[EventConsumer]
     CR --> MH[MetricsHttp]
     CR --> RL[ConfigReloader]
@@ -99,7 +110,7 @@ thread's current-thread Tokio runtime.
 
 `ProxyRuntime` owns routed-request tasks, client connections, listener and
 destination-sweep tasks, and the current route graph generation.
-`ControlWorker` owns event presentation, the metrics listener, at most 32
+`ControlRuntime` owns event presentation, the metrics listener, at most 32
 concurrent metrics connection tasks, and the config reloader, which sends new
 configs to proxies over their command channels. No OS thread or
 long-lived runtime task is intentionally detached. Wildcard routing is the
@@ -142,9 +153,14 @@ control thread.
 - proxy listener and idle-sweep tasks begin in `ProxyWorker::run`. background
   task owners abort on drop, and thread owners stop and join on drop. explicit
   shutdown still reports errors, and stops proxies before control.
-- process metadata and config-application timestamps are supplied by the binary;
-  metric sources do not read the wall clock. control inboxes are app-allocated,
-  just like proxy inboxes.
+- the binary captures process metadata and the initial config timestamp;
+  the control reloader captures successful reload timestamps alongside its own
+  logging and counters. metric data and projections do not read the wall clock.
+  control inboxes are app-allocated, just like proxy inboxes.
+- control owns `ConfigMetrics`, `ReloadStage` and `ConfigSource`; the app registers
+  its projection through observability's `MetricsSource` interface using
+  `ScrapeInputs.additional_sources`. observability stays independent of control,
+  allowing the control runtime to consume its event and HTTP services.
 
 shared resources use `Arc`; route graphs, destinations and their connection
 callbacks remain worker-local with `Rc`. the existing `Backend` and

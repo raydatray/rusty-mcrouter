@@ -3,7 +3,8 @@ use rusty_mcrouter_backend::{
     tko::{DestTokenAllocator, TkoTrackerMap},
 };
 use rusty_mcrouter_control::{
-    ConfigMetrics, ConfigReloader, ConfigSource, ReloaderSetup, RunningConfig,
+    ConfigMetrics, ConfigReloader, ConfigSource, ControlHandle, ControlSetup, ReloaderSetup,
+    RunningConfig,
 };
 use rusty_mcrouter_observability::{
     channel, logging, ControlMetrics, ProcessMetadata, ScrapeInputs,
@@ -12,7 +13,7 @@ use rusty_mcrouter_proxy::{ProxyHandle, ProxyShards, ProxyShared, ThreadMode};
 
 use crate::args::Args;
 use crate::config;
-use crate::control::{ControlHandle, ControlThread, ControlThreadSetup, ProcessEvent, Supervisor};
+use crate::control::{ControlThread, ProcessEvent, Supervisor};
 use crate::proxy_fleet::{ProxyFleet, ProxyFleetSetup, ProxyWorkerResources};
 
 use std::{
@@ -101,14 +102,13 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let (control_handle, control_inbox) = ControlHandle::allocate();
     let (control_thread, metrics_bound) = ControlThread::spawn(
         control_handle,
-        ControlThreadSetup {
+        ControlSetup {
             inbox: control_inbox,
             events: event_consumer,
             registry: Arc::new(registry),
             metrics_addr,
             metrics: control_metrics,
             reloader,
-            process_events: supervisor.sender(),
             http_options: Default::default(),
         },
         &supervisor,

@@ -1,31 +1,11 @@
 use std::net::SocketAddr;
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
-use std::sync::Arc;
 use std::thread::{Builder, JoinHandle};
 
 use anyhow::Context;
-use rusty_mcrouter_control::ConfigReloader;
-use rusty_mcrouter_observability::http::{MetricsHttp, MetricsHttpOptions, MetricsHttpSetup};
-use rusty_mcrouter_observability::{logging, ControlMetrics, EventConsumer, MetricsRegistry};
-// std mpsc for main's channels; tokio mpsc, module-qualified, for the runtime's
-use tokio::sync::{mpsc, oneshot};
+use rusty_mcrouter_control::{ControlHandle, ControlRuntime, ControlSetup};
 
 use crate::startup::report_startup;
-
-pub struct ControlInbox {
-    command_rx: mpsc::Receiver<ControlCommand>,
-}
-
-pub struct ControlThreadSetup {
-    pub inbox: ControlInbox,
-    pub events: EventConsumer,
-    pub registry: Arc<MetricsRegistry>,
-    pub metrics_addr: SocketAddr,
-    pub metrics: Arc<ControlMetrics>,
-    pub reloader: Option<ConfigReloader>,
-    pub process_events: Sender<ProcessEvent>,
-    pub http_options: MetricsHttpOptions,
-}
 
 pub enum ProcessEvent {
     ShutdownRequested,
@@ -78,42 +58,7 @@ impl Drop for ExitNotifier {
     }
 }
 
-const CONTROL_COMMAND_CAPACITY: usize = 16;
-
 type ReadyEvent = anyhow::Result<SocketAddr>;
-
-enum ControlCommand {
-    ProxiesReady,
-    Shutdown { acknowledged: oneshot::Sender<()> },
-}
-
-#[derive(Clone)]
-pub struct ControlHandle {
-    command_tx: mpsc::Sender<ControlCommand>,
-}
-
-impl ControlHandle {
-    pub fn allocate() -> (Self, ControlInbox) {
-        let (command_tx, command_rx) = mpsc::channel(CONTROL_COMMAND_CAPACITY);
-        (Self { command_tx }, ControlInbox { command_rx })
-    }
-
-    fn proxies_ready_blocking(&self) -> anyhow::Result<()> {
-        self.command_tx
-            .blocking_send(ControlCommand::ProxiesReady)
-            .context("control command channel closed")
-    }
-
-    fn shutdown_blocking(&self) -> anyhow::Result<()> {
-        let (acknowledged, acknowledgement) = oneshot::channel();
-        self.command_tx
-            .blocking_send(ControlCommand::Shutdown { acknowledged })
-            .context("control command channel closed")?;
-        acknowledgement
-            .blocking_recv()
-            .context("control thread exited before acknowledging shutdown")
-    }
-}
 
 pub struct ControlThread {
     handle: ControlHandle,
@@ -123,14 +68,15 @@ pub struct ControlThread {
 impl ControlThread {
     pub fn spawn(
         handle: ControlHandle,
-        cfg: ControlThreadSetup,
+        setup: ControlSetup,
         supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, SocketAddr)> {
         let (ready_tx, ready_rx) = sync_channel::<ReadyEvent>(1);
         let exit = supervisor.exit_notifier(ProcessEvent::ControlExited);
+        let process_events = supervisor.sender();
         let join = Builder::new().name("control".into()).spawn(move || {
             let _exit = exit;
-            control_thread_main(cfg, ready_tx)
+            control_thread_main(setup, ready_tx, process_events)
         })?;
 
         let started = ready_rx
@@ -185,122 +131,43 @@ impl Drop for ControlThread {
     }
 }
 
-struct ControlWorker {
-    bound_addr: SocketAddr,
-    command_rx: mpsc::Receiver<ControlCommand>,
-    events: EventConsumer,
-    metrics: MetricsHttp,
-    reloader: Option<ConfigReloader>,
-    proxies_ready: bool,
-    process_events: Sender<ProcessEvent>,
-}
-
-impl ControlWorker {
-    async fn build(setup: ControlThreadSetup) -> anyhow::Result<Self> {
-        let listener = tokio::net::TcpListener::bind(setup.metrics_addr)
-            .await
-            .with_context(|| format!("bind({}) failed", setup.metrics_addr))?;
-        let bound_addr = listener.local_addr()?;
-        let metrics = MetricsHttp::new(MetricsHttpSetup {
-            listener,
-            registry: setup.registry,
-            metrics: setup.metrics,
-            options: setup.http_options,
-        });
-        Ok(Self {
-            bound_addr,
-            command_rx: setup.inbox.command_rx,
-            events: setup.events,
-            metrics,
-            reloader: setup.reloader,
-            proxies_ready: false,
-            process_events: setup.process_events,
-        })
-    }
-
-    fn bound_addr(&self) -> SocketAddr {
-        self.bound_addr
-    }
-
-    async fn run(mut self) -> anyhow::Result<()> {
-        loop {
-            tokio::select! {
-                biased;
-
-                command = self.command_rx.recv() => {
-                    match command {
-                        Some(ControlCommand::ProxiesReady) => self.proxies_ready = true,
-                        Some(ControlCommand::Shutdown { acknowledged }) => {
-                            self.shutdown().await;
-                            let _ = acknowledged.send(());
-                            return Ok(());
-                        }
-                        None => anyhow::bail!("control command channel closed"),
-                    }
-                }
-
-                event = self.events.recv() => {
-                    let event = event.context("event channel closed unexpectedly")?;
-                    logging::write(&event);
-                }
-
-                result = self.metrics.step() => {
-                    result?;
-                }
-
-                // only the cancel-safe tick races; the reload runs to completion
-                _ = tick(&mut self.reloader),
-                    if self.proxies_ready && self.reloader.is_some() => {
-                    self.reloader.as_mut().expect("guarded by is_some").poll().await;
-                }
-
-                result = tokio::signal::ctrl_c() => {
-                    result.context("listen for Ctrl-C")?;
-                    let _ = self.process_events.send(ProcessEvent::ShutdownRequested);
-                }
-            }
-        }
-    }
-
-    async fn shutdown(&mut self) {
-        while let Some(event) = self.events.try_recv() {
-            logging::write(&event);
-        }
-        self.metrics.shutdown().await;
-    }
-}
-
-async fn tick(reloader: &mut Option<ConfigReloader>) {
-    reloader.as_mut().expect("guarded by is_some").tick().await;
-}
-
 fn control_thread_main(
-    setup: ControlThreadSetup,
+    setup: ControlSetup,
     ready_tx: SyncSender<ReadyEvent>,
+    process_events: Sender<ProcessEvent>,
 ) -> anyhow::Result<()> {
     let prepared = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("create control executor")
         .and_then(|executor| {
-            let worker = executor.block_on(ControlWorker::build(setup))?;
-            Ok((executor, worker))
+            let runtime = executor.block_on(ControlRuntime::build(setup))?;
+            Ok((executor, runtime))
         });
-    let (executor, worker) = report_startup(prepared, ready_tx, |(_, worker)| worker.bound_addr())?;
-    executor.block_on(worker.run())
+    let (executor, runtime) =
+        report_startup(prepared, ready_tx, |(_, runtime)| runtime.bound_addr())?;
+    executor.block_on(async move {
+        let run = runtime.run();
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                result = &mut run => return result,
+                signal = tokio::signal::ctrl_c() => {
+                    signal.context("listen for Ctrl-C")?;
+                    let _ = process_events.send(ProcessEvent::ShutdownRequested);
+                }
+            }
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::time::Duration;
+    use std::sync::Arc;
 
-    use rusty_mcrouter_control::{ConfigMetrics, ReloaderSetup, RunningConfig};
-    use rusty_mcrouter_observability::{channel, EventSender};
-    use rusty_mcrouter_proxy::{ProxyCommand, ProxyHandle};
-
-    use crate::config;
+    use rusty_mcrouter_observability::http::MetricsHttpOptions;
+    use rusty_mcrouter_observability::{channel, ControlMetrics, EventSender, MetricsRegistry};
 
     use super::*;
 
@@ -316,14 +183,13 @@ mod tests {
         let (events, consumer) = channel(8, Arc::clone(&metrics));
         let supervisor = Supervisor::new();
         let (handle, inbox) = ControlHandle::allocate();
-        let cfg = ControlThreadSetup {
+        let cfg = ControlSetup {
             inbox,
             events: consumer,
             registry: Arc::new(MetricsRegistry::new()),
             metrics_addr,
             metrics,
             reloader: None,
-            process_events: supervisor.sender(),
             http_options: MetricsHttpOptions::default(),
         };
         let (control, bound) = ControlThread::spawn(handle, cfg, &supervisor)?;
@@ -378,91 +244,5 @@ mod tests {
             .err()
             .expect("bind conflict surfaces as a spawn error");
         assert!(error.to_string().contains("bind("), "{error}");
-    }
-
-    #[test]
-    fn control_thread_serves_metrics_before_proxies_and_delays_reload_until_ready() {
-        let initial = br#"{ "route": "NullRoute" }"#;
-        let path = std::env::temp_dir().join(format!(
-            "rusty-mcrouter-control-readiness-{}.json",
-            std::process::id()
-        ));
-        std::fs::write(&path, br#"{ "route": "ErrorRoute|changed" }"#).unwrap();
-
-        let metrics = Arc::new(ControlMetrics::default());
-        let config_metrics = Arc::new(ConfigMetrics::default());
-        let (_events, consumer) = channel(8, Arc::clone(&metrics));
-        let (proxy, mut inbox) = ProxyHandle::allocate(0);
-        let reloader = ConfigReloader::new(ReloaderSetup {
-            path: path.clone(),
-            delay: Duration::from_millis(5),
-            running: RunningConfig {
-                bytes: initial.to_vec(),
-                document: Arc::new(config::parse(initial).unwrap()),
-            },
-            proxies: vec![proxy],
-            defaults: Default::default(),
-            root_options: Default::default(),
-            metrics: Arc::clone(&config_metrics),
-        });
-        let supervisor = Supervisor::new();
-        let (handle, inbox_control) = ControlHandle::allocate();
-        let (control, bound) = ControlThread::spawn(
-            handle,
-            ControlThreadSetup {
-                inbox: inbox_control,
-                events: consumer,
-                registry: Arc::new(MetricsRegistry::new()),
-                metrics_addr: ephemeral(),
-                metrics,
-                reloader: Some(reloader),
-                process_events: supervisor.sender(),
-                http_options: MetricsHttpOptions::default(),
-            },
-            &supervisor,
-        )
-        .unwrap();
-
-        // An ungated reload would await this not-yet-running proxy and stall HTTP.
-        std::thread::sleep(Duration::from_millis(50));
-        let mut stream = TcpStream::connect(bound).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
-        assert_eq!(config_metrics.reload_attempts.load(), 0);
-
-        config_metrics.applied(1, 1);
-        control.proxies_ready().unwrap();
-        let command = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap()
-            .block_on(async {
-                tokio::time::timeout(Duration::from_secs(5), inbox.command_rx.recv())
-                    .await
-                    .expect("reload did not start after proxies became ready")
-                    .expect("proxy command channel closed")
-            });
-        let ProxyCommand::Reconfigure {
-            generation,
-            applied,
-            ..
-        } = command
-        else {
-            panic!("expected a reconfigure command");
-        };
-        assert_eq!(generation, 2);
-        applied.send(Ok(())).unwrap();
-
-        control.shutdown().unwrap();
-        std::fs::remove_file(path).unwrap();
-        assert_eq!(config_metrics.reload_attempts.load(), 1);
-        assert_eq!(config_metrics.generation.load(), 2);
     }
 }
