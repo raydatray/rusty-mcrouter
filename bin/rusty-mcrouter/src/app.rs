@@ -14,28 +14,16 @@ const EVENT_BUS_CAPACITY: usize = 1024;
 
 pub(crate) fn run() -> anyhow::Result<()> {
     let args = Args::from_cli()?;
+    logging::init();
+
     let listen_addr = args.listen_addr()?;
     let metrics_addr = args.metrics_addr()?;
 
-    logging::init();
     let control_metrics = Arc::new(ControlMetrics::default());
+    let config_metrics = Arc::new(ConfigMetrics::default());
     let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&control_metrics));
-    let (config_bytes, config) = config::load(&args.config)?;
-    let config = Arc::new(config);
-    let config_metrics = ConfigMetrics::started();
-
-    let shared = Arc::new(ProxyShared {
-        config: Arc::clone(&config),
-        tko_map: TkoTrackerMap::new(events.sink()),
-        destinations: DestinationMetricsRegistry::new(),
-        defaults: args.destination_defaults(),
-        root_route_options: args.root_route_options(),
-        sweep_interval: args.sweep_interval(),
-        thread_mode: ThreadMode::SameThread,
-    });
-
-    let supervisor = Supervisor::new();
-
+    let tko_map = TkoTrackerMap::new(events.sink());
+    let destinations = DestinationMetricsRegistry::new();
     let (workers, proxy_handles, proxy_shards): (Vec<_>, Vec<_>, Vec<_>) = (0..args.num_proxies)
         .map(|id| {
             let (handle, inbox) = ProxyHandle::allocate(id);
@@ -49,16 +37,19 @@ pub(crate) fn run() -> anyhow::Result<()> {
         })
         .collect();
 
-    let proxies = ProxyFleet::spawn(
-        ProxyFleetConfig {
-            workers,
-            num_listening_sockets: args.num_listening_sockets,
-            listen_addr,
-            shared: Arc::clone(&shared),
-            events,
-        },
-        &supervisor,
-    )?;
+    let (config_bytes, config) = config::load(&args.config)?;
+    let config = Arc::new(config);
+    let shared = Arc::new(ProxyShared {
+        config: Arc::clone(&config),
+        tko_map,
+        destinations,
+        defaults: args.destination_defaults(),
+        root_route_options: args.root_route_options(),
+        sweep_interval: args.sweep_interval(),
+        thread_mode: ThreadMode::SameThread,
+    });
+
+    let supervisor = Supervisor::new();
 
     let registry = ScrapeInputs {
         proxies: proxy_shards,
@@ -77,11 +68,11 @@ pub(crate) fn run() -> anyhow::Result<()> {
             proxies: proxy_handles,
             defaults: args.destination_defaults(),
             root_options: args.root_route_options(),
-            metrics: config_metrics,
+            metrics: Arc::clone(&config_metrics),
         })
     });
 
-    let (control_thread, metrics_bound) = match ControlThread::spawn(
+    let (control_thread, metrics_bound) = ControlThread::spawn(
         ControlThreadConfig {
             events: event_consumer,
             registry: Arc::new(registry),
@@ -90,17 +81,39 @@ pub(crate) fn run() -> anyhow::Result<()> {
             reloader,
         },
         &supervisor,
+    )?;
+
+    let proxies = match ProxyFleet::spawn(
+        ProxyFleetConfig {
+            workers,
+            num_listening_sockets: args.num_listening_sockets,
+            listen_addr,
+            shared: Arc::clone(&shared),
+            events,
+        },
+        &supervisor,
     ) {
-        Ok(spawned) => spawned,
+        Ok(proxies) => proxies,
         Err(error) => {
-            let _ = proxies.shutdown();
+            let _ = control_thread.shutdown();
             return Err(error);
         }
     };
 
+    config_metrics.applied(1);
+    if let Err(error) = control_thread.proxies_ready() {
+        let _ = proxies.shutdown();
+        let _ = control_thread.shutdown();
+        return Err(error);
+    }
+
     println!("READY {}", proxies.bound_addr());
     println!("METRICS {metrics_bound}");
-    std::io::stdout().flush()?;
+    if let Err(error) = std::io::stdout().flush() {
+        let _ = proxies.shutdown();
+        let _ = control_thread.shutdown();
+        return Err(error.into());
+    }
     tracing::info!(
         listen = %proxies.bound_addr(),
         proxy_threads = args.num_proxies,
@@ -109,10 +122,15 @@ pub(crate) fn run() -> anyhow::Result<()> {
         "rusty-mcrouter ready"
     );
 
-    let outcome = match supervisor.wait()? {
-        ProcessEvent::ShutdownRequested => Ok(()),
-        ProcessEvent::ProxyExited { id } => Err(anyhow::anyhow!("proxy-{id} exited unexpectedly")),
-        ProcessEvent::ControlExited => Err(anyhow::anyhow!("control thread exited unexpectedly")),
+    let outcome = match supervisor.wait() {
+        Ok(ProcessEvent::ShutdownRequested) => Ok(()),
+        Ok(ProcessEvent::ProxyExited { id }) => {
+            Err(anyhow::anyhow!("proxy-{id} exited unexpectedly"))
+        }
+        Ok(ProcessEvent::ControlExited) => {
+            Err(anyhow::anyhow!("control thread exited unexpectedly"))
+        }
+        Err(error) => Err(error),
     };
 
     // proxies first so their Stopped events reach the control runtime

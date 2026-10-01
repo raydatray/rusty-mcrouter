@@ -75,6 +75,7 @@ const CONTROL_COMMAND_CAPACITY: usize = 16;
 type ReadyEvent = anyhow::Result<SocketAddr>;
 
 enum ControlCommand {
+    ProxiesReady,
     Shutdown { acknowledged: oneshot::Sender<()> },
 }
 
@@ -84,6 +85,12 @@ pub struct ControlHandle {
 }
 
 impl ControlHandle {
+    fn proxies_ready_blocking(&self) -> anyhow::Result<()> {
+        self.command_tx
+            .blocking_send(ControlCommand::ProxiesReady)
+            .context("control command channel closed")
+    }
+
     fn shutdown_blocking(&self) -> anyhow::Result<()> {
         let (acknowledged, acknowledgement) = oneshot::channel();
         self.command_tx
@@ -115,9 +122,16 @@ impl ControlThread {
             control_thread_main(cfg, command_rx, ready_tx, process_events)
         })?;
 
-        let metrics_addr = match ready_rx.recv() {
-            Ok(result) => result?,
-            Err(_) => anyhow::bail!("control thread died during startup"),
+        let started = ready_rx
+            .recv()
+            .context("control thread died during startup")
+            .and_then(|result| result);
+        let metrics_addr = match started {
+            Ok(addr) => addr,
+            Err(error) => {
+                let _ = join.join();
+                return Err(error);
+            }
         };
 
         Ok((
@@ -127,6 +141,11 @@ impl ControlThread {
             },
             metrics_addr,
         ))
+    }
+
+    /// Enable config reload polling after every proxy has started.
+    pub fn proxies_ready(&self) -> anyhow::Result<()> {
+        self.handle.proxies_ready_blocking()
     }
 
     pub fn shutdown(mut self) -> anyhow::Result<()> {
@@ -150,6 +169,7 @@ struct ControlRuntime {
     events: EventConsumer,
     metrics: MetricsHttp,
     reloader: Option<ConfigReloader>,
+    proxies_ready: bool,
     process_events: Sender<ProcessEvent>,
 }
 
@@ -161,6 +181,7 @@ impl ControlRuntime {
 
                 command = self.command_rx.recv() => {
                     match command {
+                        Some(ControlCommand::ProxiesReady) => self.proxies_ready = true,
                         Some(ControlCommand::Shutdown { acknowledged }) => {
                             self.shutdown().await;
                             let _ = acknowledged.send(());
@@ -180,7 +201,8 @@ impl ControlRuntime {
                 }
 
                 // only the cancel-safe tick races; the reload runs to completion
-                _ = tick(&mut self.reloader), if self.reloader.is_some() => {
+                _ = tick(&mut self.reloader),
+                    if self.proxies_ready && self.reloader.is_some() => {
                     self.reloader.as_mut().expect("guarded by is_some").poll().await;
                 }
 
@@ -249,6 +271,7 @@ fn control_thread_main(
             events,
             metrics,
             reloader,
+            proxies_ready: false,
             process_events,
         }
         .run()
@@ -258,9 +281,14 @@ fn control_thread_main(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
 
-    use rusty_mcrouter_observability::{channel, EventSender};
+    use rusty_mcrouter_observability::{channel, ConfigMetrics, EventSender};
+    use rusty_mcrouter_proxy::{ProxyCommand, ProxyHandle};
+
+    use crate::{config, reload::ReloaderConfig};
 
     use super::*;
 
@@ -327,5 +355,82 @@ mod tests {
             .err()
             .expect("bind conflict surfaces as a spawn error");
         assert!(error.to_string().contains("bind("), "{error}");
+    }
+
+    #[test]
+    fn control_thread_serves_metrics_before_proxies_and_delays_reload_until_ready() {
+        let initial = br#"{ "route": "NullRoute" }"#;
+        let path = std::env::temp_dir().join(format!(
+            "rusty-mcrouter-control-readiness-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, br#"{ "route": "ErrorRoute|changed" }"#).unwrap();
+
+        let metrics = Arc::new(ControlMetrics::default());
+        let config_metrics = Arc::new(ConfigMetrics::default());
+        let (_events, consumer) = channel(8, Arc::clone(&metrics));
+        let (proxy, mut inbox) = ProxyHandle::allocate(0);
+        let reloader = ConfigReloader::new(ReloaderConfig {
+            path: path.clone(),
+            delay: Duration::from_millis(5),
+            running: (initial.to_vec(), Arc::new(config::parse(initial).unwrap())),
+            proxies: vec![proxy],
+            defaults: Default::default(),
+            root_options: Default::default(),
+            metrics: Arc::clone(&config_metrics),
+        });
+        let (control, bound) = ControlThread::spawn(
+            ControlThreadConfig {
+                events: consumer,
+                registry: Arc::new(MetricsRegistry::new()),
+                metrics_addr: ephemeral(),
+                metrics,
+                reloader: Some(reloader),
+            },
+            &Supervisor::new(),
+        )
+        .unwrap();
+
+        // An ungated reload would await this not-yet-running proxy and stall HTTP.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut stream = TcpStream::connect(bound).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert_eq!(config_metrics.reload_attempts.load(), 0);
+
+        config_metrics.applied(1);
+        control.proxies_ready().unwrap();
+        let command = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), inbox.command_rx.recv())
+                    .await
+                    .expect("reload did not start after proxies became ready")
+                    .expect("proxy command channel closed")
+            });
+        let ProxyCommand::Reconfigure {
+            generation,
+            applied,
+            ..
+        } = command
+        else {
+            panic!("expected a reconfigure command");
+        };
+        assert_eq!(generation, 2);
+        applied.send(Ok(())).unwrap();
+
+        control.shutdown().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(config_metrics.reload_attempts.load(), 1);
+        assert_eq!(config_metrics.generation.load(), 2);
     }
 }
