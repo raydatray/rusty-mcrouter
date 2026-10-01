@@ -60,12 +60,13 @@ impl Drop for ExitNotifier {
 
 type ReadyEvent = anyhow::Result<SocketAddr>;
 
-pub struct ControlThread {
+/// External lifetime owner; callers retain separate handles for normal dispatch.
+pub struct ControlThreadOwner {
     handle: ControlHandle,
     join: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
-impl ControlThread {
+impl ControlThreadOwner {
     pub fn spawn(
         handle: ControlHandle,
         setup: ControlSetup,
@@ -73,36 +74,21 @@ impl ControlThread {
     ) -> anyhow::Result<(Self, SocketAddr)> {
         let (ready_tx, ready_rx) = sync_channel::<ReadyEvent>(1);
         let exit = supervisor.exit_notifier(ProcessEvent::ControlExited);
-        let process_events = supervisor.sender();
         let join = Builder::new().name("control".into()).spawn(move || {
             let _exit = exit;
-            control_thread_main(setup, ready_tx, process_events)
+            control_thread_main(setup, ready_tx)
         })?;
 
-        let started = ready_rx
+        let owner = Self {
+            handle,
+            join: Some(join),
+        };
+        let metrics_addr = ready_rx
             .recv()
             .context("control thread died during startup")
-            .and_then(|result| result);
-        let metrics_addr = match started {
-            Ok(addr) => addr,
-            Err(error) => {
-                let _ = join.join();
-                return Err(error);
-            }
-        };
+            .and_then(|result| result)?;
 
-        Ok((
-            Self {
-                handle,
-                join: Some(join),
-            },
-            metrics_addr,
-        ))
-    }
-
-    /// Enable config reload polling after every proxy has started.
-    pub fn proxies_ready(&self) -> anyhow::Result<()> {
-        self.handle.proxies_ready_blocking()
+        Ok((owner, metrics_addr))
     }
 
     pub fn shutdown(mut self) -> anyhow::Result<()> {
@@ -125,7 +111,7 @@ impl ControlThread {
     }
 }
 
-impl Drop for ControlThread {
+impl Drop for ControlThreadOwner {
     fn drop(&mut self) {
         let _ = self.stop();
     }
@@ -134,7 +120,6 @@ impl Drop for ControlThread {
 fn control_thread_main(
     setup: ControlSetup,
     ready_tx: SyncSender<ReadyEvent>,
-    process_events: Sender<ProcessEvent>,
 ) -> anyhow::Result<()> {
     let prepared = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -146,19 +131,7 @@ fn control_thread_main(
         });
     let (executor, runtime) =
         report_startup(prepared, ready_tx, |(_, runtime)| runtime.bound_addr())?;
-    executor.block_on(async move {
-        let run = runtime.run();
-        tokio::pin!(run);
-        loop {
-            tokio::select! {
-                result = &mut run => return result,
-                signal = tokio::signal::ctrl_c() => {
-                    signal.context("listen for Ctrl-C")?;
-                    let _ = process_events.send(ProcessEvent::ShutdownRequested);
-                }
-            }
-        }
-    })
+    executor.block_on(runtime.run())
 }
 
 #[cfg(test)]
@@ -178,11 +151,12 @@ mod tests {
     // the returned sender keeps the bus open for the thread's lifetime
     fn spawn_control(
         metrics_addr: SocketAddr,
-    ) -> anyhow::Result<(ControlThread, SocketAddr, EventSender)> {
+    ) -> anyhow::Result<(ControlThreadOwner, SocketAddr, EventSender)> {
         let metrics = Arc::new(ControlMetrics::default());
         let (events, consumer) = channel(8, Arc::clone(&metrics));
         let supervisor = Supervisor::new();
         let (handle, inbox) = ControlHandle::allocate();
+        let process_events = supervisor.sender();
         let cfg = ControlSetup {
             inbox,
             events: consumer,
@@ -191,8 +165,11 @@ mod tests {
             metrics,
             reloader: None,
             http_options: MetricsHttpOptions::default(),
+            request_shutdown: Box::new(move || {
+                let _ = process_events.send(ProcessEvent::ShutdownRequested);
+            }),
         };
-        let (control, bound) = ControlThread::spawn(handle, cfg, &supervisor)?;
+        let (control, bound) = ControlThreadOwner::spawn(handle, cfg, &supervisor)?;
         Ok((control, bound, events))
     }
 
@@ -225,8 +202,10 @@ mod tests {
     #[test]
     fn dropping_control_thread_joins_and_releases_its_listener() {
         let (control, bound, _events) = spawn_control(ephemeral()).unwrap();
+        let handle = control.handle.clone();
         drop(control);
         TcpListener::bind(bound).expect("control listener survived its thread owner");
+        assert!(handle.proxies_ready_blocking().is_err());
     }
 
     #[test]

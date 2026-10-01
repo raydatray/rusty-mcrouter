@@ -13,7 +13,7 @@ use rusty_mcrouter_proxy::{ProxyHandle, ProxyShards, ProxyShared, ThreadMode};
 
 use crate::args::Args;
 use crate::config;
-use crate::control::{ControlThread, ProcessEvent, Supervisor};
+use crate::control::{ControlThreadOwner, ProcessEvent, Supervisor};
 use crate::proxy_fleet::{ProxyFleet, ProxyFleetSetup, ProxyWorkerResources};
 
 use std::{
@@ -100,8 +100,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
     });
 
     let (control_handle, control_inbox) = ControlHandle::allocate();
-    let (control_thread, metrics_bound) = ControlThread::spawn(
-        control_handle,
+    let process_events = supervisor.sender();
+    let (control_owner, metrics_bound) = ControlThreadOwner::spawn(
+        control_handle.clone(),
         ControlSetup {
             inbox: control_inbox,
             events: event_consumer,
@@ -110,6 +111,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
             metrics: control_metrics,
             reloader,
             http_options: Default::default(),
+            request_shutdown: Box::new(move || {
+                let _ = process_events.send(ProcessEvent::ShutdownRequested);
+            }),
         },
         &supervisor,
     )?;
@@ -126,7 +130,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     ) {
         Ok(proxies) => proxies,
         Err(error) => {
-            let _ = control_thread.shutdown();
+            let _ = control_owner.shutdown();
             return Err(error);
         }
     };
@@ -135,9 +139,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     config_metrics.applied(1, applied_at);
-    if let Err(error) = control_thread.proxies_ready() {
+    if let Err(error) = control_handle.proxies_ready_blocking() {
         let _ = proxies.shutdown();
-        let _ = control_thread.shutdown();
+        let _ = control_owner.shutdown();
         return Err(error);
     }
 
@@ -145,7 +149,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     println!("METRICS {metrics_bound}");
     if let Err(error) = std::io::stdout().flush() {
         let _ = proxies.shutdown();
-        let _ = control_thread.shutdown();
+        let _ = control_owner.shutdown();
         return Err(error.into());
     }
     tracing::info!(
@@ -169,6 +173,6 @@ pub(crate) fn run() -> anyhow::Result<()> {
 
     // proxies first so their Stopped events reach the control runtime
     let stopped_proxies = proxies.shutdown();
-    let stopped_control = control_thread.shutdown();
+    let stopped_control = control_owner.shutdown();
     outcome.and(stopped_proxies).and(stopped_control)
 }

@@ -15,6 +15,7 @@ pub struct ControlRuntime {
     metrics: MetricsHttp,
     reloader: Option<ConfigReloader>,
     proxies_ready: bool,
+    request_shutdown: Box<dyn Fn() + Send + Sync>,
 }
 
 impl ControlRuntime {
@@ -36,6 +37,7 @@ impl ControlRuntime {
             metrics,
             reloader: setup.reloader,
             proxies_ready: false,
+            request_shutdown: setup.request_shutdown,
         })
     }
 
@@ -73,6 +75,11 @@ impl ControlRuntime {
                 _ = tick(&mut self.reloader),
                     if self.proxies_ready && self.reloader.is_some() => {
                     self.reloader.as_mut().expect("guarded by is_some").poll().await;
+                }
+
+                signal = tokio::signal::ctrl_c() => {
+                    signal.context("listen for Ctrl-C")?;
+                    (self.request_shutdown)();
                 }
             }
         }
@@ -137,6 +144,7 @@ mod tests {
             metrics,
             reloader: Some(reloader),
             http_options: MetricsHttpOptions::default(),
+            request_shutdown: Box::new(|| {}),
         })
         .await
         .unwrap();

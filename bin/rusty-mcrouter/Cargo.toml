@@ -17,7 +17,7 @@ rusty-mcrouter-backend.workspace = true
 rusty-mcrouter-core.workspace = true
 rusty-mcrouter-observability.workspace = true
 rusty-mcrouter-proxy.workspace = true
-tokio = { workspace = true, features = ["signal", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "net", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]

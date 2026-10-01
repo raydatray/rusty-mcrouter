@@ -73,8 +73,8 @@ and joining proxy threads. both proxy and control executors are created by the
 binary's thread wrappers. [`ProxyWorker`](../../crates/proxy/src/worker.rs)
 builds thread-local proxy state and runs the frontend runtime;
 [`ControlRuntime`](../../crates/control/src/runtime.rs) builds and runs control
-services in the control crate. the binary's control wrapper pins that runtime
-future while forwarding Ctrl-C to process supervision.
+services in the control crate. Ctrl-C is handled in the runtime's select loop;
+an app-supplied callback forwards the shutdown request to process supervision.
 
 [`config.rs`](../../bin/rusty-mcrouter/src/config.rs) loads the startup config.
 [`control/reload.rs`](../../crates/control/src/reload.rs) owns watching for changes,
@@ -86,7 +86,7 @@ flowchart TB
     M[main process supervisor]
     M --> PT0[ProxyThreadOwner 0]
     M --> PTN[ProxyThreadOwner N]
-    M --> CT[ControlThread]
+    M --> CT[ControlThreadOwner]
     PT0 --> PW0[ProxyWorker]
     PTN --> PWN[ProxyWorker]
     PW0 --> PR0[ProxyRuntime]
@@ -101,9 +101,11 @@ flowchart TB
 plus joining. `Runtime` means the actor and task state that lives on that
 thread's current-thread Tokio runtime.
 
-`ProxyThreadOwner` is external to the proxy runtime: it retains the command
-handle solely to stop and join its child, including on drop. ownership is
-established before the readiness wait so failed startup is guarded too.
+`ProxyThreadOwner` and `ControlThreadOwner` are external to their runtimes:
+each retains a command handle solely to stop and join its child, including on
+drop. ownership is established before the readiness wait so failed startup is
+guarded too. normal dispatch uses caller-held handles; the app retains its
+`ControlHandle` and sends `ProxiesReady` through it explicitly.
 
 | path | delivery contract |
 |---|---|
@@ -128,6 +130,8 @@ every proxy acknowledges readiness. main then marks config generation 1 as
 applied and enables reloads before printing `READY` and `METRICS`. failed
 startup threads are joined, and a proxy startup failure stops control after
 the started proxies have been joined and their events can be drained.
+Ctrl-C shares the runtime select with control services, so a signal is handled
+after any inline config apply finishes awaiting proxy acknowledgements.
 Ctrl-C and unexpected thread exits are
 reported to main. Main stops and joins proxy threads first, allowing their
 worker-stop events to reach the control runtime, then drains and joins the
