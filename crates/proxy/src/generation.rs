@@ -31,6 +31,14 @@ impl RouteSlot {
     }
 }
 
+pub(crate) struct GenerationSetup {
+    pub(crate) destinations: Rc<destination::Map>,
+    pub(crate) defaults: DestinationConfig,
+    pub(crate) root_options: RootRouteOptions,
+    pub(crate) metrics: Arc<RoutingMetricsShard>,
+    pub(crate) events: RoutingEventSink,
+}
+
 pub(crate) struct GenerationBuilder {
     destinations: Rc<destination::Map>,
     defaults: DestinationConfig,
@@ -40,19 +48,13 @@ pub(crate) struct GenerationBuilder {
 }
 
 impl GenerationBuilder {
-    pub(crate) fn new(
-        destinations: Rc<destination::Map>,
-        defaults: DestinationConfig,
-        root_options: RootRouteOptions,
-        routing_metrics: Arc<RoutingMetricsShard>,
-        routing_events: RoutingEventSink,
-    ) -> Self {
+    pub(crate) fn new(setup: GenerationSetup) -> Self {
         Self {
-            destinations,
-            defaults,
-            root_options,
-            routing_metrics,
-            routing_events: Rc::new(routing_events),
+            destinations: setup.destinations,
+            defaults: setup.defaults,
+            root_options: setup.root_options,
+            routing_metrics: setup.metrics,
+            routing_events: Rc::new(setup.events),
         }
     }
 

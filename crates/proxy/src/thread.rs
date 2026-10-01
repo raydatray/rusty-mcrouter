@@ -4,7 +4,7 @@ use rusty_mcrouter_backend::destination;
 use tokio::{runtime::Builder, task::LocalSet};
 
 use crate::context::ProxyContext;
-use crate::generation::{GenerationBuilder, RouteSlot};
+use crate::generation::{GenerationBuilder, GenerationSetup, RouteSlot};
 use crate::runtime::{BackgroundTasks, ProxyRuntime};
 use crate::{
     ListenerConfig, ProxyShards, ProxyThreadConfig, Server, WorkerEvent, WorkerEventRecord,
@@ -82,13 +82,13 @@ pub fn proxy_thread_main(
             ),
         });
         let sweep_task = dest_map.spawn_idle_sweep(shared.sweep_interval);
-        let builder = GenerationBuilder::new(
-            dest_map,
-            shared.defaults.clone(),
-            shared.root_route_options.clone(),
-            routing_metrics,
-            routing_events,
-        );
+        let builder = GenerationBuilder::new(GenerationSetup {
+            destinations: dest_map,
+            defaults: shared.defaults.clone(),
+            root_options: shared.root_route_options.clone(),
+            metrics: routing_metrics,
+            events: routing_events,
+        });
         let routes = match builder.build(1, &shared.config) {
             Ok(initial) => RouteSlot::new(initial),
             Err(e) => {
