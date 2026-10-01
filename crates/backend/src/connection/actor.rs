@@ -12,13 +12,13 @@ use tokio::{
 use crate::{
     connection::{
         types::{Command, ConnectionCommand, Inflight, Payload},
-        BackendConnectionConfig, ConnectionEvent, DownReason,
+        BackendConnectionConfig, ConnectionEvent, ConnectionSetup, DownReason,
     },
     error::{ConnectError, LocalError, ProtocolError, RequestError, SendError},
     metrics::BackendMetricsShard,
 };
 
-pub(crate) struct Connection {
+pub struct Connection {
     addr: Arc<str>,
     cfg: BackendConnectionConfig,
     rx: Receiver<ConnectionCommand>,
@@ -39,18 +39,19 @@ enum PipelineExit {
 }
 
 impl Connection {
-    pub(crate) fn new(
-        addr: Arc<str>,
-        cfg: BackendConnectionConfig,
-        rx: Receiver<ConnectionCommand>,
-        events: Box<dyn Fn(ConnectionEvent)>,
-        shard_metrics: Arc<BackendMetricsShard>,
-    ) -> Connection {
+    pub fn new(setup: ConnectionSetup) -> Connection {
+        let ConnectionSetup {
+            addr,
+            options: cfg,
+            inbox,
+            events,
+            metrics: shard_metrics,
+        } = setup;
         let read_buf = BytesMut::with_capacity(cfg.read_buf_initial_capacity);
         Connection {
             addr,
             cfg,
-            rx,
+            rx: inbox.rx,
             events,
             shard_metrics,
             pending: VecDeque::new(),
@@ -62,7 +63,7 @@ impl Connection {
         }
     }
 
-    pub(crate) async fn run(mut self) {
+    pub async fn run(mut self) {
         'lifecycle: loop {
             // unconnected - lazy wait for a request
             while self.pending.is_empty() {
@@ -417,22 +418,23 @@ fn far_future() -> Instant {
 mod tests {
     use rusty_mcrouter_protocol::meta::MetaReplyExpectation;
     use rusty_mcrouter_protocol::Reply;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::oneshot;
 
     use super::*;
-    use crate::connection::BackendConnectionConfig;
+    use crate::connection::{BackendConnectionConfig, ConnectionHandle};
 
     type ReplyRx = oneshot::Receiver<Result<Reply, SendError>>;
 
     fn connection() -> Connection {
-        let (_tx, rx) = mpsc::channel(1);
-        Connection::new(
-            Arc::from("127.0.0.1:0"),
-            BackendConnectionConfig::default(),
-            rx,
-            Box::new(|_| {}),
-            BackendMetricsShard::new(),
-        )
+        let options = BackendConnectionConfig::default();
+        let (_handle, inbox) = ConnectionHandle::allocate(&options);
+        Connection::new(ConnectionSetup {
+            addr: Arc::from("127.0.0.1:0"),
+            options,
+            inbox,
+            events: Box::new(|_| {}),
+            metrics: BackendMetricsShard::new(),
+        })
     }
 
     fn live_slot(deadline: Option<Instant>) -> (Inflight, ReplyRx) {

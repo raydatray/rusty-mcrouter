@@ -11,7 +11,10 @@ use tokio::time::Instant;
 use crate::destination::probe::probe_loop;
 use crate::{
     classify::{code_of, ResultCode},
-    connection::{BackendConnectionConfig, ConnectionEvent, ConnectionHandle, DownReason},
+    connection::{
+        BackendConnectionConfig, Connection, ConnectionEvent, ConnectionHandle, ConnectionSetup,
+        DownReason,
+    },
     destination::{DestinationConfig, DestinationKey, DestinationMetrics},
     error::{ConnectError, LocalError, SendError},
     metrics::BackendMetricsShard,
@@ -58,16 +61,20 @@ impl Destination {
             };
 
             let addr = Arc::clone(&key.addr);
+            let (conn, inbox) = ConnectionHandle::allocate(&connection_cfg);
+            let connection = Connection::new(ConnectionSetup {
+                addr,
+                options: connection_cfg,
+                inbox,
+                events,
+                metrics: Arc::clone(&shard_metrics),
+            });
+            tokio::task::spawn_local(connection.run());
             Destination {
                 key,
                 token: DestToken::allocate(),
                 tracker,
-                conn: ConnectionHandle::spawn(
-                    addr,
-                    connection_cfg,
-                    events,
-                    Arc::clone(&shard_metrics),
-                ),
+                conn,
                 cfg,
                 probe: RefCell::new(None),
                 metrics,
