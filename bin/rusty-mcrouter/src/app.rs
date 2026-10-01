@@ -2,22 +2,34 @@ use rusty_mcrouter_backend::{
     destination::DestinationMetricsRegistry,
     tko::{DestTokenAllocator, TkoTrackerMap},
 };
-use rusty_mcrouter_observability::{channel, logging, ConfigMetrics, ControlMetrics, ScrapeInputs};
+use rusty_mcrouter_observability::{
+    channel, logging, ConfigMetrics, ControlMetrics, ProcessMetadata, ScrapeInputs,
+};
 use rusty_mcrouter_proxy::{ProxyHandle, ProxyShards, ProxyShared, ThreadMode};
 
 use crate::args::Args;
 use crate::config;
-use crate::control::{ControlThread, ControlThreadConfig, ProcessEvent, Supervisor};
+use crate::control::{ControlHandle, ControlThread, ControlThreadSetup, ProcessEvent, Supervisor};
 use crate::proxy_fleet::{ProxyFleet, ProxyFleetConfig, ProxyWorkerInputs};
-use crate::reload::{ConfigReloader, ReloaderConfig};
+use crate::reload::{ConfigReloader, ReloaderSetup, RunningConfig};
 
-use std::{io::Write, sync::Arc};
+use std::{
+    io::Write,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 const EVENT_BUS_CAPACITY: usize = 1024;
 
 pub(crate) fn run() -> anyhow::Result<()> {
     let args = Args::from_cli()?;
     logging::init();
+    let metadata = ProcessMetadata {
+        start_unix_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs()),
+        num_proxies: args.num_proxies,
+    };
 
     let listen_addr = args.listen_addr()?;
     let metrics_addr = args.metrics_addr()?;
@@ -58,6 +70,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let supervisor = Supervisor::new();
 
     let registry = ScrapeInputs {
+        metadata,
         proxies: proxy_shards,
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
@@ -67,10 +80,13 @@ pub(crate) fn run() -> anyhow::Result<()> {
     .into_registry();
 
     let reloader = (!args.disable_reload_configs).then(|| {
-        ConfigReloader::new(ReloaderConfig {
+        ConfigReloader::new(ReloaderSetup {
             path: args.config.clone(),
             delay: args.reconfiguration_delay(),
-            running: (config_bytes, config),
+            running: RunningConfig {
+                bytes: config_bytes,
+                document: config,
+            },
             proxies: proxy_handles,
             defaults: args.destination_defaults(),
             root_options: args.root_route_options(),
@@ -78,13 +94,18 @@ pub(crate) fn run() -> anyhow::Result<()> {
         })
     });
 
+    let (control_handle, control_inbox) = ControlHandle::allocate();
     let (control_thread, metrics_bound) = ControlThread::spawn(
-        ControlThreadConfig {
+        control_handle,
+        ControlThreadSetup {
+            inbox: control_inbox,
             events: event_consumer,
             registry: Arc::new(registry),
             metrics_addr,
             metrics: control_metrics,
             reloader,
+            process_events: supervisor.sender(),
+            http_options: Default::default(),
         },
         &supervisor,
     )?;
@@ -106,7 +127,10 @@ pub(crate) fn run() -> anyhow::Result<()> {
         }
     };
 
-    config_metrics.applied(1);
+    let applied_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    config_metrics.applied(1, applied_at);
     if let Err(error) = control_thread.proxies_ready() {
         let _ = proxies.shutdown();
         let _ = control_thread.shutdown();

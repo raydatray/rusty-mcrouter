@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusty_mcrouter_backend::classify::ResultCode;
 use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
@@ -21,7 +20,14 @@ use crate::metrics::{
 };
 use crate::shard_source;
 
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessMetadata {
+    pub start_unix_secs: u64,
+    pub num_proxies: usize,
+}
+
 pub struct ScrapeInputs {
+    pub metadata: ProcessMetadata,
     pub proxies: Vec<ProxyShards>,
     pub tko_map: Arc<TkoTrackerMap>,
     pub destinations: Arc<DestinationMetricsRegistry>,
@@ -63,11 +69,8 @@ impl ScrapeInputs {
         }));
         registry.register(Box::new(SelfSource {
             metrics: self.control,
-            num_proxies: self.proxies.len(),
-            start_unix_secs: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            num_proxies: self.metadata.num_proxies,
+            start_unix_secs: self.metadata.start_unix_secs,
         }));
         registry.register(Box::new(ConfigSource {
             metrics: self.config,
@@ -624,11 +627,15 @@ mod tests {
         control.events_dropped.inc();
 
         let text = ScrapeInputs {
+            metadata: ProcessMetadata {
+                start_unix_secs: 1_700_000_000,
+                num_proxies: 2,
+            },
             proxies,
             tko_map: TkoTrackerMap::new(noop_sink()),
             destinations: DestinationMetricsRegistry::new(),
             control,
-            config: ConfigMetrics::started(),
+            config: ConfigMetrics::started(1_700_000_000),
         }
         .into_registry()
         .render();
@@ -677,8 +684,7 @@ mod tests {
     #[test]
     fn config_source_golden() {
         let metrics = Arc::new(ConfigMetrics::default());
-        metrics.applied(3);
-        metrics.last_success_unix_secs.set(1_700_000_000);
+        metrics.applied(3, 1_700_000_000);
         metrics.reload_attempts.add(3);
         metrics.rejected(ReloadStage::Parse);
 
@@ -697,7 +703,7 @@ mod tests {
 
     #[test]
     fn config_metrics_return_to_in_sync() {
-        let metrics = ConfigMetrics::started();
+        let metrics = ConfigMetrics::started(1_700_000_000);
         assert_eq!(metrics.generation.load(), 1);
         assert_eq!(metrics.last_reload_successful.load(), 1);
         assert!(metrics.last_success_unix_secs.load() > 0);

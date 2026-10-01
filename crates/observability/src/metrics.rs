@@ -1,6 +1,5 @@
 use std::fmt::Write;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusty_mcrouter_observability_primitives::{Counter, Gauge};
 
@@ -44,15 +43,15 @@ pub struct ConfigMetrics {
 }
 
 impl ConfigMetrics {
-    pub fn started() -> Arc<Self> {
+    pub fn started(applied_at: u64) -> Arc<Self> {
         let metrics = Self::default();
-        metrics.applied(1);
+        metrics.applied(1, applied_at);
         Arc::new(metrics)
     }
 
-    pub fn applied(&self, generation: u64) {
+    pub fn applied(&self, generation: u64, applied_at: u64) {
         self.generation.set(generation as i64);
-        self.last_success_unix_secs.set(unix_now_secs());
+        self.last_success_unix_secs.set(applied_at as i64);
         self.in_sync();
     }
 
@@ -64,12 +63,6 @@ impl ConfigMetrics {
         self.reload_failures[stage as usize].inc();
         self.last_reload_successful.set(0);
     }
-}
-
-fn unix_now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
 pub trait MetricsSource: Send + Sync {

@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
 use rusty_mcrouter_backend::destination::DestinationConfig;
@@ -13,10 +13,15 @@ use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
 
 use crate::config;
 
-pub struct ReloaderConfig {
+pub struct RunningConfig {
+    pub bytes: Vec<u8>,
+    pub document: Arc<ConfigDocument>,
+}
+
+pub struct ReloaderSetup {
     pub path: PathBuf,
     pub delay: Duration,
-    pub running: (Vec<u8>, Arc<ConfigDocument>),
+    pub running: RunningConfig,
     pub proxies: Vec<ProxyHandle>,
     pub defaults: DestinationConfig,
     pub root_options: RootRouteOptions,
@@ -86,8 +91,8 @@ impl Rejected {
 }
 
 impl ConfigReloader {
-    pub fn new(cfg: ReloaderConfig) -> Self {
-        let (bytes, document) = cfg.running;
+    pub fn new(cfg: ReloaderSetup) -> Self {
+        let RunningConfig { bytes, document } = cfg.running;
         Self {
             path: cfg.path,
             delay: cfg.delay,
@@ -140,7 +145,10 @@ impl ConfigReloader {
         let started = Instant::now();
         match self.try_apply(state).await {
             Ok(Outcome::Applied(generation)) => {
-                self.metrics.applied(generation);
+                let applied_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                self.metrics.applied(generation, applied_at);
                 tracing::info!(
                     generation,
                     pools = self.running.document.pools().len(),
@@ -249,16 +257,19 @@ mod tests {
             ));
             std::fs::write(&path, V1).unwrap();
             let (bytes, document) = config::load(&path).unwrap();
-            let metrics = ConfigMetrics::started();
+            let metrics = ConfigMetrics::started(1);
             let applied = Arc::new(Mutex::new(Vec::new()));
             let handles = (0..proxies)
                 .map(|id| fake_proxy(id, Arc::clone(&applied)))
                 .collect();
 
-            let reloader = ConfigReloader::new(ReloaderConfig {
+            let reloader = ConfigReloader::new(ReloaderSetup {
                 path: path.clone(),
                 delay: Duration::from_millis(10),
-                running: (bytes, Arc::new(document)),
+                running: RunningConfig {
+                    bytes,
+                    document: Arc::new(document),
+                },
                 proxies: handles,
                 defaults: DestinationConfig::default(),
                 root_options: RootRouteOptions::default(),
