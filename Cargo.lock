@@ -463,8 +463,15 @@ dependencies = [
 name = "rusty-mcrouter-control"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "rusty-mcrouter-backend",
+ "rusty-mcrouter-config",
+ "rusty-mcrouter-core",
  "rusty-mcrouter-observability",
  "rusty-mcrouter-observability-primitives",
+ "rusty-mcrouter-proxy",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
