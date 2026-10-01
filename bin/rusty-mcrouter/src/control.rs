@@ -10,6 +10,7 @@ use rusty_mcrouter_observability::{logging, ControlMetrics, EventConsumer, Metri
 use tokio::sync::{mpsc, oneshot};
 
 use crate::reload::ConfigReloader;
+use crate::startup::report_startup;
 
 pub struct ControlInbox {
     command_rx: mpsc::Receiver<ControlCommand>,
@@ -159,22 +160,33 @@ impl ControlThread {
     }
 
     pub fn shutdown(mut self) -> anyhow::Result<()> {
-        let shutdown = if self.join.as_ref().is_some_and(JoinHandle::is_finished) {
+        self.stop()
+    }
+
+    fn stop(&mut self) -> anyhow::Result<()> {
+        let Some(join) = self.join.take() else {
+            return Ok(());
+        };
+        let shutdown = if join.is_finished() {
             Ok(())
         } else {
             self.handle.shutdown_blocking()
         };
-        let joined = self
-            .join
-            .take()
-            .expect("control thread exists")
+        let joined = join
             .join()
             .map_err(|_| anyhow::anyhow!("control thread panicked"))?;
         shutdown.and(joined)
     }
 }
 
-struct ControlRuntime {
+impl Drop for ControlThread {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+struct ControlWorker {
+    bound_addr: SocketAddr,
     command_rx: mpsc::Receiver<ControlCommand>,
     events: EventConsumer,
     metrics: MetricsHttp,
@@ -183,7 +195,33 @@ struct ControlRuntime {
     process_events: Sender<ProcessEvent>,
 }
 
-impl ControlRuntime {
+impl ControlWorker {
+    async fn build(setup: ControlThreadSetup) -> anyhow::Result<Self> {
+        let listener = tokio::net::TcpListener::bind(setup.metrics_addr)
+            .await
+            .with_context(|| format!("bind({}) failed", setup.metrics_addr))?;
+        let bound_addr = listener.local_addr()?;
+        let metrics = MetricsHttp::new(MetricsHttpSetup {
+            listener,
+            registry: setup.registry,
+            metrics: setup.metrics,
+            options: setup.http_options,
+        });
+        Ok(Self {
+            bound_addr,
+            command_rx: setup.inbox.command_rx,
+            events: setup.events,
+            metrics,
+            reloader: setup.reloader,
+            proxies_ready: false,
+            process_events: setup.process_events,
+        })
+    }
+
+    fn bound_addr(&self) -> SocketAddr {
+        self.bound_addr
+    }
+
     async fn run(mut self) -> anyhow::Result<()> {
         loop {
             tokio::select! {
@@ -237,62 +275,19 @@ async fn tick(reloader: &mut Option<ConfigReloader>) {
 }
 
 fn control_thread_main(
-    cfg: ControlThreadSetup,
+    setup: ControlThreadSetup,
     ready_tx: SyncSender<ReadyEvent>,
 ) -> anyhow::Result<()> {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    let prepared = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            let error = anyhow::Error::from(error);
-            let _ = ready_tx.send(Err(anyhow::anyhow!(error.to_string())));
-            return Err(error);
-        }
-    };
-
-    runtime.block_on(async move {
-        let ControlThreadSetup {
-            inbox,
-            events,
-            registry,
-            metrics_addr,
-            metrics: control_metrics,
-            reloader,
-            process_events,
-            http_options,
-        } = cfg;
-
-        let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
-            Ok(listener) => listener,
-            Err(error) => {
-                let _ = ready_tx.send(Err(anyhow::anyhow!("bind({metrics_addr}) failed: {error}")));
-                anyhow::bail!("bind({metrics_addr}) failed: {error}");
-            }
-        };
-        let bound = listener.local_addr()?;
-        let metrics = MetricsHttp::new(MetricsHttpSetup {
-            listener,
-            registry,
-            metrics: control_metrics,
-            options: http_options,
+        .context("create control executor")
+        .and_then(|executor| {
+            let worker = executor.block_on(ControlWorker::build(setup))?;
+            Ok((executor, worker))
         });
-
-        let _ = ready_tx.send(Ok(bound));
-        drop(ready_tx);
-
-        ControlRuntime {
-            command_rx: inbox.command_rx,
-            events,
-            metrics,
-            reloader,
-            proxies_ready: false,
-            process_events,
-        }
-        .run()
-        .await
-    })
+    let (executor, worker) = report_startup(prepared, ready_tx, |(_, worker)| worker.bound_addr())?;
+    executor.block_on(worker.run())
 }
 
 #[cfg(test)]
@@ -361,6 +356,13 @@ mod tests {
     fn control_thread_acknowledges_shutdown_and_joins() {
         let (control, _, _events) = spawn_control(ephemeral()).unwrap();
         control.shutdown().unwrap();
+    }
+
+    #[test]
+    fn dropping_control_thread_joins_and_releases_its_listener() {
+        let (control, bound, _events) = spawn_control(ephemeral()).unwrap();
+        drop(control);
+        TcpListener::bind(bound).expect("control listener survived its thread owner");
     }
 
     #[test]

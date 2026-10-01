@@ -13,11 +13,11 @@ mod proxy_set;
 mod routing;
 mod runtime;
 mod server;
-mod thread;
+mod worker;
 
 pub use crate::config::{
     FrontendConnectionOptions, ListenerConfig, ProxyInbox, ProxyShards, ProxyShared,
-    ProxyThreadConfig, ThreadMode,
+    ProxyThreadSetup, ThreadMode,
 };
 pub use crate::error::FrontendError;
 pub use crate::events::{WorkerEvent, WorkerEventRecord, WorkerEventSink};
@@ -26,4 +26,4 @@ pub use crate::message::{ProxyCommand, ProxyRequest};
 pub use crate::metrics::FrontendMetricsShard;
 pub use crate::proxy_set::ProxySet;
 pub use crate::server::Server;
-pub use crate::thread::proxy_thread_main;
+pub use crate::worker::ProxyWorker;

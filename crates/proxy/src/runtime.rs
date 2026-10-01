@@ -17,6 +17,17 @@ pub(crate) struct BackgroundTasks {
     pub(crate) sweep: Option<JoinHandle<()>>,
 }
 
+impl Drop for BackgroundTasks {
+    fn drop(&mut self) {
+        if let Some(listener) = self.listener.take() {
+            listener.abort();
+        }
+        if let Some(sweep) = self.sweep.take() {
+            sweep.abort();
+        }
+    }
+}
+
 pub(crate) struct ProxyRuntime {
     context: ProxyContext,
     builder: GenerationBuilder,

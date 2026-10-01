@@ -15,7 +15,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, WorkerEventSink};
 
-pub struct ProxyThreadConfig {
+pub struct ProxyThreadSetup {
     pub proxy_id: usize,
     pub inbox: ProxyInbox,
     pub shards: ProxyShards,
