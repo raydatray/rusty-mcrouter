@@ -426,6 +426,7 @@ dependencies = [
  "clap",
  "rusty-mcrouter-backend",
  "rusty-mcrouter-config",
+ "rusty-mcrouter-control",
  "rusty-mcrouter-core",
  "rusty-mcrouter-observability",
  "rusty-mcrouter-observability-primitives",
@@ -456,6 +457,14 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "thiserror",
+]
+
+[[package]]
+name = "rusty-mcrouter-control"
+version = "0.1.0"
+dependencies = [
+ "rusty-mcrouter-observability",
+ "rusty-mcrouter-observability-primitives",
 ]
 
 [[package]]

@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::anyhow;
 use rusty_mcrouter_backend::destination::DestinationConfig;
 use rusty_mcrouter_config::ConfigDocument;
+use rusty_mcrouter_control::{ConfigMetrics, ReloadStage};
 use rusty_mcrouter_core::RootRouteOptions;
-use rusty_mcrouter_observability::{ConfigMetrics, ReloadStage};
 use rusty_mcrouter_proxy::ProxyHandle;
 use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
 

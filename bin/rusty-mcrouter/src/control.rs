@@ -296,7 +296,8 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
-    use rusty_mcrouter_observability::{channel, ConfigMetrics, EventSender};
+    use rusty_mcrouter_control::ConfigMetrics;
+    use rusty_mcrouter_observability::{channel, EventSender};
     use rusty_mcrouter_proxy::{ProxyCommand, ProxyHandle};
 
     use crate::{
