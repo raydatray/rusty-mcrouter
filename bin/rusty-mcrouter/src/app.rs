@@ -1,6 +1,6 @@
 use rusty_mcrouter_backend::{destination::DestinationMetricsRegistry, tko::TkoTrackerMap};
 use rusty_mcrouter_observability::{channel, logging, ConfigMetrics, ControlMetrics, ScrapeInputs};
-use rusty_mcrouter_proxy::{ProxyShared, ThreadMode};
+use rusty_mcrouter_proxy::{ProxyShards, ProxyShared, ThreadMode};
 
 use crate::args::Args;
 use crate::config;
@@ -36,9 +36,11 @@ pub(crate) fn run() -> anyhow::Result<()> {
 
     let supervisor = Supervisor::new();
 
+    let proxy_shards: Vec<_> = (0..args.num_proxies).map(|_| ProxyShards::new()).collect();
+
     let proxies = ProxyFleet::spawn(
         ProxyFleetConfig {
-            num_proxies: args.num_proxies,
+            shards: proxy_shards.clone(),
             num_listening_sockets: args.num_listening_sockets,
             listen_addr,
             shared: Arc::clone(&shared),
@@ -48,7 +50,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     )?;
 
     let registry = ScrapeInputs {
-        proxies: proxies.shards(),
+        proxies: proxy_shards,
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
         control: Arc::clone(&control_metrics),
