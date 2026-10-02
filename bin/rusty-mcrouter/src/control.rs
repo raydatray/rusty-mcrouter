@@ -1,29 +1,29 @@
 use std::net::SocketAddr;
-use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::thread::{Builder, JoinHandle};
 
 use anyhow::Context;
 use rusty_mcrouter_control::{ControlHandle, ControlRuntime, ControlSetup};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::startup::report_startup;
 
 type ReadyEvent = anyhow::Result<SocketAddr>;
 
 pub enum ProcessEvent {
-    ShutdownRequested,
     ProxyExited { id: usize },
     ControlExited,
 }
 
 /// main's end of the process-event channel
 pub struct Supervisor {
-    tx: Sender<ProcessEvent>,
-    rx: Receiver<ProcessEvent>,
+    tx: UnboundedSender<ProcessEvent>,
+    rx: UnboundedReceiver<ProcessEvent>,
 }
 
 /// drop guard: fires when the owning thread body ends, panic included
 pub struct ExitNotifier {
-    process_events: Sender<ProcessEvent>,
+    process_events: UnboundedSender<ProcessEvent>,
     event: Option<ProcessEvent>,
 }
 
@@ -34,7 +34,7 @@ pub struct ControlThreadOwner {
 
 impl Supervisor {
     pub fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = unbounded_channel();
         Self { tx, rx }
     }
 
@@ -45,14 +45,11 @@ impl Supervisor {
         }
     }
 
-    pub fn sender(&self) -> Sender<ProcessEvent> {
-        self.tx.clone()
-    }
-
-    pub fn wait(self) -> anyhow::Result<ProcessEvent> {
+    pub async fn wait(mut self) -> anyhow::Result<ProcessEvent> {
         drop(self.tx); // only threads may satisfy recv()
         self.rx
             .recv()
+            .await
             .context("every thread exited without reporting")
     }
 }
@@ -155,7 +152,6 @@ mod tests {
         let (events, consumer) = channel(8, Arc::clone(&metrics));
         let supervisor = Supervisor::new();
         let (handle, inbox) = ControlHandle::allocate();
-        let process_events = supervisor.sender();
         let cfg = ControlSetup {
             inbox,
             events: consumer,
@@ -164,32 +160,29 @@ mod tests {
             metrics,
             reloader: None,
             http_options: MetricsHttpOptions::default(),
-            request_shutdown: Box::new(move || {
-                let _ = process_events.send(ProcessEvent::ShutdownRequested);
-            }),
         };
         let (control, bound) = ControlThreadOwner::spawn(handle, cfg, &supervisor)?;
         Ok((control, bound, events))
     }
 
-    #[test]
-    fn exit_notifier_reports_a_panicking_thread() {
+    #[tokio::test]
+    async fn exit_notifier_reports_a_panicking_thread() {
         let supervisor = Supervisor::new();
         let exit = supervisor.exit_notifier(ProcessEvent::ProxyExited { id: 7 });
         let join = std::thread::spawn(move || {
             let _exit = exit;
             panic!("boom");
         });
-        assert!(join.join().is_err());
         assert!(matches!(
-            supervisor.wait().unwrap(),
+            supervisor.wait().await.unwrap(),
             ProcessEvent::ProxyExited { id: 7 }
         ));
+        assert!(join.join().is_err());
     }
 
-    #[test]
-    fn supervisor_wait_errors_when_nothing_can_report() {
-        assert!(Supervisor::new().wait().is_err());
+    #[tokio::test]
+    async fn supervisor_wait_errors_when_nothing_can_report() {
+        assert!(Supervisor::new().wait().await.is_err());
     }
 
     #[test]
