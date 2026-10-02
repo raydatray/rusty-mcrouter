@@ -60,21 +60,27 @@ flowchart LR
 
 ## runtime ownership
 
+the app owns process lifecycle: composition, startup, signals, supervision and
+ordered shutdown. control owns application coordination: configuration reloads,
+proxy commands, event presentation and metrics services.
+
 the executable's [`main.rs`](../../bin/rusty-mcrouter/src/main.rs) declares the
 binary modules and calls synchronous `app::run`.
 [`app.rs`](../../bin/rusty-mcrouter/src/app.rs) parses CLI options, initializes
 logging and observability state, and allocates each worker's handle, inbox and
 metric shards. it loads the startup config, wires shared state, starts the
-control thread before the proxy fleet, then waits for an exit event and joins
-them. the scrape registry and workers share the app-allocated metric shards;
-the reloader receives the app-allocated proxy handles.
+control thread before the proxy fleet, then waits for Ctrl-C or a thread exit
+and joins them. the scrape registry and workers share the app-allocated metric
+shards; the reloader receives the app-allocated proxy handles.
 [`proxy_fleet.rs`](../../bin/rusty-mcrouter/src/proxy_fleet.rs) owns launching
 and joining proxy threads. both proxy and control executors are created by the
 binary's thread wrappers. [`ProxyWorker`](../../crates/proxy/src/worker.rs)
 builds thread-local proxy state and runs the frontend runtime;
 [`ControlRuntime`](../../crates/control/src/runtime.rs) builds and runs control
-services in the control crate. Ctrl-C is handled in the runtime's select loop;
-an app-supplied callback forwards the shutdown request to process supervision.
+services in the control crate. the app registers Ctrl-C before starting threads
+and announcing readiness. its current-thread executor selects between the
+signal and asynchronous thread-exit notifications; blocking startup and
+stop/join operations run outside that executor.
 
 [`config.rs`](../../bin/rusty-mcrouter/src/config.rs) loads the startup config.
 [`control/reload.rs`](../../crates/control/src/reload.rs) owns watching for changes,
@@ -130,12 +136,10 @@ every proxy acknowledges readiness. main then marks config generation 1 as
 applied and enables reloads before printing `READY` and `METRICS`. failed
 startup threads are joined, and a proxy startup failure stops control after
 the started proxies have been joined and their events can be drained.
-Ctrl-C shares the runtime select with control services, so a signal is handled
-after any inline config apply finishes awaiting proxy acknowledgements.
-Ctrl-C and unexpected thread exits are
-reported to main. Main stops and joins proxy threads first, allowing their
-worker-stop events to reach the control runtime, then drains and joins the
-control thread.
+the app observes Ctrl-C independently of control's inline config apply, even
+while control awaits proxy acknowledgements. main stops and joins proxy threads
+first, allowing their worker-stop events to reach the control runtime, then
+drains and joins the control thread.
 
 ## construction and dependency ownership
 

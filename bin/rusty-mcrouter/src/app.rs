@@ -1,3 +1,4 @@
+use anyhow::Context;
 use rusty_mcrouter_backend::{
     destination::DestinationMetricsRegistry,
     tko::{DestTokenAllocator, TkoTrackerMap},
@@ -70,6 +71,15 @@ pub(crate) fn run() -> anyhow::Result<()> {
         connection_options: Default::default(),
     });
 
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("create app executor")?;
+    let mut interrupt = {
+        let _entered = executor.enter();
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .context("listen for Ctrl-C")?
+    };
     let supervisor = Supervisor::new();
 
     let registry = ScrapeInputs {
@@ -100,7 +110,6 @@ pub(crate) fn run() -> anyhow::Result<()> {
     });
 
     let (control_handle, control_inbox) = ControlHandle::allocate();
-    let process_events = supervisor.sender();
     let (control_owner, metrics_bound) = ControlThreadOwner::spawn(
         control_handle.clone(),
         ControlSetup {
@@ -111,9 +120,6 @@ pub(crate) fn run() -> anyhow::Result<()> {
             metrics: control_metrics,
             reloader,
             http_options: Default::default(),
-            request_shutdown: Box::new(move || {
-                let _ = process_events.send(ProcessEvent::ShutdownRequested);
-            }),
         },
         &supervisor,
     )?;
@@ -160,16 +166,24 @@ pub(crate) fn run() -> anyhow::Result<()> {
         "rusty-mcrouter ready"
     );
 
-    let outcome = match supervisor.wait() {
-        Ok(ProcessEvent::ShutdownRequested) => Ok(()),
-        Ok(ProcessEvent::ProxyExited { id }) => {
-            Err(anyhow::anyhow!("proxy-{id} exited unexpectedly"))
+    let outcome = executor.block_on(async {
+        tokio::select! {
+            signal = interrupt.recv() => {
+                signal.context("Ctrl-C signal stream closed")
+            }
+
+            event = supervisor.wait() => {
+                match event? {
+                    ProcessEvent::ProxyExited { id } => {
+                        Err(anyhow::anyhow!("proxy-{id} exited unexpectedly"))
+                    }
+                    ProcessEvent::ControlExited => {
+                        Err(anyhow::anyhow!("control thread exited unexpectedly"))
+                    }
+                }
+            }
         }
-        Ok(ProcessEvent::ControlExited) => {
-            Err(anyhow::anyhow!("control thread exited unexpectedly"))
-        }
-        Err(error) => Err(error),
-    };
+    });
 
     // proxies first so their Stopped events reach the control runtime
     let stopped_proxies = proxies.shutdown();
