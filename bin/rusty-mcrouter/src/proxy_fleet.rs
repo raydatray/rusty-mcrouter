@@ -12,8 +12,7 @@ use rusty_mcrouter_proxy::{
     ProxyWorker,
 };
 
-use crate::control::{ProcessEvent, Supervisor};
-use crate::startup::report_startup;
+use crate::lifecycle::{report_startup, ProcessEvent, Supervisor};
 
 pub struct ProxyWorkerResources {
     pub handle: ProxyHandle,

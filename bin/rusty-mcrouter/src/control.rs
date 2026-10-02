@@ -4,62 +4,14 @@ use std::thread::{Builder, JoinHandle};
 
 use anyhow::Context;
 use rusty_mcrouter_control::{ControlHandle, ControlRuntime, ControlSetup};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use crate::startup::report_startup;
+use crate::lifecycle::{report_startup, ProcessEvent, Supervisor};
 
 type ReadyEvent = anyhow::Result<SocketAddr>;
-
-pub enum ProcessEvent {
-    ProxyExited { id: usize },
-    ControlExited,
-}
-
-/// main's end of the process-event channel
-pub struct Supervisor {
-    tx: UnboundedSender<ProcessEvent>,
-    rx: UnboundedReceiver<ProcessEvent>,
-}
-
-/// drop guard: fires when the owning thread body ends, panic included
-pub struct ExitNotifier {
-    process_events: UnboundedSender<ProcessEvent>,
-    event: Option<ProcessEvent>,
-}
 
 pub struct ControlThreadOwner {
     handle: ControlHandle,
     join: Option<JoinHandle<anyhow::Result<()>>>,
-}
-
-impl Supervisor {
-    pub fn new() -> Self {
-        let (tx, rx) = unbounded_channel();
-        Self { tx, rx }
-    }
-
-    pub fn exit_notifier(&self, on_exit: ProcessEvent) -> ExitNotifier {
-        ExitNotifier {
-            process_events: self.tx.clone(),
-            event: Some(on_exit),
-        }
-    }
-
-    pub async fn wait(mut self) -> anyhow::Result<ProcessEvent> {
-        drop(self.tx); // only threads may satisfy recv()
-        self.rx
-            .recv()
-            .await
-            .context("every thread exited without reporting")
-    }
-}
-
-impl Drop for ExitNotifier {
-    fn drop(&mut self) {
-        if let Some(event) = self.event.take() {
-            let _ = self.process_events.send(event);
-        }
-    }
 }
 
 impl ControlThreadOwner {
@@ -163,26 +115,6 @@ mod tests {
         };
         let (control, bound) = ControlThreadOwner::spawn(handle, cfg, &supervisor)?;
         Ok((control, bound, events))
-    }
-
-    #[tokio::test]
-    async fn exit_notifier_reports_a_panicking_thread() {
-        let supervisor = Supervisor::new();
-        let exit = supervisor.exit_notifier(ProcessEvent::ProxyExited { id: 7 });
-        let join = std::thread::spawn(move || {
-            let _exit = exit;
-            panic!("boom");
-        });
-        assert!(matches!(
-            supervisor.wait().await.unwrap(),
-            ProcessEvent::ProxyExited { id: 7 }
-        ));
-        assert!(join.join().is_err());
-    }
-
-    #[tokio::test]
-    async fn supervisor_wait_errors_when_nothing_can_report() {
-        assert!(Supervisor::new().wait().await.is_err());
     }
 
     #[test]
