@@ -15,29 +15,29 @@ use rusty_mcrouter_proxy::{
 use crate::control::{ProcessEvent, Supervisor};
 use crate::startup::report_startup;
 
-fn proxy_thread_main(
-    setup: ProxyThreadSetup,
-    ready_tx: SyncSender<anyhow::Result<Option<SocketAddr>>>,
-) -> anyhow::Result<()> {
-    let prepared = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .context("create proxy executor")
-        .and_then(|executor| {
-            let local = tokio::task::LocalSet::new();
-            let worker = local.block_on(&executor, ProxyWorker::build(setup))?;
-            Ok((executor, local, worker))
-        });
-    let (executor, local, worker) =
-        report_startup(prepared, ready_tx, |(_, _, worker)| worker.bound_addr())?;
-    local.block_on(&executor, worker.run())
+pub struct ProxyWorkerResources {
+    pub handle: ProxyHandle,
+    pub inbox: ProxyInbox,
+    pub shards: ProxyShards,
+}
+
+pub struct ProxyFleetSetup {
+    pub workers: Vec<ProxyWorkerResources>,
+    pub num_listening_sockets: usize,
+    pub listen_addr: SocketAddr,
+    pub shared: Arc<ProxyShared>,
+    pub events: EventSender,
 }
 
 /// External lifetime owner; its handle is a cleanup capability, not a runtime input.
 pub struct ProxyThreadOwner {
     handle: ProxyHandle,
     join: Option<JoinHandle<anyhow::Result<()>>>,
+}
+
+pub struct ProxyFleet {
+    threads: Vec<ProxyThreadOwner>,
+    bound_addr: SocketAddr,
 }
 
 impl ProxyThreadOwner {
@@ -92,25 +92,6 @@ impl Drop for ProxyThreadOwner {
     fn drop(&mut self) {
         let _ = self.stop();
     }
-}
-
-pub struct ProxyWorkerResources {
-    pub handle: ProxyHandle,
-    pub inbox: ProxyInbox,
-    pub shards: ProxyShards,
-}
-
-pub struct ProxyFleetSetup {
-    pub workers: Vec<ProxyWorkerResources>,
-    pub num_listening_sockets: usize,
-    pub listen_addr: SocketAddr,
-    pub shared: Arc<ProxyShared>,
-    pub events: EventSender,
-}
-
-pub struct ProxyFleet {
-    threads: Vec<ProxyThreadOwner>,
-    bound_addr: SocketAddr,
 }
 
 impl ProxyFleet {
@@ -185,6 +166,25 @@ impl ProxyFleet {
 
         outcome
     }
+}
+
+fn proxy_thread_main(
+    setup: ProxyThreadSetup,
+    ready_tx: SyncSender<anyhow::Result<Option<SocketAddr>>>,
+) -> anyhow::Result<()> {
+    let prepared = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .context("create proxy executor")
+        .and_then(|executor| {
+            let local = tokio::task::LocalSet::new();
+            let worker = local.block_on(&executor, ProxyWorker::build(setup))?;
+            Ok((executor, local, worker))
+        });
+    let (executor, local, worker) =
+        report_startup(prepared, ready_tx, |(_, _, worker)| worker.bound_addr())?;
+    local.block_on(&executor, worker.run())
 }
 
 #[cfg(test)]
