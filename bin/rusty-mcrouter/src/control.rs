@@ -7,6 +7,8 @@ use rusty_mcrouter_control::{ControlHandle, ControlRuntime, ControlSetup};
 
 use crate::startup::report_startup;
 
+type ReadyEvent = anyhow::Result<SocketAddr>;
+
 pub enum ProcessEvent {
     ShutdownRequested,
     ProxyExited { id: usize },
@@ -17,6 +19,17 @@ pub enum ProcessEvent {
 pub struct Supervisor {
     tx: Sender<ProcessEvent>,
     rx: Receiver<ProcessEvent>,
+}
+
+/// drop guard: fires when the owning thread body ends, panic included
+pub struct ExitNotifier {
+    process_events: Sender<ProcessEvent>,
+    event: Option<ProcessEvent>,
+}
+
+pub struct ControlThreadOwner {
+    handle: ControlHandle,
+    join: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
 impl Supervisor {
@@ -44,26 +57,12 @@ impl Supervisor {
     }
 }
 
-/// drop guard: fires when the owning thread body ends, panic included
-pub struct ExitNotifier {
-    process_events: Sender<ProcessEvent>,
-    event: Option<ProcessEvent>,
-}
-
 impl Drop for ExitNotifier {
     fn drop(&mut self) {
         if let Some(event) = self.event.take() {
             let _ = self.process_events.send(event);
         }
     }
-}
-
-type ReadyEvent = anyhow::Result<SocketAddr>;
-
-/// External lifetime owner; callers retain separate handles for normal dispatch.
-pub struct ControlThreadOwner {
-    handle: ControlHandle,
-    join: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
 impl ControlThreadOwner {
