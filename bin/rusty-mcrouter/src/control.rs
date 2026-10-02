@@ -7,8 +7,6 @@ use rusty_mcrouter_control::{ControlHandle, ControlRuntime, ControlSetup};
 
 use crate::lifecycle::{report_startup, ProcessEvent, Supervisor};
 
-type ReadyEvent = anyhow::Result<SocketAddr>;
-
 pub struct ControlThreadOwner {
     handle: ControlHandle,
     join: Option<JoinHandle<anyhow::Result<()>>>,
@@ -20,7 +18,7 @@ impl ControlThreadOwner {
         setup: ControlSetup,
         supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, SocketAddr)> {
-        let (ready_tx, ready_rx) = sync_channel::<ReadyEvent>(1);
+        let (ready_tx, ready_rx) = sync_channel::<anyhow::Result<SocketAddr>>(1);
         let exit = supervisor.exit_notifier(ProcessEvent::ControlExited);
         let join = Builder::new().name("control".into()).spawn(move || {
             let _exit = exit;
@@ -67,7 +65,7 @@ impl Drop for ControlThreadOwner {
 
 fn control_thread_main(
     setup: ControlSetup,
-    ready_tx: SyncSender<ReadyEvent>,
+    ready_tx: SyncSender<anyhow::Result<SocketAddr>>,
 ) -> anyhow::Result<()> {
     let prepared = tokio::runtime::Builder::new_current_thread()
         .enable_all()
