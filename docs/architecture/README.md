@@ -72,6 +72,10 @@ metric shards. it loads the startup config, wires shared state, starts the
 control thread before the proxy fleet, then waits for Ctrl-C or a thread exit
 and joins them. the scrape registry and workers share the app-allocated metric
 shards; the reloader receives the app-allocated proxy handles.
+[`lifecycle.rs`](../../bin/rusty-mcrouter/src/lifecycle.rs) provides shared startup
+reporting, exit notifications and asynchronous supervision.
+[`control.rs`](../../bin/rusty-mcrouter/src/control.rs) owns launching and joining
+the control thread;
 [`proxy_fleet.rs`](../../bin/rusty-mcrouter/src/proxy_fleet.rs) owns launching
 and joining proxy threads. both proxy and control executors are created by the
 binary's thread wrappers. [`ProxyWorker`](../../crates/proxy/src/worker.rs)

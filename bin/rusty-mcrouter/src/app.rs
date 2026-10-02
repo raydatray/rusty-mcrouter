@@ -14,7 +14,8 @@ use rusty_mcrouter_proxy::{ProxyHandle, ProxyShards, ProxyShared, ThreadMode};
 
 use crate::args::Args;
 use crate::config;
-use crate::control::{ControlThreadOwner, ProcessEvent, Supervisor};
+use crate::control::ControlThreadOwner;
+use crate::lifecycle::{ProcessEvent, Supervisor};
 use crate::proxy_fleet::{ProxyFleet, ProxyFleetSetup, ProxyWorkerResources};
 
 use std::{
