@@ -5,7 +5,7 @@ use rusty_mcrouter_backend::destination;
 use rusty_mcrouter_frontend::{bind_listener, Server};
 
 use crate::context::ProxyContext;
-use crate::generation::{GenerationBuilder, GenerationSetup, RouteSlot};
+use crate::generation::{GenerationBuilder, GenerationSetup};
 use crate::runtime::{BackgroundTasks, ProxyRuntime};
 use crate::{
     ProxyInbox, ProxySet, ProxyThreadSetup, WorkerEvent, WorkerEventRecord, WorkerEventSink,
@@ -53,11 +53,9 @@ impl ProxyWorker {
             metrics: setup.shards.routing,
             events: setup.routing_events,
         });
-        let routes = RouteSlot::new(
-            builder
-                .build(1, &setup.shared.config)
-                .context("build_route failed")?,
-        );
+        let routes = builder
+            .build(1, &setup.shared.config)
+            .context("build_route failed")?;
         let context = ProxyContext {
             proxy_id: setup.proxy_id,
             routes,
