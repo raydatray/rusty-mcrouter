@@ -2,6 +2,10 @@
 
 use bytes::{Bytes, BytesMut};
 
+use crate::meta::read::{
+    flags, parse_i32, parse_i64, parse_u32, parse_u64, require_no_argument, split_tokens,
+    FlagBudget,
+};
 use crate::meta::reply_decoder::{
     framed_value, invalid_argument, invalid_flag, invalid_number, INVALID_RESPONSE,
     MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES, SHAPE_MISMATCH,
@@ -16,10 +20,6 @@ use crate::meta::request_decoder::{
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
-};
-use crate::meta::tokens::{
-    flags, parse_i32, parse_i64, parse_u32, parse_u64, require_no_argument, split_tokens,
-    FlagBudget,
 };
 use crate::meta::{
     wire, DecodedMetaCommand, GetSuccessShape, KeyEncoding, MetaOutputToken, MetaQuietPolicy,

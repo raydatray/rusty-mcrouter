@@ -3,6 +3,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
 
+use crate::meta::read::{flags, require_no_argument, split_tokens, FlagBudget};
 use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
 use crate::meta::reply_encoder::{encoded_key_too_long, reply_line_too_long};
 use crate::meta::request_decoder::{
@@ -10,7 +11,6 @@ use crate::meta::request_decoder::{
     BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
 };
 use crate::meta::request_encoder::{command_line_too_long, write_backend_key};
-use crate::meta::tokens::{flags, require_no_argument, split_tokens, FlagBudget};
 use crate::meta::{
     wire, DecodedMetaCommand, KeyEncoding, MetaReplyDecodeError, MetaReplyEncodeError,
     MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError, MetaRequestEncodeError,
