@@ -148,7 +148,7 @@ handles are removed before dispatch.
 
 `RootRoute` executes the first target in the foreground and returns its reply
 to the client. every additional unique target runs in a detached task on the
-same proxy thread:
+same worker thread:
 
 ```text
 primary target    -> awaited -> client reply
@@ -158,5 +158,5 @@ secondary targets -> detached local tasks -> replies discarded
 each secondary gets an independent routing context. its destination attempts
 and backend durations are recorded, but only the primary contributes the final
 client-outcome metrics. secondaries are best effort: they are not queued
-durably, do not delay the client reply and may be cancelled during proxy-thread
+durably, do not delay the client reply and may be cancelled during worker-thread
 shutdown.

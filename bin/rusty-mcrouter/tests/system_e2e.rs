@@ -263,7 +263,7 @@ async fn metrics_endpoint_reports_null_route_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn null_route_sums_two_proxy_shards() {
+async fn null_route_sums_two_worker_shards() {
     let fx = start_router_with_args(r#"{ "route": "NullRoute" }"#, 60_002, 2, &[]).await;
 
     exchange(fx.router_addr, b"mg first v\r\n", b"EN\r\n").await;
@@ -274,7 +274,7 @@ async fn null_route_sums_two_proxy_shards() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ctrl_c_stops_proxy_and_control_threads_cleanly() {
+async fn ctrl_c_stops_worker_and_control_threads_cleanly() {
     let mut stack = start_router(r#"{ "route": "NullRoute" }"#, 60_003).await;
     let pid = stack.pid();
     let status = Command::new("kill")
@@ -292,13 +292,13 @@ async fn ctrl_c_stops_proxy_and_control_threads_cleanly() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn metrics_bind_failure_is_reported_before_proxy_startup() {
-    let proxy_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+async fn metrics_bind_failure_is_reported_before_worker_startup() {
+    let worker_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let metrics_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let metrics_addr = metrics_listener.local_addr().unwrap();
     let output = startup_failure(
         63_001,
-        proxy_listener.local_addr().unwrap(),
+        worker_listener.local_addr().unwrap(),
         metrics_addr,
         r#"{ "route": "NullRoute" }"#,
     )
@@ -311,9 +311,9 @@ async fn metrics_bind_failure_is_reported_before_proxy_startup() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn proxy_bind_failure_stops_the_already_started_control_thread() {
-    let proxy_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let listen_addr = proxy_listener.local_addr().unwrap();
+async fn worker_bind_failure_stops_the_already_started_control_thread() {
+    let worker_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listen_addr = worker_listener.local_addr().unwrap();
     let output = startup_failure(
         63_002,
         listen_addr,
@@ -469,7 +469,7 @@ async fn failover_metrics_count_one_entry_and_three_pool_attempts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_proxy_shards_sum_into_one_pool_series() {
+async fn two_worker_shards_sum_into_one_pool_series() {
     let backend = spawn_mock_memcached().await;
     let config = format!(
         r#"{{"pools": {{"pool": {{"servers": ["{backend}"]}}}}, "route": "PoolRoute|pool"}}"#

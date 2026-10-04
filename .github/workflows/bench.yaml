@@ -92,11 +92,14 @@ jobs:
         run: |
           mkdir -p bench/.cache/base
           git archive "$BASE_SHA" | tar -x -C bench/.cache/base
+
+          target="bench/.cache/target-base-x86_64/${BASE_SHA}"
           ./bench/run.sh exec cargo build --release --locked \
             --manifest-path /work/bench/.cache/base/Cargo.toml \
-            --target-dir /work/bench/.cache/target-x86_64 \
+            --target-dir "/work/$target" \
             -p rusty-mcrouter
-          cp bench/.cache/target-x86_64/release/rusty-mcrouter bench/.cache/bin/router-base
+
+          cp "$target/release/rusty-mcrouter" bench/.cache/bin/router-base
       - name: Run paired Linux comparison
         run: |
           ./bench/run.sh compare "bench/scenarios/${SUITE}.toml" \

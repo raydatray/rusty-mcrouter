@@ -77,15 +77,15 @@ binary modules and calls synchronous `app::run`.
 [`app.rs`](../../bin/rusty-mcrouter/src/app.rs) parses CLI options, initializes
 logging and observability state, and allocates each worker's handle, inbox and
 metric shards. it loads the startup config, wires shared state, starts the
-control thread before the proxy fleet, then waits for Ctrl-C or a thread exit
+control thread before the worker fleet, then waits for Ctrl-C or a thread exit
 and joins them. the scrape registry and workers share the app-allocated metric
 shards; the reloader receives the app-allocated worker handles.
 [`lifecycle.rs`](../../bin/rusty-mcrouter/src/lifecycle.rs) provides shared startup
 reporting, exit notifications and asynchronous supervision.
 [`control.rs`](../../bin/rusty-mcrouter/src/control.rs) owns launching and joining
 the control thread;
-[`proxy_fleet.rs`](../../bin/rusty-mcrouter/src/proxy_fleet.rs) owns launching
-and joining proxy threads. both proxy and control executors are created by the
+[`worker_fleet.rs`](../../bin/rusty-mcrouter/src/worker_fleet.rs) owns launching
+and joining worker threads. both worker and control executors are created by the
 binary's thread wrappers. [`Worker`](../../crates/worker/src/worker.rs)
 builds thread-local worker state and runs `WorkerRuntime`;
 [`ControlRuntime`](../../crates/control/src/runtime.rs) builds and runs control
@@ -102,8 +102,8 @@ metrics and logs.
 ```mermaid
 flowchart TB
     M[main process supervisor]
-    M --> PT0[ProxyThreadOwner 0]
-    M --> PTN[ProxyThreadOwner N]
+    M --> PT0[WorkerThreadOwner 0]
+    M --> PTN[WorkerThreadOwner N]
     M --> CT[ControlThreadOwner]
     PT0 --> PW0[Worker]
     PTN --> PWN[Worker]
@@ -119,11 +119,11 @@ flowchart TB
 plus joining. `Runtime` means the actor and task state that lives on that
 thread's current-thread Tokio runtime.
 
-`ProxyThreadOwner` and `ControlThreadOwner` are external to their runtimes:
+`WorkerThreadOwner` and `ControlThreadOwner` are external to their runtimes:
 each retains a command handle solely to stop and join its child, including on
 drop. ownership is established before the readiness wait so failed startup is
 guarded too. normal dispatch uses caller-held handles; the app retains its
-`ControlHandle` and sends `ProxiesReady` through it explicitly.
+`ControlHandle` and sends `WorkersReady` through it explicitly.
 
 | path | delivery contract |
 |---|---|
@@ -153,14 +153,14 @@ exception for short-lived work: non-primary fanout targets run in detached
 local tasks and may be cancelled when their worker thread stops.
 
 Startup first binds the control thread's metrics listener, so it can serve
-scrapes and consume events while proxies start. the control thread owns the
-reloader from startup, but polling waits for main's `ProxiesReady` command after
-every proxy acknowledges readiness. main then marks config generation 1 as
+scrapes and consume events while workers start. the control thread owns the
+reloader from startup, but polling waits for main's `WorkersReady` command after
+every worker acknowledges readiness. main then marks config generation 1 as
 applied and enables reloads before printing `READY` and `METRICS`. failed
-startup threads are joined, and a proxy startup failure stops control after
-the started proxies have been joined and their events can be drained.
+startup threads are joined, and a worker startup failure stops control after
+the started workers have been joined and their events can be drained.
 the app observes Ctrl-C independently of control's inline config apply, even
-while control awaits proxy acknowledgements. main stops and joins proxy threads
+while control awaits worker acknowledgements. main stops and joins worker threads
 first, allowing their worker-stop events to reach the control runtime, then
 drains and joins the control thread.
 
@@ -194,7 +194,7 @@ drains and joins the control thread.
   worker thread.
 - worker listener and idle-sweep tasks begin in `Worker::run`. background
   task owners abort on drop, and thread owners stop and join on drop. explicit
-  shutdown still reports errors, and stops proxies before control.
+  shutdown still reports errors, and stops workers before control.
 - the binary captures process metadata and the initial config timestamp;
   the control reloader captures successful reload timestamps alongside its own
   logging and counters. metric data and projections do not read the wall clock.
