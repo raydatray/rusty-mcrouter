@@ -96,7 +96,7 @@ mod tests {
 
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
     use rusty_mcrouter_observability::{channel, ControlMetrics, MetricsRegistry};
-    use rusty_mcrouter_proxy::{ProxyCommand, ProxyHandle};
+    use rusty_mcrouter_worker::{WorkerCommand, WorkerHandle};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -113,7 +113,7 @@ mod tests {
         let metrics = Arc::new(ControlMetrics::default());
         let config_metrics = Arc::new(ConfigMetrics::default());
         let (_events, consumer) = channel(8, Arc::clone(&metrics));
-        let (proxy, mut proxy_inbox) = ProxyHandle::allocate(0);
+        let (worker, mut worker_inbox) = WorkerHandle::allocate(0);
         let reloader = ConfigReloader::new(ReloaderSetup {
             path: path.clone(),
             delay: Duration::from_millis(5),
@@ -123,7 +123,7 @@ mod tests {
                     rusty_mcrouter_config::parse(std::str::from_utf8(initial).unwrap()).unwrap(),
                 ),
             },
-            proxies: vec![proxy],
+            workers: vec![worker],
             defaults: Default::default(),
             root_options: Default::default(),
             metrics: Arc::clone(&config_metrics),
@@ -157,11 +157,11 @@ mod tests {
         assert_eq!(config_metrics.reload_attempts.load(), 0);
         config_metrics.applied(1, 1);
         handle.proxies_ready().await.unwrap();
-        let command = tokio::time::timeout(Duration::from_secs(5), proxy_inbox.command_rx.recv())
+        let command = tokio::time::timeout(Duration::from_secs(5), worker_inbox.command_rx.recv())
             .await
             .expect("reload did not start after proxies became ready")
             .unwrap();
-        let ProxyCommand::Reconfigure {
+        let WorkerCommand::Reconfigure {
             generation,
             applied,
             ..

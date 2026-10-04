@@ -9,7 +9,7 @@ members = [
     "crates/observability",
     "crates/observability-primitives",
     "crates/protocol",
-    "crates/proxy",
+    "crates/worker",
 ]
 exclude = ["bench"]
 resolver = "2"
@@ -38,7 +38,7 @@ rusty-mcrouter-frontend = { path = "crates/frontend" }
 rusty-mcrouter-observability = { path = "crates/observability" }
 rusty-mcrouter-observability-primitives = { path = "crates/observability-primitives" }
 rusty-mcrouter-protocol = { path = "crates/protocol" }
-rusty-mcrouter-proxy = { path = "crates/proxy" }
+rusty-mcrouter-worker = { path = "crates/worker" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"

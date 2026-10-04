@@ -16,7 +16,7 @@ composition and presentation (`A --> B` means B depends on A):
 - **[`rusty-mcrouter-backend`](../../crates/backend/)** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
 - **[`rusty-mcrouter-core`](../../crates/core/)** - the routing graph, where a config file is transformed into a tree of route handles
 - **[`rusty-mcrouter-frontend`](../../crates/frontend/)** - the client-facing leg: listener transport, complete protocol connections, request/reply mailbox transport and frontend metric data
-- **[`rusty-mcrouter-proxy`](../../crates/proxy/)** - worker mailboxes, socket distribution, routing generations, request execution and proxy-thread orchestration
+- **[`rusty-mcrouter-worker`](../../crates/worker/)** - worker mailboxes, socket distribution, routing generations, request execution and worker orchestration
 - **[`rusty-mcrouter-observability`](../../crates/observability/)** - event and metric components, Hyper-based `/metrics` handling and presentation
 - **[`rusty-mcrouter-control`](../../crates/control/)** - control runtime, commands, configuration reload coordination and its fact-owned metric data and projection
 - **[`rusty-mcrouter`](../../bin/rusty-mcrouter/)** - the binary composition layer: cli, executor/thread ownership, process signals and supervision
@@ -29,7 +29,7 @@ flowchart LR
     B[rusty-mcrouter-backend]
     C[rusty-mcrouter-core]
     F[rusty-mcrouter-frontend]
-    X[rusty-mcrouter-proxy]
+    X[rusty-mcrouter-worker]
     O[rusty-mcrouter-observability]
     T[rusty-mcrouter-control]
     R[rusty-mcrouter]
@@ -70,7 +70,7 @@ flowchart LR
 
 the app owns process lifecycle: composition, startup, signals, supervision and
 ordered shutdown. control owns application coordination: configuration reloads,
-proxy commands, event presentation and metrics services.
+worker commands, event presentation and metrics services.
 
 the executable's [`main.rs`](../../bin/rusty-mcrouter/src/main.rs) declares the
 binary modules and calls synchronous `app::run`.
@@ -79,15 +79,15 @@ logging and observability state, and allocates each worker's handle, inbox and
 metric shards. it loads the startup config, wires shared state, starts the
 control thread before the proxy fleet, then waits for Ctrl-C or a thread exit
 and joins them. the scrape registry and workers share the app-allocated metric
-shards; the reloader receives the app-allocated proxy handles.
+shards; the reloader receives the app-allocated worker handles.
 [`lifecycle.rs`](../../bin/rusty-mcrouter/src/lifecycle.rs) provides shared startup
 reporting, exit notifications and asynchronous supervision.
 [`control.rs`](../../bin/rusty-mcrouter/src/control.rs) owns launching and joining
 the control thread;
 [`proxy_fleet.rs`](../../bin/rusty-mcrouter/src/proxy_fleet.rs) owns launching
 and joining proxy threads. both proxy and control executors are created by the
-binary's thread wrappers. [`ProxyWorker`](../../crates/proxy/src/worker.rs)
-builds thread-local proxy state and runs `ProxyRuntime`;
+binary's thread wrappers. [`Worker`](../../crates/worker/src/worker.rs)
+builds thread-local worker state and runs `WorkerRuntime`;
 [`ControlRuntime`](../../crates/control/src/runtime.rs) builds and runs control
 services in the control crate. the app registers Ctrl-C before starting threads
 and announcing readiness. its current-thread executor selects between the
@@ -96,7 +96,7 @@ stop/join operations run outside that executor.
 
 [`config.rs`](../../bin/rusty-mcrouter/src/config.rs) loads the startup config.
 [`control/reload.rs`](../../crates/control/src/reload.rs) owns watching for changes,
-parsing, validating and applying them to running proxies, and reporting reload
+parsing, validating and applying them to running workers, and reporting reload
 metrics and logs.
 
 ```mermaid
@@ -105,10 +105,10 @@ flowchart TB
     M --> PT0[ProxyThreadOwner 0]
     M --> PTN[ProxyThreadOwner N]
     M --> CT[ControlThreadOwner]
-    PT0 --> PW0[ProxyWorker]
-    PTN --> PWN[ProxyWorker]
-    PW0 --> PR0[ProxyRuntime]
-    PWN --> PRN[ProxyRuntime]
+    PT0 --> PW0[Worker]
+    PTN --> PWN[Worker]
+    PW0 --> PR0[WorkerRuntime]
+    PWN --> PRN[WorkerRuntime]
     CT --> CR[ControlRuntime]
     CR --> EC[EventConsumer]
     CR --> MH[MetricsHttp]
@@ -127,12 +127,12 @@ guarded too. normal dispatch uses caller-held handles; the app retains its
 
 | path | delivery contract |
 |---|---|
-| proxy request channel | reliable and backpressured |
-| proxy command channel | reliable and prioritized ahead of requests |
+| worker request channel | reliable and backpressured |
+| worker command channel | reliable and prioritized ahead of requests |
 | control command channel | reliable and prioritized |
 | event sender | best effort; bounded queue may shed |
 
-`ProxyRuntime` owns routed-request tasks, client connections, listener and
+`WorkerRuntime` owns routed-request tasks, client connections, listener and
 destination-sweep tasks, and the current route graph generation.
 [`frontend::Connection`](../../crates/frontend/src/connection.rs) owns each
 client socket's reader/writer, codecs, buffers, reply plans and ordered slots.
@@ -147,10 +147,10 @@ and reply-encoding errors stay in its ordered pipeline. unexpected worker
 mailbox closure and supervised runtime-task panics stop the worker.
 `ControlRuntime` owns event presentation, the metrics listener, at most 32
 concurrent metrics connection tasks, and the config reloader, which sends new
-configs to proxies over their command channels. No OS thread or
+configs to workers over their command channels. No OS thread or
 long-lived runtime task is intentionally detached. Wildcard routing is the
 exception for short-lived work: non-primary fanout targets run in detached
-local tasks and may be cancelled when their proxy thread stops.
+local tasks and may be cancelled when their worker thread stops.
 
 Startup first binds the control thread's metrics listener, so it can serve
 scrapes and consume events while proxies start. the control thread owns the
@@ -184,21 +184,21 @@ drains and joins the control thread.
 - frontend connections receive their socket, worker request sender, frontend
   metric shard and connection options. they own their reply-waiting tasks,
   buffers, codecs and pipeline bookkeeping. `RoutedRequest` and the shared
-  `send_request` transport live in frontend; proxy re-exports the request type
+  `send_request` transport live in frontend; worker re-exports the request type
   and its handle delegates to that transport.
 - frontend servers and metrics HTTP receive already-bound listeners; binding is
   performed during worker preparation. frontend `Server::accept` returns a
-  socket; proxy's `accept_and_dispatch` chooses a worker and sends the socket
-  through its work mailbox. request-worker placement is selected by proxy when
+  socket; worker's `accept_and_dispatch` chooses a worker and sends the socket
+  through its work mailbox. request-worker placement is selected by worker when
   constructing the connection, so its request sender may target a different
   worker thread.
-- proxy listener and idle-sweep tasks begin in `ProxyWorker::run`. background
+- worker listener and idle-sweep tasks begin in `Worker::run`. background
   task owners abort on drop, and thread owners stop and join on drop. explicit
   shutdown still reports errors, and stops proxies before control.
 - the binary captures process metadata and the initial config timestamp;
   the control reloader captures successful reload timestamps alongside its own
   logging and counters. metric data and projections do not read the wall clock.
-  control inboxes are app-allocated, just like proxy inboxes.
+  control inboxes are app-allocated, just like worker inboxes.
 - control owns `ConfigMetrics`, `ReloadStage` and `ConfigSource`; the app registers
   its projection through observability's `MetricsSource` interface using
   `ScrapeInputs.additional_sources`. observability stays independent of control,
@@ -214,7 +214,7 @@ TCP and filesystem operations remain concrete.
 sequenceDiagram
     participant C as client
     participant F as frontend connection
-    participant P as proxy worker
+    participant P as worker
     participant R as route tree (core)
     participant D as destination (backend)
     participant S as server
@@ -253,7 +253,7 @@ three consequences of this design are:
 
 see [routing prefixes](routing-prefixes.md) for exact routing, key-prefix
 policies, fallback and wildcard fanout behavior, and
-[config reload](config-reload.md) for how config changes reach running proxies.
+[config reload](config-reload.md) for how config changes reach running workers.
 
 ## divergences from mcrouter
 
@@ -261,5 +261,5 @@ policies, fallback and wildcard fanout behavior, and
 |---------------|-------------------------------------------|---------------------------------------------|
 | protocol      | ascii + binary + meta                     | meta only, on both legs                     |
 | runtime       | libevent + folly fibers                   | tokio, thread-per-worker, thread-local `Rc` |
-| request dispatch | same-thread direct delivery; remote clients use proxy queues | all routed frontend requests use proxy mailboxes |
+| request dispatch | same-thread direct delivery; remote clients use proxy queues | all routed frontend requests use worker mailboxes |
 | route types   | full zoo: shadow, prefix, AllSync, WarmUp | root/prefix, pool, hash, failover, null and error |

@@ -4,27 +4,25 @@ use anyhow::Context;
 use rusty_mcrouter_backend::destination;
 use rusty_mcrouter_frontend::{bind_listener, Server};
 
-use crate::context::ProxyContext;
+use crate::context::WorkerContext;
 use crate::generation::{GenerationBuilder, GenerationSetup};
-use crate::runtime::{BackgroundTasks, ProxyRuntime};
-use crate::{
-    ProxyInbox, ProxySet, ProxyThreadSetup, WorkerEvent, WorkerEventRecord, WorkerEventSink,
-};
+use crate::runtime::{BackgroundTasks, WorkerRuntime};
+use crate::{WorkerEvent, WorkerEventRecord, WorkerEventSink, WorkerInbox, WorkerSet, WorkerSetup};
 
 /// Thread-local worker state, constructed inside its owner's Tokio LocalSet.
-pub struct ProxyWorker {
+pub struct Worker {
     bound_addr: Option<SocketAddr>,
-    context: ProxyContext,
+    context: WorkerContext,
     builder: GenerationBuilder,
-    inbox: ProxyInbox,
+    inbox: WorkerInbox,
     server: Option<Server>,
     destinations: Rc<destination::Map>,
     sweep_interval: Duration,
     events: WorkerEventSink,
 }
 
-impl ProxyWorker {
-    pub async fn build(setup: ProxyThreadSetup) -> anyhow::Result<Self> {
+impl Worker {
+    pub async fn build(setup: WorkerSetup) -> anyhow::Result<Self> {
         let server = match setup.listener {
             Some(listener) => {
                 let addr = listener.listen_addr;
@@ -56,10 +54,10 @@ impl ProxyWorker {
         let routes = builder
             .build(1, &setup.shared.config)
             .context("build_route failed")?;
-        let context = ProxyContext {
-            proxy_id: setup.proxy_id,
+        let context = WorkerContext {
+            worker_id: setup.worker_id,
             routes,
-            proxies: setup.proxies,
+            workers: setup.workers,
             thread_mode: setup.shared.thread_mode,
             metrics: setup.shards.frontend,
             connection_options: setup.shared.connection_options,
@@ -81,22 +79,22 @@ impl ProxyWorker {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let proxy_id = self.context.proxy_id;
+        let worker_id = self.context.worker_id;
         self.events.emit(WorkerEventRecord {
-            proxy_id,
+            worker_id,
             event: WorkerEvent::Started,
         });
         let tasks = BackgroundTasks {
             listener: self.server.map(|server| {
-                let proxies = self.context.proxies.clone();
-                tokio::task::spawn_local(accept_and_dispatch(server, proxies))
+                let workers = self.context.workers.clone();
+                tokio::task::spawn_local(accept_and_dispatch(server, workers))
             }),
             sweep: self.destinations.spawn_idle_sweep(self.sweep_interval),
         };
-        let runtime = ProxyRuntime::new(self.context, self.builder, self.inbox, tasks);
+        let runtime = WorkerRuntime::new(self.context, self.builder, self.inbox, tasks);
         let outcome = runtime.run().await;
         self.events.emit(WorkerEventRecord {
-            proxy_id,
+            worker_id,
             event: WorkerEvent::Stopped,
         });
         outcome
@@ -104,12 +102,12 @@ impl ProxyWorker {
 }
 
 /// Distribute accepted sockets to workers. Listener transport belongs to the
-/// frontend; placement and mailbox delivery belong to the proxy fleet.
-async fn accept_and_dispatch(server: Server, proxies: ProxySet) -> anyhow::Result<()> {
+/// frontend; placement and mailbox delivery belong to the worker fleet.
+async fn accept_and_dispatch(server: Server, workers: WorkerSet) -> anyhow::Result<()> {
     let mut next = 0usize;
     loop {
         let stream = server.accept().await?;
-        proxies.nth(next).send_connection(stream).await?;
+        workers.nth(next).send_connection(stream).await?;
         next = next.wrapping_add(1);
     }
 }

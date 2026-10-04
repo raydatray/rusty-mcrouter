@@ -8,29 +8,29 @@ use std::thread::{Builder, JoinHandle};
 use anyhow::Context;
 use rusty_mcrouter_frontend::ListenerConfig;
 use rusty_mcrouter_observability::EventSender;
-use rusty_mcrouter_proxy::{
-    ProxyHandle, ProxyInbox, ProxySet, ProxyShards, ProxyShared, ProxyThreadSetup, ProxyWorker,
+use rusty_mcrouter_worker::{
+    Worker, WorkerHandle, WorkerInbox, WorkerSet, WorkerSetup, WorkerShards, WorkerShared,
 };
 
 use crate::lifecycle::{report_startup, ProcessEvent, Supervisor};
 
 pub struct ProxyWorkerResources {
-    pub handle: ProxyHandle,
-    pub inbox: ProxyInbox,
-    pub shards: ProxyShards,
+    pub handle: WorkerHandle,
+    pub inbox: WorkerInbox,
+    pub shards: WorkerShards,
 }
 
 pub struct ProxyFleetSetup {
     pub workers: Vec<ProxyWorkerResources>,
     pub num_listening_sockets: usize,
     pub listen_addr: SocketAddr,
-    pub shared: Arc<ProxyShared>,
+    pub shared: Arc<WorkerShared>,
     pub events: EventSender,
 }
 
 /// External lifetime owner; its handle is a cleanup capability, not a runtime input.
 pub struct ProxyThreadOwner {
-    handle: ProxyHandle,
+    handle: WorkerHandle,
     join: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
@@ -41,11 +41,11 @@ pub struct ProxyFleet {
 
 impl ProxyThreadOwner {
     pub fn spawn(
-        handle: ProxyHandle,
-        setup: ProxyThreadSetup,
+        handle: WorkerHandle,
+        setup: WorkerSetup,
         supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, Option<SocketAddr>)> {
-        let proxy_id = setup.proxy_id;
+        let proxy_id = setup.worker_id;
         let (ready_tx, ready_rx) = sync_channel(1);
         let exit = supervisor.exit_notifier(ProcessEvent::ProxyExited { id: proxy_id });
         let join = Builder::new()
@@ -96,7 +96,7 @@ impl Drop for ProxyThreadOwner {
 impl ProxyFleet {
     /// on failure shuts down what it already started
     pub fn spawn(setup: ProxyFleetSetup, supervisor: &Supervisor) -> anyhow::Result<Self> {
-        let proxies = ProxySet::new(
+        let proxies = WorkerSet::new(
             setup
                 .workers
                 .iter()
@@ -115,12 +115,12 @@ impl ProxyFleet {
                 listen_addr: setup.listen_addr,
                 use_reuseport,
             });
-            let thread_cfg = ProxyThreadSetup {
-                proxy_id,
+            let thread_cfg = WorkerSetup {
+                worker_id: proxy_id,
                 inbox,
                 shards,
                 shared: Arc::clone(&setup.shared),
-                proxies: proxies.clone(),
+                workers: proxies.clone(),
                 listener,
                 routing_events: setup.events.sink(),
                 events: setup.events.sink(),
@@ -168,7 +168,7 @@ impl ProxyFleet {
 }
 
 fn proxy_thread_main(
-    setup: ProxyThreadSetup,
+    setup: WorkerSetup,
     ready_tx: SyncSender<anyhow::Result<Option<SocketAddr>>>,
 ) -> anyhow::Result<()> {
     let prepared = tokio::runtime::Builder::new_current_thread()
@@ -178,7 +178,7 @@ fn proxy_thread_main(
         .context("create proxy executor")
         .and_then(|executor| {
             let local = tokio::task::LocalSet::new();
-            let worker = local.block_on(&executor, ProxyWorker::build(setup))?;
+            let worker = local.block_on(&executor, Worker::build(setup))?;
             Ok((executor, local, worker))
         });
     let (executor, local, worker) =
@@ -197,7 +197,7 @@ mod tests {
     };
     use rusty_mcrouter_observability::{channel, ControlMetrics};
     use rusty_mcrouter_protocol::RequestKind;
-    use rusty_mcrouter_proxy::ThreadMode;
+    use rusty_mcrouter_worker::ThreadMode;
 
     use super::*;
 
@@ -205,7 +205,7 @@ mod tests {
     fn frontend_connection_submits_to_a_remote_worker_thread() {
         let (events, _consumer) = channel(8, Arc::new(ControlMetrics::default()));
         let shared = |document: &str| {
-            Arc::new(ProxyShared {
+            Arc::new(WorkerShared {
                 tokens: Arc::new(DestTokenAllocator::new()),
                 config: Arc::new(crate::config::parse(document.as_bytes()).unwrap()),
                 tko_map: TkoTrackerMap::new(events.sink()),
@@ -213,25 +213,25 @@ mod tests {
                 defaults: Default::default(),
                 root_route_options: Default::default(),
                 sweep_interval: Duration::ZERO,
-                thread_mode: ThreadMode::FixedRemote { proxy_id: 1 },
+                thread_mode: ThreadMode::FixedRemote { worker_id: 1 },
                 connection_options: Default::default(),
             })
         };
-        let (local_handle, local_inbox) = ProxyHandle::allocate(0);
-        let (remote_handle, remote_inbox) = ProxyHandle::allocate(1);
-        let proxies = ProxySet::new(vec![local_handle.clone(), remote_handle.clone()]);
-        let local_shards = ProxyShards::new();
-        let remote_shards = ProxyShards::new();
+        let (local_handle, local_inbox) = WorkerHandle::allocate(0);
+        let (remote_handle, remote_inbox) = WorkerHandle::allocate(1);
+        let proxies = WorkerSet::new(vec![local_handle.clone(), remote_handle.clone()]);
+        let local_shards = WorkerShards::new();
+        let remote_shards = WorkerShards::new();
         let supervisor = Supervisor::new();
 
         let (local, address) = ProxyThreadOwner::spawn(
             local_handle,
-            ProxyThreadSetup {
-                proxy_id: 0,
+            WorkerSetup {
+                worker_id: 0,
                 inbox: local_inbox,
                 shards: local_shards.clone(),
                 shared: shared(r#"{"route": "ErrorRoute|local"}"#),
-                proxies: proxies.clone(),
+                workers: proxies.clone(),
                 listener: Some(ListenerConfig {
                     listen_addr: "127.0.0.1:0".parse().unwrap(),
                     use_reuseport: false,
@@ -244,12 +244,12 @@ mod tests {
         .unwrap();
         let (remote, _) = ProxyThreadOwner::spawn(
             remote_handle,
-            ProxyThreadSetup {
-                proxy_id: 1,
+            WorkerSetup {
+                worker_id: 1,
                 inbox: remote_inbox,
                 shards: remote_shards.clone(),
                 shared: shared(r#"{"route": "ErrorRoute|remote"}"#),
-                proxies,
+                workers: proxies,
                 listener: None,
                 routing_events: events.sink(),
                 events: events.sink(),
@@ -284,7 +284,7 @@ mod tests {
     fn failed_collection_joins_previously_started_proxies() {
         let (events, _consumer) = channel(8, Arc::new(ControlMetrics::default()));
         let shared = |document: &str| {
-            Arc::new(ProxyShared {
+            Arc::new(WorkerShared {
                 tokens: Arc::new(DestTokenAllocator::new()),
                 config: Arc::new(crate::config::parse(document.as_bytes()).unwrap()),
                 tko_map: TkoTrackerMap::new(events.sink()),
@@ -300,8 +300,8 @@ mod tests {
             shared(r#"{ "route": "NullRoute" }"#),
             shared(r#"{ "routes": { "/a/b/": "NullRoute" } }"#),
         ];
-        let (handles, inboxes): (Vec<_>, Vec<_>) = (0..2).map(ProxyHandle::allocate).unzip();
-        let peers = ProxySet::new(handles.clone());
+        let (handles, inboxes): (Vec<_>, Vec<_>) = (0..2).map(WorkerHandle::allocate).unzip();
+        let peers = WorkerSet::new(handles.clone());
         let supervisor = Supervisor::new();
         let bound = Cell::new(None);
         let result = handles
@@ -312,12 +312,12 @@ mod tests {
             .map(|(proxy_id, ((handle, inbox), shared))| {
                 ProxyThreadOwner::spawn(
                     handle,
-                    ProxyThreadSetup {
-                        proxy_id,
+                    WorkerSetup {
+                        worker_id: proxy_id,
                         inbox,
-                        shards: ProxyShards::new(),
+                        shards: WorkerShards::new(),
                         shared,
-                        proxies: peers.clone(),
+                        workers: peers.clone(),
                         listener: (proxy_id == 0).then_some(ListenerConfig {
                             listen_addr: "127.0.0.1:0".parse().unwrap(),
                             use_reuseport: false,

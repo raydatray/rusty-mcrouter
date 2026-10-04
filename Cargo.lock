@@ -432,7 +432,7 @@ dependencies = [
  "rusty-mcrouter-observability",
  "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-protocol",
- "rusty-mcrouter-proxy",
+ "rusty-mcrouter-worker",
  "tokio",
  "tracing",
 ]
@@ -470,7 +470,7 @@ dependencies = [
  "rusty-mcrouter-core",
  "rusty-mcrouter-observability",
  "rusty-mcrouter-observability-primitives",
- "rusty-mcrouter-proxy",
+ "rusty-mcrouter-worker",
  "tokio",
  "tracing",
 ]
@@ -515,7 +515,7 @@ dependencies = [
  "rusty-mcrouter-frontend",
  "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-protocol",
- "rusty-mcrouter-proxy",
+ "rusty-mcrouter-worker",
  "serde_json",
  "tokio",
  "tracing",
@@ -537,7 +537,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusty-mcrouter-proxy"
+name = "rusty-mcrouter-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",

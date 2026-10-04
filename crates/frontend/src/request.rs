@@ -11,7 +11,7 @@ pub struct RoutedRequest {
 }
 
 /// Submit through a worker mailbox and await its reply. The same transport
-/// serves connections and callers using a proxy handle.
+/// serves connections and callers using a worker handle.
 pub async fn send_request(request_tx: &Sender<RoutedRequest>, request: Request) -> Reply {
     let (reply_tx, reply_rx) = oneshot::channel();
 

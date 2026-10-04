@@ -2,7 +2,7 @@ use std::io;
 
 use rusty_mcrouter_backend::tko::{TkoEvent, TkoEventRecord};
 use rusty_mcrouter_core::{RoutingEvent, RoutingEventRecord};
-use rusty_mcrouter_proxy::{WorkerEvent, WorkerEventRecord};
+use rusty_mcrouter_worker::{WorkerEvent, WorkerEventRecord};
 use tracing::level_filters::LevelFilter;
 
 use crate::events::Event;
@@ -92,13 +92,13 @@ fn worker(r: &WorkerEventRecord) {
     match r.event {
         WorkerEvent::Started => tracing::info!(
             target: "rusty-mcrouter-observability::worker",
-            proxy_id = r.proxy_id,
-            "proxy worker started"
+            worker_id = r.worker_id,
+            "worker started"
         ),
         WorkerEvent::Stopped => tracing::info!(
             target: "rusty-mcrouter-observability::worker",
-            proxy_id = r.proxy_id,
-            "proxy worker stopped"
+            worker_id = r.worker_id,
+            "worker stopped"
         ),
     }
 }
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn worker_lifecycle_is_info() {
         let started = Event::Worker(WorkerEventRecord {
-            proxy_id: 0,
+            worker_id: 0,
             event: WorkerEvent::Started,
         });
         assert_eq!(levels_for(&[started]), vec![Level::INFO]);

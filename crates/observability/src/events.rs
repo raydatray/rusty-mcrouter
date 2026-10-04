@@ -1,6 +1,6 @@
 use rusty_mcrouter_backend::tko::TkoEventRecord;
 use rusty_mcrouter_core::RoutingEventRecord;
-use rusty_mcrouter_proxy::WorkerEventRecord;
+use rusty_mcrouter_worker::WorkerEventRecord;
 
 pub enum Event {
     Tko(TkoEventRecord),
