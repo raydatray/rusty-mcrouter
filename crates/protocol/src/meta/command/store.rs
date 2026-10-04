@@ -17,8 +17,9 @@ use crate::meta::request_decoder::{
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
 };
+use crate::meta::write::{self, write_bare_flag, write_u64};
 use crate::meta::{
-    wire, DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
+    DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
     MetaReplyEncodeError, MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError,
     MetaRequestEncodeError,
 };
@@ -170,16 +171,16 @@ pub fn encode_request(
     out.extend_from_slice(b"ms ");
     let key_is_base64 = write_backend_key(out, &request.key)?;
     out.extend_from_slice(b" ");
-    wire::write_u64(out, request.value.len() as u64);
+    write_u64(out, request.value.len() as u64);
 
     if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
+        write_bare_flag(out, b'b');
     }
     if request.return_cas {
-        wire::write_bare_flag(out, b'c');
+        write_bare_flag(out, b'c');
     }
     if request.return_size {
-        wire::write_bare_flag(out, b's');
+        write_bare_flag(out, b's');
     }
     if let Some(cas) = request.compare_cas {
         write_u64_flag(out, b'C', cas);
@@ -191,7 +192,7 @@ pub fn encode_request(
         write_u64_flag(out, b'F', u64::from(flags));
     }
     if request.invalidate {
-        wire::write_bare_flag(out, b'I');
+        write_bare_flag(out, b'I');
     }
     if let Some(ttl) = request.ttl {
         write_i32_flag(out, b'T', ttl);
@@ -207,7 +208,7 @@ pub fn encode_request(
         write_i32_flag(out, b'N', ttl);
     }
 
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+    write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
     out.extend_from_slice(&request.value);
     out.extend_from_slice(b"\r\n");
     Ok(MetaReplyExpectation::Store {
@@ -283,5 +284,5 @@ pub fn encode_reply(
             }
         }
     }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
+    write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }

@@ -19,7 +19,7 @@ mod reply_expectation;
 mod reply_plan;
 mod request_decoder;
 mod request_encoder;
-mod wire;
+mod write;
 
 pub use reply_decoder::{MetaReplyDecodeError, MetaReplyDecoder};
 pub use reply_encoder::{MetaReplyEncodeError, MetaReplyEncoder};

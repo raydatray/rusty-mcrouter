@@ -21,8 +21,9 @@ use crate::meta::request_decoder::{
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
 };
+use crate::meta::write::{self, write_bare_flag, write_u64};
 use crate::meta::{
-    wire, DecodedMetaCommand, GetSuccessShape, KeyEncoding, MetaOutputToken, MetaQuietPolicy,
+    DecodedMetaCommand, GetSuccessShape, KeyEncoding, MetaOutputToken, MetaQuietPolicy,
     MetaReplyDecodeError, MetaReplyEncodeError, MetaReplyExpectation, MetaReplyPlan,
     MetaRequestDecodeError, MetaRequestEncodeError,
 };
@@ -178,28 +179,28 @@ pub fn encode_request(
     let key_is_base64 = write_backend_key(out, &request.key)?;
 
     if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
+        write_bare_flag(out, b'b');
     }
 
     // Direct fields use canonical order. Only the temporal program has
     // request-order semantics in memcached.
     if request.return_value {
-        wire::write_bare_flag(out, b'v');
+        write_bare_flag(out, b'v');
     }
     if request.return_client_flags {
-        wire::write_bare_flag(out, b'f');
+        write_bare_flag(out, b'f');
     }
     if request.return_cas {
-        wire::write_bare_flag(out, b'c');
+        write_bare_flag(out, b'c');
     }
     if request.return_size {
-        wire::write_bare_flag(out, b's');
+        write_bare_flag(out, b's');
     }
     if request.return_hit_state {
-        wire::write_bare_flag(out, b'h');
+        write_bare_flag(out, b'h');
     }
     if request.return_last_access {
-        wire::write_bare_flag(out, b'l');
+        write_bare_flag(out, b'l');
     }
     if let Some(cas) = request.check_cas {
         write_u64_flag(out, b'C', cas);
@@ -208,19 +209,19 @@ pub fn encode_request(
         write_u64_flag(out, b'E', cas);
     }
     if request.no_lru_bump {
-        wire::write_bare_flag(out, b'u');
+        write_bare_flag(out, b'u');
     }
 
     for instruction in request.temporal.iter() {
         match instruction {
             GetTemporalInstruction::Vivify(ttl) => write_i32_flag(out, b'N', *ttl),
             GetTemporalInstruction::UpdateTtl(ttl) => write_i32_flag(out, b'T', *ttl),
-            GetTemporalInstruction::ReturnTtl => wire::write_bare_flag(out, b't'),
+            GetTemporalInstruction::ReturnTtl => write_bare_flag(out, b't'),
             GetTemporalInstruction::WinForRecache(ttl) => write_i32_flag(out, b'R', *ttl),
         }
     }
 
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+    write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
     Ok(MetaReplyExpectation::Get(
         match (request.return_value, request.check_cas.is_some()) {
             (false, _) => GetSuccessShape::Header,
@@ -331,7 +332,7 @@ fn encode_miss(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReply
             _ => {}
         }
     }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
+    write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn encode_hit(
@@ -350,7 +351,7 @@ fn encode_hit(
             return Err(MetaReplyEncodeError::SizeMismatch);
         }
         out.extend_from_slice(b"VA ");
-        wire::write_u64(out, value.len() as u64);
+        write_u64(out, value.len() as u64);
     } else {
         out.extend_from_slice(b"HD");
     }
@@ -379,7 +380,7 @@ fn encode_hit(
                 let value = hit
                     .hit_before
                     .ok_or(MetaReplyEncodeError::MissingField("hit state"))?;
-                wire::write_bare_flag(out, b'h');
+                write_bare_flag(out, b'h');
                 out.extend_from_slice(if value { b"1" } else { b"0" });
             }
             MetaOutputToken::LastAccess => {
@@ -391,16 +392,16 @@ fn encode_hit(
     }
 
     if hit.recache == RecacheState::AlreadyWon {
-        wire::write_bare_flag(out, b'Z');
+        write_bare_flag(out, b'Z');
     }
     if hit.stale {
-        wire::write_bare_flag(out, b'X');
+        write_bare_flag(out, b'X');
     }
     if hit.recache == RecacheState::Won {
-        wire::write_bare_flag(out, b'W');
+        write_bare_flag(out, b'W');
     }
 
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
+    write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
     if let Some(value) = &hit.value {
         out.extend_from_slice(value);
         out.extend_from_slice(b"\r\n");

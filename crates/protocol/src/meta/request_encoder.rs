@@ -2,7 +2,8 @@ use bytes::BytesMut;
 use thiserror::Error;
 
 use crate::key::MAX_KEY_BYTES;
-use crate::meta::{command, wire, MetaReplyExpectation};
+use crate::meta::write::{self, write_bare_flag, write_i64, write_u64};
+use crate::meta::{command, MetaReplyExpectation};
 use crate::{Key, Request};
 
 #[derive(Debug, Default)]
@@ -67,7 +68,7 @@ pub fn write_backend_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequ
         return Ok(false);
     }
 
-    wire::write_base64_key(out, key).map_err(encoded_key_too_long)?;
+    write::write_base64_key(out, key).map_err(encoded_key_too_long)?;
     Ok(true)
 }
 
@@ -76,27 +77,27 @@ fn is_text_key(key: &[u8]) -> bool {
 }
 
 pub fn write_u64_flag(out: &mut BytesMut, flag: u8, value: u64) {
-    wire::write_bare_flag(out, flag);
-    wire::write_u64(out, value);
+    write_bare_flag(out, flag);
+    write_u64(out, value);
 }
 
 pub fn write_i32_flag(out: &mut BytesMut, flag: u8, value: i32) {
-    wire::write_bare_flag(out, flag);
-    wire::write_i64(out, i64::from(value));
+    write_bare_flag(out, flag);
+    write_i64(out, i64::from(value));
 }
 
 pub fn write_mode_flag(out: &mut BytesMut, mode: u8) {
-    wire::write_bare_flag(out, b'M');
+    write_bare_flag(out, b'M');
     out.extend_from_slice(&[mode]);
 }
 
-fn encoded_key_too_long(_: wire::EncodedKeyTooLong) -> MetaRequestEncodeError {
+fn encoded_key_too_long(_: write::EncodedKeyTooLong) -> MetaRequestEncodeError {
     MetaRequestEncodeError::EncodedKeyTooLong {
         maximum: MAX_KEY_BYTES,
     }
 }
 
-pub fn command_line_too_long(error: wire::LineTooLong) -> MetaRequestEncodeError {
+pub fn command_line_too_long(error: write::LineTooLong) -> MetaRequestEncodeError {
     MetaRequestEncodeError::FrameTooLarge {
         maximum: error.maximum,
     }
