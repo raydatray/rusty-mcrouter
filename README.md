@@ -24,7 +24,8 @@ vibecoded [mcrouter](https://github.com/facebook/mcrouter) in rust
 - `crates/observability-primitives/` — std-only `Counter`, `Gauge`, and `EventSink<T>` shared by fact owners.
 - `crates/backend/` — the backend leg: memcached client, destinations, health tracking, and backend metrics.
 - `crates/core/` — routing: root prefix selection, pool hashing, failover and destination routes, built from config.
-- `crates/proxy/` — the frontend leg: client connections, proxy workers, and proxy-thread orchestration.
+- `crates/frontend/` — the client-facing leg: listeners, complete protocol connections, request transport, and frontend metrics.
+- `crates/proxy/` — proxy worker mailboxes, routing generations, socket distribution, and proxy-thread orchestration.
 - `crates/control/` — control runtime, command mailboxes, config reload coordination, and reload-owned metrics/reporting.
 - `crates/observability/` — event logging, metrics aggregation, and the `/metrics` endpoint.
 - `bench/` — an isolated Cargo workspace and Python harness for benchmarking (see `bench/README.md`).
@@ -36,7 +37,10 @@ and libraries in `crates/`. each package uses the usual `src/` and `tests/` layo
 
 runtime construction uses explicit setup/resources: app-owned shared state and
 mailboxes flow into worker-local assembly, while actors expose construction and
-execution separately. see [dependency ownership](docs/architecture/README.md#construction-and-dependency-ownership).
+execution separately. frontend connections submit all routed requests through a
+concrete proxy request sender and collect replies through their task sets; proxy
+workers own routing execution and generation pinning. see
+[dependency ownership](docs/architecture/README.md#construction-and-dependency-ownership).
 
 ```bash
 cargo build --locked -p rusty-mcrouter

@@ -1,4 +1,18 @@
-use crate::{ProxyHandle, ThreadMode};
+use crate::ProxyHandle;
+
+/// Worker placement for a connection's request mailbox. All requests use the
+/// mailbox, including requests served by the connection's own worker.
+#[derive(Clone, Copy)]
+pub enum ThreadMode {
+    SameThread,
+    // todo - thread modes: constructed once dispatch policy is configurable
+    #[allow(dead_code)]
+    FixedRemote {
+        proxy_id: usize,
+    },
+    #[allow(dead_code)]
+    AffinitizedRemote,
+}
 
 #[derive(Clone)]
 pub struct ProxySet {

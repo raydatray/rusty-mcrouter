@@ -66,9 +66,14 @@ sequenceDiagram
 3. **apply.** every proxy receives the new config on its command channel,
    which is prioritized ahead of requests. each builds its own route graph,
    because graphs are thread-local, then swaps it in.
-4. **finish.** a request in flight keeps the graph it started on. an open
-   client connection picks up the new graph on its next request. the old
-   graph is dropped when its last request finishes.
+4. **finish.** the proxy pins a request's graph when it receives the request
+   from its mailbox. a request already executing keeps that graph; subsequent
+   requests on an open client connection use the graph current when received.
+   the old graph is dropped when its last request finishes.
+
+frontend decoding does not pin a generation. a request waiting in the mailbox
+can use a newly applied graph, since reconfiguration commands are prioritized
+ahead of requests.
 
 a change that leaves the parsed config identical, such as a comment or
 whitespace edit, is recorded as in sync without a rebuild.
