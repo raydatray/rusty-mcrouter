@@ -2,8 +2,8 @@
 rusty-mcrouter is a memcached routing proxy. clients reach it via the **meta protocol**, and rusty-mcrouter routes each request thru a tree of route handles to a destination server, tracking server health and failing over along the way
 
 ## crates
-the root Cargo workspace has nine packages: the executable in `bin/rusty-mcrouter/`
-and eight libraries in `crates/`. internal dependency paths are declared in the
+the root Cargo workspace has ten packages: the executable in `bin/rusty-mcrouter/`
+and nine libraries in `crates/`. internal dependency paths are declared in the
 root manifest and inherited by each package. `bench/` is a separate workspace
 with its own lockfile and pinned load-generator dependencies.
 
@@ -15,7 +15,8 @@ composition and presentation (`A --> B` means B depends on A):
 - **[`rusty-mcrouter-observability-primitives`](../../crates/observability-primitives/)** - std-only metric cells and event sink mechanics shared by fact-owning crates; no domain records or presentation logic
 - **[`rusty-mcrouter-backend`](../../crates/backend/)** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
 - **[`rusty-mcrouter-core`](../../crates/core/)** - the routing graph, where a config file is transformed into a tree of route handles
-- **[`rusty-mcrouter-proxy`](../../crates/proxy/)** - the client-facing leg and orchestration: proxy runtimes, frontend protocol handling, connections and cross-thread dispatch
+- **[`rusty-mcrouter-frontend`](../../crates/frontend/)** - the client-facing leg: listener transport, complete protocol connections, request/reply mailbox transport and frontend metric data
+- **[`rusty-mcrouter-proxy`](../../crates/proxy/)** - worker mailboxes, socket distribution, routing generations, request execution and proxy-thread orchestration
 - **[`rusty-mcrouter-observability`](../../crates/observability/)** - event and metric components, Hyper-based `/metrics` handling and presentation
 - **[`rusty-mcrouter-control`](../../crates/control/)** - control runtime, commands, configuration reload coordination and its fact-owned metric data and projection
 - **[`rusty-mcrouter`](../../bin/rusty-mcrouter/)** - the binary composition layer: cli, executor/thread ownership, process signals and supervision
@@ -27,6 +28,7 @@ flowchart LR
     Q[rusty-mcrouter-observability-primitives]
     B[rusty-mcrouter-backend]
     C[rusty-mcrouter-core]
+    F[rusty-mcrouter-frontend]
     X[rusty-mcrouter-proxy]
     O[rusty-mcrouter-observability]
     T[rusty-mcrouter-control]
@@ -35,15 +37,20 @@ flowchart LR
     P --> B
     P --> C
     P --> X
+    P --> F
     K --> C
     K --> X
     B --> C
     B --> X
     C --> X
+    F --> X
     B --> O
+    C --> O
+    F --> O
     X --> O
     K --> R
     B --> R
+    F --> R
     X --> R
     O --> R
     K --> T
@@ -55,6 +62,7 @@ flowchart LR
     T --> R
     Q --> B
     Q --> X
+    Q --> F
     Q --> O
 ```
 
@@ -79,7 +87,7 @@ the control thread;
 [`proxy_fleet.rs`](../../bin/rusty-mcrouter/src/proxy_fleet.rs) owns launching
 and joining proxy threads. both proxy and control executors are created by the
 binary's thread wrappers. [`ProxyWorker`](../../crates/proxy/src/worker.rs)
-builds thread-local proxy state and runs the frontend runtime;
+builds thread-local proxy state and runs `ProxyRuntime`;
 [`ControlRuntime`](../../crates/control/src/runtime.rs) builds and runs control
 services in the control crate. the app registers Ctrl-C before starting threads
 and announcing readiness. its current-thread executor selects between the
@@ -126,6 +134,17 @@ guarded too. normal dispatch uses caller-held handles; the app retains its
 
 `ProxyRuntime` owns routed-request tasks, client connections, listener and
 destination-sweep tasks, and the current route graph generation.
+[`frontend::Connection`](../../crates/frontend/src/connection.rs) owns each
+client socket's reader/writer, codecs, buffers, reply plans and ordered slots.
+it submits requests through a concrete `Sender<ProxyRequest>` and owns a
+`JoinSet<(usize, Reply)>` of reply-waiting tasks. completed task results mark
+slots ready; the connection encodes and writes them in request order.
+every routed request uses the chosen worker's bounded mailbox, including
+same-thread requests. the worker pins its current route generation when it
+receives the request and delivers the reply through the request's oneshot.
+fatal framing and session I/O failures end that connection; recoverable parse
+and reply-encoding errors stay in its ordered pipeline. unexpected worker
+mailbox closure and supervised runtime-task panics stop the worker.
 `ControlRuntime` owns event presentation, the metrics listener, at most 32
 concurrent metrics connection tasks, and the config reloader, which sends new
 configs to proxies over their command channels. No OS thread or
@@ -162,10 +181,17 @@ drains and joins the control thread.
 - `GenerationBuilder` receives `GenerationSetup` and creates a fresh
   `DestinationFactory` for each graph, preserving generation-local gate caches
   while the map reuses live destinations across reloads.
-- frontend sessions receive their socket, proxy context and connection options.
-  sessions own their request tasks, buffers, codecs and pipeline bookkeeping.
-  frontend servers and metrics HTTP receive already-bound listeners; binding is
-  performed during worker preparation.
+- frontend connections receive their socket, worker request sender, frontend
+  metric shard and connection options. they own their reply-waiting tasks,
+  buffers, codecs and pipeline bookkeeping. `ProxyRequest` and the shared
+  `send_request` transport live in frontend; proxy re-exports the request type
+  and its handle delegates to that transport.
+- frontend servers and metrics HTTP receive already-bound listeners; binding is
+  performed during worker preparation. frontend `Server::accept` returns a
+  socket; proxy's `accept_and_dispatch` chooses a worker and sends the socket
+  through its work mailbox. request-worker placement is selected by proxy when
+  constructing the connection, so its request sender may target a different
+  worker thread.
 - proxy listener and idle-sweep tasks begin in `ProxyWorker::run`. background
   task owners abort on drop, and thread owners stop and join on drop. explicit
   shutdown still reports errors, and stops proxies before control.
@@ -187,13 +213,16 @@ TCP and filesystem operations remain concrete.
 ```mermaid
 sequenceDiagram
     participant C as client
-    participant P as frontend (proxy)
+    participant F as frontend connection
+    participant P as proxy worker
     participant R as route tree (core)
     participant D as destination (backend)
     participant S as server
 
-    C->>P: mg foo v q O123
-    Note over P: MetaRequestDecoder<br/>Request + MetaReplyPlan<br/>seq=N, plan pinned to conn
+    C->>F: mg foo v q O123
+    Note over F: MetaRequestDecoder<br/>Request + MetaReplyPlan<br/>seq=N, plan pinned to conn
+    F->>P: ProxyRequest: Request + oneshot reply sender
+    Note over P: pin current generation on mailbox receipt
     P->>R: Request
     Note over R: RootRoute selects routing-prefix targets<br/>then pool, hash and failover routes run<br/>TKO destinations fast-fail and consult fail-open
     R->>D: Destination::prepare_send
@@ -204,8 +233,9 @@ sequenceDiagram
     D-->>R: Reply
     Note over R: failover may retry siblings
     R-->>P: Reply
-    Note over P: slot N ready, flush in seq order<br/>MetaReplyEncoder applies plan<br/>order, O, q
-    P-->>C: HD O123
+    P-->>F: oneshot Reply
+    Note over F: JoinSet yields seq N + Reply<br/>slot N ready, flush in seq order<br/>MetaReplyEncoder applies plan: order, O, q
+    F-->>C: HD O123
 ```
 
 the identity of a request is split into three distinct components
@@ -231,4 +261,5 @@ policies, fallback and wildcard fanout behavior, and
 |---------------|-------------------------------------------|---------------------------------------------|
 | protocol      | ascii + binary + meta                     | meta only, on both legs                     |
 | runtime       | libevent + folly fibers                   | tokio, thread-per-worker, thread-local `Rc` |
+| request dispatch | same-thread direct delivery; remote clients use proxy queues | all routed frontend requests use proxy mailboxes |
 | route types   | full zoo: shadow, prefix, AllSync, WarmUp | root/prefix, pool, hash, failover, null and error |

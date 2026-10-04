@@ -6,16 +6,22 @@ use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::BuildError;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::{
-    mpsc::{self, Sender},
+    mpsc::{self, Receiver, Sender},
     oneshot,
 };
 
 use crate::error::Result;
-use crate::{ProxyCommand, ProxyError, ProxyInbox, ProxyRequest};
+use crate::{ProxyCommand, ProxyError, ProxyRequest};
 
 const WORK_CAPACITY: usize = 1024;
 const REQUEST_CAPACITY: usize = 1024;
 const COMMAND_CAPACITY: usize = 16;
+
+pub struct ProxyInbox {
+    pub work_rx: Receiver<TcpStream>,
+    pub request_rx: Receiver<ProxyRequest>,
+    pub command_rx: Receiver<ProxyCommand>,
+}
 
 #[derive(Clone)]
 pub struct ProxyHandle {

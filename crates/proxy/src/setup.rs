@@ -1,4 +1,4 @@
-use std::{net::TcpStream, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use rusty_mcrouter_backend::{
     destination::{DestinationConfig, DestinationMetricsRegistry},
@@ -8,9 +8,8 @@ use rusty_mcrouter_backend::{
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::{RootRouteOptions, RoutingEventSink, RoutingMetricsShard};
 use rusty_mcrouter_frontend::{FrontendConnectionOptions, FrontendMetricsShard, ListenerConfig};
-use tokio::sync::mpsc::Receiver;
 
-use crate::{ProxyCommand, ProxyRequest, ProxySet, WorkerEventSink};
+use crate::{ProxyInbox, ProxySet, ThreadMode, WorkerEventSink};
 
 pub struct ProxyThreadSetup {
     pub proxy_id: usize,
@@ -22,12 +21,6 @@ pub struct ProxyThreadSetup {
     pub routing_events: RoutingEventSink,
     /// Worker lifecycle events are emitted through a leaf-owned sink.
     pub events: WorkerEventSink,
-}
-
-pub struct ProxyInbox {
-    pub work_rx: Receiver<TcpStream>,
-    pub request_rx: Receiver<ProxyRequest>,
-    pub command_rx: Receiver<ProxyCommand>,
 }
 
 #[derive(Clone)]
@@ -70,16 +63,4 @@ pub struct ProxyShared {
     pub sweep_interval: Duration,
     pub thread_mode: ThreadMode,
     pub connection_options: FrontendConnectionOptions,
-}
-
-#[derive(Clone, Copy)]
-pub enum ThreadMode {
-    SameThread,
-    // todo - thread modes: constructed once dispatch policy is configurable
-    #[allow(dead_code)]
-    FixedRemote {
-        proxy_id: usize,
-    },
-    #[allow(dead_code)]
-    AffinitizedRemote,
 }
