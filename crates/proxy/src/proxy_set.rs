@@ -1,5 +1,3 @@
-use rusty_mcrouter_protocol::Request;
-
 use crate::{ProxyHandle, ThreadMode};
 
 #[derive(Clone)]
@@ -14,11 +12,11 @@ impl ProxySet {
         Self { proxies }
     }
 
-    pub fn choose(&self, mode: ThreadMode, current_id: usize, _req: &Request) -> ProxyHandle {
+    pub fn choose(&self, mode: ThreadMode, current_id: usize) -> ProxyHandle {
         let idx = match mode {
             ThreadMode::SameThread => current_id,
             ThreadMode::FixedRemote { proxy_id } => proxy_id % self.proxies.len(),
-            ThreadMode::AffinitizedRemote => current_id, // todo - actually hash on the request im just lazy now
+            ThreadMode::AffinitizedRemote => current_id, // todo - implement request-based affinity
         };
 
         self.proxies[idx].clone()

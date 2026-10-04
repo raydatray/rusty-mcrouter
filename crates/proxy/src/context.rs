@@ -1,13 +1,12 @@
 use std::{rc::Rc, sync::Arc};
 
-use rusty_mcrouter_protocol::Request;
+use tokio::sync::mpsc::Sender;
 
 use crate::generation::RouteSlot;
-use crate::routing::RouteTarget;
-use crate::{FrontendConnectionOptions, FrontendMetricsShard, ProxySet, ThreadMode};
+use crate::{FrontendConnectionOptions, FrontendMetricsShard, ProxyRequest, ProxySet, ThreadMode};
 
-/// This proxy thread as seen by its connections: identity, routing and
-/// frontend metrics. Thread-local; cloning is refcount bumps.
+/// Worker-local routing state and inputs for constructing frontend connections.
+/// Thread-local; cloning is refcount bumps.
 #[derive(Clone)]
 pub(crate) struct ProxyContext {
     pub(crate) proxy_id: usize,
@@ -19,22 +18,16 @@ pub(crate) struct ProxyContext {
 }
 
 impl ProxyContext {
-    /// A request for this thread is pinned to its current route graph now.
-    pub(crate) fn target(&self, request: &Request) -> RouteTarget {
-        let handle = self
-            .proxies
-            .choose(self.thread_mode, self.proxy_id, request);
-        if handle.id() == self.proxy_id {
-            RouteTarget::Local(self.routes.current())
-        } else {
-            RouteTarget::Remote(handle)
-        }
+    pub(crate) fn request_sender(&self) -> Sender<ProxyRequest> {
+        self.proxies
+            .choose(self.thread_mode, self.proxy_id)
+            .request_sender()
     }
 }
 
 #[cfg(test)]
 impl ProxyContext {
-    /// Proxy 0 of a one-proxy set, routing on its own thread.
+    /// Proxy 0 of a one-proxy set, using its own request mailbox.
     pub(crate) fn solo(
         handle: crate::ProxyHandle,
         routes: Rc<RouteSlot>,

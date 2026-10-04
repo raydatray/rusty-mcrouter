@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use bytes::Bytes;
 use rusty_mcrouter_backend::error::SendError;
 use rusty_mcrouter_core::RouteError;
@@ -7,19 +5,6 @@ use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::generation::RouteGeneration;
-use crate::ProxyHandle;
-
-pub(crate) enum RouteTarget {
-    Local(Rc<RouteGeneration>),
-    Remote(ProxyHandle),
-}
-
-pub(crate) async fn dispatch(target: RouteTarget, request: Request) -> Reply {
-    match target {
-        RouteTarget::Local(generation) => route_request(&generation, request).await,
-        RouteTarget::Remote(handle) => handle.send_request(request).await,
-    }
-}
 
 pub(crate) async fn route_request(generation: &RouteGeneration, request: Request) -> Reply {
     let context = generation.state.context();
@@ -42,6 +27,8 @@ fn route_error_reply(error: RouteError) -> Reply {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::*;
     use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_backend::destination;

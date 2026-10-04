@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
 use rusty_mcrouter_protocol::meta::{
@@ -9,29 +9,31 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::Sender,
     task::JoinSet,
 };
 
-use crate::context::ProxyContext;
-use crate::routing::dispatch;
-use crate::{FrontendConnectionOptions, FrontendError};
+use crate::{
+    send_request, FrontendConnectionOptions, FrontendError, FrontendMetricsShard, ProxyRequest,
+};
 
-pub(crate) struct FrontendConnectionSetup {
-    pub(crate) stream: tokio::net::TcpStream,
-    pub(crate) context: ProxyContext,
-    pub(crate) options: FrontendConnectionOptions,
+pub struct FrontendConnectionSetup {
+    pub stream: tokio::net::TcpStream,
+    pub request_tx: Sender<ProxyRequest>,
+    pub metrics: Arc<FrontendMetricsShard>,
+    pub options: FrontendConnectionOptions,
 }
 
 /// one client connection's lifecycle:
 /// - decode pipelined Meta commands
-/// - dispatch routable requests to a proxy (local inline or remote via the
-///   proxy queue); answer `mn` and recoverable parse errors locally
+/// - submit routable requests through a worker mailbox; answer `mn` and
+///   recoverable parse errors locally
 /// - encode replies against each slot's retained reply plan, in request order
-pub(crate) struct Connection {
+pub struct Connection {
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
-    context: ProxyContext,
+    request_tx: Sender<ProxyRequest>,
+    metrics: Arc<FrontendMetricsShard>,
     // pipeline state
     buf: BytesMut,
     write_buf: BytesMut,
@@ -45,9 +47,7 @@ pub(crate) struct Connection {
     next_write: usize,
     in_flight: usize,
     input_closed: bool,
-    completed_tx: Sender<(usize, Reply)>,
-    completed_rx: Receiver<(usize, Reply)>,
-    requests: JoinSet<()>,
+    requests: JoinSet<(usize, Reply)>,
 }
 
 struct Slot {
@@ -67,20 +67,21 @@ enum SlotOutcome {
 }
 
 impl Connection {
-    pub(crate) fn new(setup: FrontendConnectionSetup) -> Self {
+    pub fn new(setup: FrontendConnectionSetup) -> Self {
         let FrontendConnectionSetup {
             stream,
-            context,
+            request_tx,
+            metrics,
             options,
         } = setup;
         let (reader, writer) = stream.into_split();
-        let (completed_tx, completed_rx) = mpsc::channel(options.completed_capacity);
-        context.metrics.client_connections.inc();
+        metrics.client_connections.inc();
 
         Self {
             reader,
             writer,
-            context,
+            request_tx,
+            metrics,
             buf: BytesMut::with_capacity(options.read_buf_initial_capacity),
             write_buf: BytesMut::new(),
             decoder: MetaRequestDecoder::new(),
@@ -90,13 +91,11 @@ impl Connection {
             next_write: 0,
             in_flight: 0,
             input_closed: false,
-            completed_tx,
-            completed_rx,
             requests: JoinSet::new(),
         }
     }
 
-    pub(crate) async fn run(mut self) -> Result<(), FrontendError> {
+    pub async fn run(mut self) -> Result<(), FrontendError> {
         loop {
             if !self.input_closed {
                 self.drain_input();
@@ -108,7 +107,7 @@ impl Connection {
                 return Ok(());
             }
 
-            // select! touches reader/buf and completed_rx as disjoint fields
+            // select! touches reader/buf and requests as disjoint fields
             // directly; the two arms can't be factored into &mut self methods.
             tokio::select! {
                 read = self.reader.read_buf(&mut self.buf), if !self.input_closed => {
@@ -119,19 +118,13 @@ impl Connection {
                         let _ = self.decoder.decode_eof(&self.buf);
                     }
                 }
-                maybe_completed = self.completed_rx.recv(), if self.in_flight > 0 => {
-                    match maybe_completed {
-                        Some((seq, reply)) => {
-                            self.complete(seq, reply);
-                            while let Ok((seq, reply)) = self.completed_rx.try_recv() {
-                                self.complete(seq, reply);
-                            }
-                        }
-                        None => return Ok(()),
-                    }
-                }
                 Some(result) = self.requests.join_next(), if !self.requests.is_empty() => {
-                    result?;
+                    let (seq, reply) = result?;
+                    self.complete(seq, reply);
+                    while let Some(result) = self.requests.try_join_next() {
+                        let (seq, reply) = result?;
+                        self.complete(seq, reply);
+                    }
                 }
             }
         }
@@ -146,8 +139,8 @@ impl Connection {
                     request,
                     reply_plan,
                 })) => {
-                    self.context.metrics.requests[request.kind() as usize].inc();
-                    self.context.metrics.processing.inc();
+                    self.metrics.requests[request.kind() as usize].inc();
+                    self.metrics.processing.inc();
                     let seq = self.take_seq();
                     self.slots.insert(
                         seq,
@@ -160,7 +153,7 @@ impl Connection {
                     self.submit_single(seq, request);
                 }
                 Ok(Some(DecodedMetaCommand::NoOp)) => {
-                    self.context.metrics.noops.inc();
+                    self.metrics.noops.inc();
                     let seq = self.take_seq();
                     self.slots.insert(seq, Slot::ready(SlotOutcome::NoOp));
                 }
@@ -168,7 +161,7 @@ impl Connection {
                 // one malformed command was consumed; its error joins the
                 // pipeline in order and decoding continues.
                 Err(MetaRequestDecodeError::Recoverable(error)) => {
-                    self.context.metrics.parse_errors.inc();
+                    self.metrics.parse_errors.inc();
                     let seq = self.take_seq();
                     self.slots
                         .insert(seq, Slot::ready(SlotOutcome::Reply(Reply::Error(error))));
@@ -191,20 +184,18 @@ impl Connection {
 
     fn complete(&mut self, seq: usize, reply: Reply) {
         self.in_flight = self.in_flight.saturating_sub(1);
-        self.context.metrics.processing.dec();
+        self.metrics.processing.dec();
         if let Some(slot) = self.slots.get_mut(&seq) {
             slot.state = SlotState::Ready(SlotOutcome::Reply(reply));
         }
     }
 
     fn submit_single(&mut self, seq: usize, request: Request) {
-        let target = self.context.target(&request);
-        let completed_tx = self.completed_tx.clone();
+        let request_tx = self.request_tx.clone();
 
         self.requests.spawn_local(async move {
-            let reply = dispatch(target, request).await;
-
-            let _ = completed_tx.send((seq, reply)).await;
+            let reply = send_request(&request_tx, request).await;
+            (seq, reply)
         });
     }
 
@@ -227,7 +218,7 @@ impl Connection {
                 SlotOutcome::NoOp => self.encoder.encode_noop(&mut self.write_buf),
                 SlotOutcome::Reply(reply) => {
                     if matches!(reply, Reply::Error(_)) {
-                        self.context.metrics.failed.inc();
+                        self.metrics.failed.inc();
                     }
                     if self
                         .encoder
@@ -235,7 +226,7 @@ impl Connection {
                         .is_err()
                     {
                         if !matches!(reply, Reply::Error(_)) {
-                            self.context.metrics.failed.inc();
+                            self.metrics.failed.inc();
                         }
                         // the reply cannot satisfy this slot's plan (for
                         // example a backend omitted a projected field):
@@ -262,7 +253,7 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        let metrics = &self.context.metrics;
+        let metrics = &self.metrics;
         metrics.processing.sub(self.in_flight as i64);
         metrics.client_connections.dec();
     }
@@ -279,149 +270,196 @@ impl Slot {
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-    use std::sync::Arc;
+    use std::time::Duration;
 
-    use rusty_mcrouter_backend::destination;
-    use rusty_mcrouter_backend::test_support::{run_local, MockBackendFactory};
-    use rusty_mcrouter_config::{parse, PoolId};
-    use rusty_mcrouter_core::{build_route, RoutingMetricsShard, RoutingState};
-    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use rusty_mcrouter_protocol::test_support::get_miss;
+    use rusty_mcrouter_protocol::RequestKind;
+    use tokio::sync::mpsc;
+    use tokio::task::LocalSet;
+    use tokio::time::timeout;
 
     use super::*;
-    use crate::generation::{RouteGeneration, RouteSlot};
-    use crate::{FrontendMetricsShard, ProxyHandle};
 
-    fn generation(generation: u64, config: &str) -> Rc<RouteGeneration> {
-        let config = parse(config).unwrap();
-        let route = build_route(
-            &config,
-            &MockBackendFactory::new(),
-            &destination::DestinationConfig::default(),
-        )
-        .unwrap();
-        let state = RoutingState::new(RoutingMetricsShard::new(), Rc::new(noop_sink()), &config);
-        Rc::new(RouteGeneration {
-            generation,
-            route,
-            state,
-        })
-    }
-
-    const POOL_CONFIG: &str =
-        r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#;
-
-    fn pool_id() -> PoolId {
-        parse(POOL_CONFIG).unwrap().pool_id("pool").unwrap()
-    }
-
-    /// a real Connection over a localhost socket pair, with a SameThread
-    /// route into a mock backend. the proxy handle channel is never used
-    /// (SameThread routes inline) but ProxySet demands one.
     async fn session(
         metrics: Arc<FrontendMetricsShard>,
-        routes: Rc<RouteSlot>,
-    ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
+    ) -> (
+        tokio::net::TcpStream,
+        mpsc::Receiver<ProxyRequest>,
+        tokio::task::JoinHandle<Result<(), FrontendError>>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (server_stream, _) = listener.accept().await.unwrap();
 
-        let (handle, _inbox) = ProxyHandle::allocate(0);
+        let (request_tx, request_rx) = mpsc::channel(8);
         let conn = Connection::new(FrontendConnectionSetup {
             stream: server_stream,
-            context: ProxyContext::solo(handle, routes, metrics),
+            request_tx,
+            metrics,
             options: FrontendConnectionOptions::default(),
         });
-        let task = tokio::task::spawn_local(async move {
-            let _ = conn.run().await;
-        });
-        (client, task)
+        let task = tokio::task::spawn_local(conn.run());
+        (client, request_rx, task)
     }
 
     async fn read_lines(client: &mut tokio::net::TcpStream, n: usize) -> Vec<String> {
-        let mut buf = Vec::new();
-        loop {
-            let text = String::from_utf8_lossy(&buf);
-            if text.matches("\r\n").count() >= n {
-                return text.split("\r\n").take(n).map(str::to_owned).collect();
+        timeout(Duration::from_secs(2), async {
+            let mut buf = Vec::new();
+            loop {
+                let text = String::from_utf8_lossy(&buf);
+                if text.matches("\r\n").count() >= n {
+                    return text.split("\r\n").take(n).map(str::to_owned).collect();
+                }
+                let mut chunk = [0u8; 1024];
+                let read = client.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "connection closed before {n} replies");
+                buf.extend_from_slice(&chunk[..read]);
             }
-            let mut chunk = [0u8; 1024];
-            let read = client.read(&mut chunk).await.unwrap();
-            assert!(read > 0, "connection closed before {n} replies");
-            buf.extend_from_slice(&chunk[..read]);
-        }
+        })
+        .await
+        .expect("timed out waiting for replies")
     }
 
-    /// THE frontend metrics test: a pipelined session of mg + mn + garbage
-    /// counts one of each fact, failed counts the CLIENT_ERROR, replies come
-    /// back in pipeline order, and the gauges settle to zero.
     #[tokio::test]
     async fn frontend_metrics_account_a_pipelined_session() {
-        run_local(async {
-            let metrics = FrontendMetricsShard::new();
-            let routes = RouteSlot::new(generation(1, POOL_CONFIG));
-            let routing = Rc::clone(&routes.current().state);
-            let pool = pool_id();
-            let (mut client, task) = session(Arc::clone(&metrics), routes).await;
+        LocalSet::new()
+            .run_until(async {
+                let metrics = FrontendMetricsShard::new();
+                let (mut client, mut requests, task) = session(Arc::clone(&metrics)).await;
 
-            client
-                .write_all(b"mg foo v\r\nmn\r\nnot_a_command\r\n")
+                client
+                    .write_all(b"mg foo v\r\nmn\r\nnot_a_command\r\n")
+                    .await
+                    .unwrap();
+
+                let request = requests.recv().await.unwrap();
+                assert_eq!(request.request.key().as_bytes(), b"foo");
+                request.reply_tx.send(get_miss()).unwrap();
+
+                let lines = read_lines(&mut client, 3).await;
+                assert_eq!(lines[0], "EN", "mg miss");
+                assert_eq!(lines[1], "MN", "mn answered in pipeline order");
+                assert_eq!(lines[2], "ERROR", "garbage must answer in pipeline order");
+
+                assert_eq!(metrics.requests[RequestKind::Get as usize].load(), 1);
+                assert_eq!(metrics.noops.load(), 1);
+                assert_eq!(metrics.parse_errors.load(), 1);
+                assert_eq!(metrics.failed.load(), 1);
+                assert_eq!(metrics.processing.load(), 0);
+                assert_eq!(metrics.client_connections.load(), 1);
+                assert!(
+                    requests.try_recv().is_err(),
+                    "local commands must not be routed"
+                );
+
+                drop(client);
+                task.await.unwrap().unwrap();
+                assert_eq!(metrics.processing.load(), 0);
+                assert_eq!(metrics.client_connections.load(), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn out_of_order_replies_keep_plans_and_local_commands_in_order() {
+        LocalSet::new()
+            .run_until(async {
+                let metrics = FrontendMetricsShard::new();
+                let (mut client, mut requests, task) = session(Arc::clone(&metrics)).await;
+                let commands = concat!(
+                    "mg first v Oone\r\n",
+                    "mg second v Otwo\r\n",
+                    "mn\r\n",
+                    "mg quiet v q\r\n",
+                    "not_a_command\r\n",
+                );
+                client.write_all(commands.as_bytes()).await.unwrap();
+
+                let (mut first, mut second, mut quiet) = (None, None, None);
+                for _ in 0..3 {
+                    let message = requests.recv().await.unwrap();
+                    match message.request.key().as_bytes() {
+                        b"first" => first = Some(message),
+                        b"second" => second = Some(message),
+                        b"quiet" => quiet = Some(message),
+                        key => panic!("unexpected key: {key:?}"),
+                    }
+                }
+                second.unwrap().reply_tx.send(get_miss()).unwrap();
+                quiet.unwrap().reply_tx.send(get_miss()).unwrap();
+                timeout(Duration::from_secs(2), async {
+                    while metrics.processing.load() != 1 {
+                        tokio::task::yield_now().await;
+                    }
+                })
                 .await
                 .unwrap();
 
-            let lines = read_lines(&mut client, 3).await;
-            assert_eq!(lines[0], "EN", "mg miss");
-            assert_eq!(lines[1], "MN", "mn answered in pipeline order");
-            // unknown command -> memcached's bare ERROR (CLIENT_ERROR is for
-            // malformed KNOWN commands); either way it's a recoverable parse
-            // error and a client-visible error reply
-            assert_eq!(lines[2], "ERROR", "garbage must answer in pipeline order");
+                let error = client.try_read(&mut [0u8; 64]).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
 
-            assert_eq!(
-                metrics.requests[rusty_mcrouter_protocol::RequestKind::Get as usize].load(),
-                1
-            );
-            assert_eq!(metrics.noops.load(), 1);
-            assert_eq!(metrics.parse_errors.load(), 1);
-            assert_eq!(
-                metrics.failed.load(),
-                1,
-                "the CLIENT_ERROR is a client-visible error reply"
-            );
-            assert_eq!(metrics.processing.load(), 0);
-            assert_eq!(metrics.client_connections.load(), 1);
-            assert_eq!(routing.pool(pool).requests.load(), 1);
-            assert_eq!(routing.pool(pool).completed_requests.load(), 1);
-            assert_eq!(routing.pool(pool).final_errors.load(), 0);
-
-            // client disconnect ends the session; the gauges must not leak
-            drop(client);
-            task.await.unwrap();
-            assert_eq!(metrics.processing.load(), 0);
-            assert_eq!(metrics.client_connections.load(), 0);
-        })
-        .await;
+                first.unwrap().reply_tx.send(get_miss()).unwrap();
+                assert_eq!(
+                    read_lines(&mut client, 4).await,
+                    ["EN Oone", "EN Otwo", "MN", "ERROR"]
+                );
+                assert_eq!(metrics.requests[RequestKind::Get as usize].load(), 3);
+                assert_eq!(metrics.processing.load(), 0);
+                drop(client);
+                task.await.unwrap().unwrap();
+            })
+            .await;
     }
 
     #[tokio::test]
-    async fn existing_connection_uses_the_new_generation_on_its_next_request() {
-        run_local(async {
-            let routes = RouteSlot::new(generation(1, r#"{"route": "NullRoute"}"#));
-            let (mut client, _task) =
-                session(FrontendMetricsShard::new(), Rc::clone(&routes)).await;
+    async fn input_eof_drains_pending_replies_and_ignores_a_partial_frame() {
+        LocalSet::new()
+            .run_until(async {
+                let metrics = FrontendMetricsShard::new();
+                let (mut client, mut requests, task) = session(Arc::clone(&metrics)).await;
+                client
+                    .write_all(b"mg foo v\r\nmn\r\nmg partial")
+                    .await
+                    .unwrap();
+                client.shutdown().await.unwrap();
+                requests
+                    .recv()
+                    .await
+                    .unwrap()
+                    .reply_tx
+                    .send(get_miss())
+                    .unwrap();
 
-            client.write_all(b"mg foo v\r\n").await.unwrap();
-            assert_eq!(read_lines(&mut client, 1).await, ["EN"]);
+                let mut replies = Vec::new();
+                timeout(Duration::from_secs(2), client.read_to_end(&mut replies))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(replies, b"EN\r\nMN\r\n");
+                task.await.unwrap().unwrap();
+                assert_eq!(metrics.processing.load(), 0);
+                assert_eq!(metrics.client_connections.load(), 0);
+            })
+            .await;
+    }
 
-            let previous = routes.replace(generation(2, r#"{"route": "ErrorRoute|two"}"#));
-            assert_eq!(previous.generation, 1);
-            drop(previous);
+    #[tokio::test]
+    async fn dropping_a_connection_cancels_waiters_and_balances_gauges() {
+        LocalSet::new()
+            .run_until(async {
+                let metrics = FrontendMetricsShard::new();
+                let (mut client, mut requests, task) = session(Arc::clone(&metrics)).await;
+                client.write_all(b"mg foo v\r\n").await.unwrap();
+                let request = requests.recv().await.unwrap();
+                assert_eq!(metrics.processing.load(), 1);
 
-            client.write_all(b"mg foo v\r\n").await.unwrap();
-            assert_eq!(read_lines(&mut client, 1).await, ["SERVER_ERROR two"]);
-        })
-        .await;
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                assert!(request.reply_tx.is_closed());
+                assert_eq!(metrics.processing.load(), 0);
+                assert_eq!(metrics.client_connections.load(), 0);
+            })
+            .await;
     }
 }

@@ -1,4 +1,4 @@
-use std::net::TcpStream;
+use std::{net::TcpStream, sync::Arc};
 
 use anyhow::Context;
 use rusty_mcrouter_config::ConfigDocument;
@@ -127,7 +127,8 @@ impl ProxyRuntime {
         };
         let connection = Connection::new(FrontendConnectionSetup {
             stream,
-            context: self.context.clone(),
+            request_tx: self.context.request_sender(),
+            metrics: Arc::clone(&self.context.metrics),
             options: self.context.connection_options,
         });
         self.connection_tasks.spawn_local(async move {
@@ -166,6 +167,7 @@ async fn wait_for_sweep(task: &mut Option<JoinHandle<()>>) -> anyhow::Result<()>
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -173,17 +175,20 @@ mod tests {
         self, DestinationConfig, DestinationMetricsRegistry,
     };
     use rusty_mcrouter_backend::metrics::BackendMetricsShard;
-    use rusty_mcrouter_backend::test_support::{run_local, scripted_backend_serial, Step};
+    use rusty_mcrouter_backend::test_support::{
+        run_local, scripted_backend_serial, MockBackendFactory, Step,
+    };
     use rusty_mcrouter_backend::tko::{DestTokenAllocator, TkoTrackerMap};
     use rusty_mcrouter_config::parse;
-    use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsShard};
+    use rusty_mcrouter_core::{build_route, RootRouteOptions, RoutingMetricsShard, RoutingState};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::oneshot;
     use tokio::time::timeout;
 
     use super::*;
-    use crate::generation::{GenerationSetup, RouteSlot};
+    use crate::generation::{GenerationSetup, RouteGeneration, RouteSlot};
     use crate::{FrontendMetricsShard, ProxyHandle};
 
     fn test_runtime(config: &str) -> (ProxyRuntime, ProxyHandle) {
@@ -248,6 +253,114 @@ mod tests {
             .await
             .unwrap();
         client
+    }
+
+    async fn expect_reply(client: &mut tokio::net::TcpStream, expected: &[u8]) {
+        let mut reply = vec![0u8; expected.len()];
+        timeout(Duration::from_secs(2), client.read_exact(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply, expected);
+    }
+
+    #[tokio::test]
+    async fn existing_connection_uses_the_new_generation_on_its_next_request() {
+        run_local(async {
+            let (runtime, handle) = test_runtime(r#"{"route": "NullRoute"}"#);
+            let task = tokio::task::spawn_local(runtime.run());
+            let mut client = connect(&handle).await;
+
+            client.write_all(b"mg foo v\r\n").await.unwrap();
+            expect_reply(&mut client, b"EN\r\n").await;
+
+            reconfigure(&handle, 2, r#"{"route": "ErrorRoute|two"}"#)
+                .await
+                .unwrap();
+            client.write_all(b"mg foo v\r\n").await.unwrap();
+            expect_reply(&mut client, b"SERVER_ERROR two\r\n").await;
+
+            handle.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn queued_request_pins_the_generation_when_received() {
+        run_local(async {
+            let (runtime, handle) = test_runtime(r#"{"route": "ErrorRoute|one"}"#);
+            let (reply_tx, reply_rx) = oneshot::channel();
+            handle
+                .request_sender()
+                .send(ProxyRequest {
+                    request: get(b"key"),
+                    reply_tx,
+                })
+                .await
+                .unwrap();
+            let applied = handle
+                .begin_reconfigure(
+                    2,
+                    Arc::new(parse(r#"{"route": "ErrorRoute|two"}"#).unwrap()),
+                )
+                .await
+                .unwrap();
+
+            // Both messages are queued before the runtime starts. Commands
+            // take priority, so this request receives the new generation.
+            let task = tokio::task::spawn_local(runtime.run());
+            applied.await.unwrap().unwrap();
+            assert_eq!(reply_rx.await.unwrap(), server_error(b"two"));
+
+            handle.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn frontend_mailbox_requests_finish_pool_metrics() {
+        run_local(async {
+            let (runtime, handle) = test_runtime(r#"{"route": "NullRoute"}"#);
+            let config = parse(
+                r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#,
+            )
+            .unwrap();
+            let route = build_route(
+                &config,
+                &MockBackendFactory::new(),
+                &DestinationConfig::default(),
+            )
+            .unwrap();
+            let state =
+                RoutingState::new(RoutingMetricsShard::new(), Rc::new(noop_sink()), &config);
+            runtime.context.routes.replace(Rc::new(RouteGeneration {
+                generation: 1,
+                route,
+                state: Rc::clone(&state),
+            }));
+            let metrics = Arc::clone(&runtime.context.metrics);
+            let task = tokio::task::spawn_local(runtime.run());
+            let mut client = connect(&handle).await;
+
+            client
+                .write_all(b"mg foo v\r\nmn\r\nnot_a_command\r\n")
+                .await
+                .unwrap();
+            expect_reply(&mut client, b"EN\r\nMN\r\nERROR\r\n").await;
+
+            let pool = state.pool(config.pool_id("pool").unwrap());
+            assert_eq!(pool.requests.load(), 1);
+            assert_eq!(pool.completed_requests.load(), 1);
+            assert_eq!(pool.final_errors.load(), 0);
+            assert_eq!(metrics.processing.load(), 0);
+
+            handle.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+            assert_eq!(metrics.client_connections.load(), 0);
+        })
+        .await;
     }
 
     #[tokio::test]
