@@ -11,7 +11,7 @@ use tokio::sync::{
 };
 
 use crate::error::Result;
-use crate::{ProxyCommand, ProxyError, ProxyRequest};
+use crate::{ProxyCommand, ProxyError, RoutedRequest};
 
 const WORK_CAPACITY: usize = 1024;
 const REQUEST_CAPACITY: usize = 1024;
@@ -19,14 +19,14 @@ const COMMAND_CAPACITY: usize = 16;
 
 pub struct ProxyInbox {
     pub work_rx: Receiver<TcpStream>,
-    pub request_rx: Receiver<ProxyRequest>,
+    pub request_rx: Receiver<RoutedRequest>,
     pub command_rx: Receiver<ProxyCommand>,
 }
 
 #[derive(Clone)]
 pub struct ProxyHandle {
     id: usize,
-    request_tx: Sender<ProxyRequest>,
+    request_tx: Sender<RoutedRequest>,
     command_tx: Sender<ProxyCommand>,
     work_tx: Sender<TcpStream>,
 }
@@ -59,7 +59,7 @@ impl ProxyHandle {
         rusty_mcrouter_frontend::send_request(&self.request_tx, request).await
     }
 
-    pub fn request_sender(&self) -> Sender<ProxyRequest> {
+    pub fn request_sender(&self) -> Sender<RoutedRequest> {
         self.request_tx.clone()
     }
 

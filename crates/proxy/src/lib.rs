@@ -19,4 +19,4 @@ pub use crate::message::ProxyCommand;
 pub use crate::proxy_set::{ProxySet, ThreadMode};
 pub use crate::setup::{ProxyShards, ProxyShared, ProxyThreadSetup};
 pub use crate::worker::ProxyWorker;
-pub use rusty_mcrouter_frontend::ProxyRequest;
+pub use rusty_mcrouter_frontend::RoutedRequest;

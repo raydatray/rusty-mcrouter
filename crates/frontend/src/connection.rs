@@ -14,12 +14,12 @@ use tokio::{
 };
 
 use crate::{
-    send_request, FrontendConnectionOptions, FrontendError, FrontendMetricsShard, ProxyRequest,
+    send_request, FrontendConnectionOptions, FrontendError, FrontendMetricsShard, RoutedRequest,
 };
 
 pub struct FrontendConnectionSetup {
     pub stream: tokio::net::TcpStream,
-    pub request_tx: Sender<ProxyRequest>,
+    pub request_tx: Sender<RoutedRequest>,
     pub metrics: Arc<FrontendMetricsShard>,
     pub options: FrontendConnectionOptions,
 }
@@ -32,7 +32,7 @@ pub struct FrontendConnectionSetup {
 pub struct Connection {
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
-    request_tx: Sender<ProxyRequest>,
+    request_tx: Sender<RoutedRequest>,
     metrics: Arc<FrontendMetricsShard>,
     // pipeline state
     buf: BytesMut,
@@ -284,7 +284,7 @@ mod tests {
         metrics: Arc<FrontendMetricsShard>,
     ) -> (
         tokio::net::TcpStream,
-        mpsc::Receiver<ProxyRequest>,
+        mpsc::Receiver<RoutedRequest>,
         tokio::task::JoinHandle<Result<(), FrontendError>>,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -11,5 +11,5 @@ pub use connection::{Connection, FrontendConnectionSetup};
 pub use error::FrontendError;
 pub use metrics::FrontendMetricsShard;
 pub use options::{FrontendConnectionOptions, ListenerConfig};
-pub use request::{send_request, ProxyRequest};
+pub use request::{send_request, RoutedRequest};
 pub use server::{bind_listener, Server};
