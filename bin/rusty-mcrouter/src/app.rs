@@ -16,7 +16,7 @@ use crate::args::Args;
 use crate::config;
 use crate::control::ControlThreadOwner;
 use crate::lifecycle::{ProcessEvent, Supervisor};
-use crate::proxy_fleet::{ProxyFleet, ProxyFleetSetup, ProxyWorkerResources};
+use crate::worker_fleet::{WorkerFleet, WorkerFleetSetup, WorkerResources};
 
 use std::{
     io::Write,
@@ -49,7 +49,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         .map(|id| {
             let (handle, inbox) = WorkerHandle::allocate(id);
             let shards = WorkerShards::new();
-            let worker = ProxyWorkerResources {
+            let worker = WorkerResources {
                 handle: handle.clone(),
                 inbox,
                 shards: shards.clone(),
@@ -125,8 +125,8 @@ pub(crate) fn run() -> anyhow::Result<()> {
         &supervisor,
     )?;
 
-    let proxies = match ProxyFleet::spawn(
-        ProxyFleetSetup {
+    let workers = match WorkerFleet::spawn(
+        WorkerFleetSetup {
             workers,
             num_listening_sockets: args.num_listening_sockets,
             listen_addr,
@@ -135,7 +135,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         },
         &supervisor,
     ) {
-        Ok(proxies) => proxies,
+        Ok(workers) => workers,
         Err(error) => {
             let _ = control_owner.shutdown();
             return Err(error);
@@ -146,22 +146,22 @@ pub(crate) fn run() -> anyhow::Result<()> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     config_metrics.applied(1, applied_at);
-    if let Err(error) = control_handle.proxies_ready_blocking() {
-        let _ = proxies.shutdown();
+    if let Err(error) = control_handle.workers_ready_blocking() {
+        let _ = workers.shutdown();
         let _ = control_owner.shutdown();
         return Err(error);
     }
 
-    println!("READY {}", proxies.bound_addr());
+    println!("READY {}", workers.bound_addr());
     println!("METRICS {metrics_bound}");
     if let Err(error) = std::io::stdout().flush() {
-        let _ = proxies.shutdown();
+        let _ = workers.shutdown();
         let _ = control_owner.shutdown();
         return Err(error.into());
     }
     tracing::info!(
-        listen = %proxies.bound_addr(),
-        proxy_threads = args.num_proxies,
+        listen = %workers.bound_addr(),
+        worker_threads = args.num_proxies,
         listening_sockets = args.num_listening_sockets,
         config = %args.config.display(),
         "rusty-mcrouter ready"
@@ -175,8 +175,8 @@ pub(crate) fn run() -> anyhow::Result<()> {
 
             event = supervisor.wait() => {
                 match event? {
-                    ProcessEvent::ProxyExited { id } => {
-                        Err(anyhow::anyhow!("proxy-{id} exited unexpectedly"))
+                    ProcessEvent::WorkerExited { id } => {
+                        Err(anyhow::anyhow!("worker-{id} exited unexpectedly"))
                     }
                     ProcessEvent::ControlExited => {
                         Err(anyhow::anyhow!("control thread exited unexpectedly"))
@@ -186,8 +186,8 @@ pub(crate) fn run() -> anyhow::Result<()> {
         }
     });
 
-    // proxies first so their Stopped events reach the control runtime
-    let stopped_proxies = proxies.shutdown();
+    // workers first so their Stopped events reach the control runtime
+    let stopped_workers = workers.shutdown();
     let stopped_control = control_owner.shutdown();
-    outcome.and(stopped_proxies).and(stopped_control)
+    outcome.and(stopped_workers).and(stopped_control)
 }

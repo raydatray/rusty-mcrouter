@@ -20,16 +20,16 @@ impl ControlHandle {
         (Self { command_tx }, ControlInbox { command_rx })
     }
 
-    pub async fn proxies_ready(&self) -> anyhow::Result<()> {
+    pub async fn workers_ready(&self) -> anyhow::Result<()> {
         self.command_tx
-            .send(ControlCommand::ProxiesReady)
+            .send(ControlCommand::WorkersReady)
             .await
             .context("control command channel closed")
     }
 
-    pub fn proxies_ready_blocking(&self) -> anyhow::Result<()> {
+    pub fn workers_ready_blocking(&self) -> anyhow::Result<()> {
         self.command_tx
-            .blocking_send(ControlCommand::ProxiesReady)
+            .blocking_send(ControlCommand::WorkersReady)
             .context("control command channel closed")
     }
 
