@@ -8,11 +8,14 @@ pub enum FrontendError {
     #[error("no addresses found")]
     NoAddresses,
 
-    #[error("worker closed: {worker}")]
-    WorkerClosed { worker: usize },
-
     #[error("request task failed: {0}")]
     RequestTask(#[from] tokio::task::JoinError),
+}
+
+#[derive(Debug, Error)]
+pub enum ProxyError {
+    #[error("worker closed: {worker}")]
+    WorkerClosed { worker: usize },
 }
 
 pub(crate) type Result<T> = std::result::Result<T, FrontendError>;

@@ -20,7 +20,7 @@ pub use crate::config::{
     FrontendConnectionOptions, ListenerConfig, ProxyInbox, ProxyShards, ProxyShared,
     ProxyThreadSetup, ThreadMode,
 };
-pub use crate::error::FrontendError;
+pub use crate::error::{FrontendError, ProxyError};
 pub use crate::events::{WorkerEvent, WorkerEventRecord, WorkerEventSink};
 pub use crate::handle::ProxyHandle;
 pub use crate::message::ProxyCommand;

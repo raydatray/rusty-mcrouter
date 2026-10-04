@@ -10,8 +10,7 @@ use tokio::sync::{
     oneshot,
 };
 
-use crate::error::Result;
-use crate::{FrontendError, ProxyCommand, ProxyInbox, ProxyRequest};
+use crate::{ProxyCommand, ProxyError, ProxyInbox, ProxyRequest};
 
 const WORK_CAPACITY: usize = 1024;
 const REQUEST_CAPACITY: usize = 1024;
@@ -57,11 +56,11 @@ impl ProxyHandle {
         self.request_tx.clone()
     }
 
-    pub async fn send_connection(&self, stream: TcpStream) -> Result<()> {
+    pub async fn send_connection(&self, stream: TcpStream) -> Result<(), ProxyError> {
         self.work_tx
             .send(stream)
             .await
-            .map_err(|_| FrontendError::WorkerClosed { worker: self.id })
+            .map_err(|_| ProxyError::WorkerClosed { worker: self.id })
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {

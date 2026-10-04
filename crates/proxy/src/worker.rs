@@ -7,7 +7,7 @@ use crate::context::ProxyContext;
 use crate::generation::{GenerationBuilder, GenerationSetup, RouteSlot};
 use crate::runtime::{BackgroundTasks, ProxyRuntime};
 use crate::{
-    bind_listener, ProxyInbox, ProxyThreadSetup, Server, WorkerEvent, WorkerEventRecord,
+    bind_listener, ProxyInbox, ProxySet, ProxyThreadSetup, Server, WorkerEvent, WorkerEventRecord,
     WorkerEventSink,
 };
 
@@ -91,12 +91,7 @@ impl ProxyWorker {
         let tasks = BackgroundTasks {
             listener: self.server.map(|server| {
                 let proxies = self.context.proxies.clone();
-                tokio::task::spawn_local(async move {
-                    server
-                        .accept_and_dispatch(proxies)
-                        .await
-                        .map_err(anyhow::Error::from)
-                })
+                tokio::task::spawn_local(accept_and_dispatch(server, proxies))
             }),
             sweep: self.destinations.spawn_idle_sweep(self.sweep_interval),
         };
@@ -107,5 +102,16 @@ impl ProxyWorker {
             event: WorkerEvent::Stopped,
         });
         outcome
+    }
+}
+
+/// Distribute accepted sockets to workers. Listener transport belongs to the
+/// frontend; placement and mailbox delivery belong to the proxy fleet.
+async fn accept_and_dispatch(server: Server, proxies: ProxySet) -> anyhow::Result<()> {
+    let mut next = 0usize;
+    loop {
+        let stream = server.accept().await?;
+        proxies.nth(next).send_connection(stream).await?;
+        next = next.wrapping_add(1);
     }
 }

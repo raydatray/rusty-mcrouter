@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use tokio::net::{lookup_host, TcpListener, TcpSocket};
 
-use crate::{error::Result, FrontendError, ListenerConfig, ProxySet};
+use crate::{error::Result, FrontendError, ListenerConfig};
 
 const LISTEN_BACKLOG: u32 = 1024;
 
@@ -42,8 +42,8 @@ impl Server {
         self.listener.local_addr().map_err(|e| e.into())
     }
 
-    pub async fn accept_and_dispatch(self, proxies: ProxySet) -> Result<()> {
-        let mut next = 0usize;
+    /// Accept a socket for registration on its serving worker's runtime.
+    pub async fn accept(&self) -> Result<std::net::TcpStream> {
         loop {
             let (tokio_stream, _) = match self.listener.accept().await {
                 Ok(pair) => pair,
@@ -51,14 +51,10 @@ impl Server {
                 Err(e) => return Err(e.into()),
             };
 
-            let std_stream = match tokio_stream.into_std() {
-                Ok(stream) => stream,
+            match tokio_stream.into_std() {
+                Ok(stream) => return Ok(stream),
                 Err(_) => continue,
-            };
-
-            // todo - thread modes, accepted sockets are round-robin today; per-request affinity belongs behind a proxy message queue
-            proxies.nth(next).send_connection(std_stream).await?;
-            next = next.wrapping_add(1);
+            }
         }
     }
 }
