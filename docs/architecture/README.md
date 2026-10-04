@@ -136,7 +136,7 @@ guarded too. normal dispatch uses caller-held handles; the app retains its
 destination-sweep tasks, and the current route graph generation.
 [`frontend::Connection`](../../crates/frontend/src/connection.rs) owns each
 client socket's reader/writer, codecs, buffers, reply plans and ordered slots.
-it submits requests through a concrete `Sender<ProxyRequest>` and owns a
+it submits requests through a concrete `Sender<RoutedRequest>` and owns a
 `JoinSet<(usize, Reply)>` of reply-waiting tasks. completed task results mark
 slots ready; the connection encodes and writes them in request order.
 every routed request uses the chosen worker's bounded mailbox, including
@@ -183,7 +183,7 @@ drains and joins the control thread.
   while the map reuses live destinations across reloads.
 - frontend connections receive their socket, worker request sender, frontend
   metric shard and connection options. they own their reply-waiting tasks,
-  buffers, codecs and pipeline bookkeeping. `ProxyRequest` and the shared
+  buffers, codecs and pipeline bookkeeping. `RoutedRequest` and the shared
   `send_request` transport live in frontend; proxy re-exports the request type
   and its handle delegates to that transport.
 - frontend servers and metrics HTTP receive already-bound listeners; binding is
@@ -221,7 +221,7 @@ sequenceDiagram
 
     C->>F: mg foo v q O123
     Note over F: MetaRequestDecoder<br/>Request + MetaReplyPlan<br/>seq=N, plan pinned to conn
-    F->>P: ProxyRequest: Request + oneshot reply sender
+    F->>P: RoutedRequest: Request + oneshot reply sender
     Note over P: pin current generation on mailbox receipt
     P->>R: Request
     Note over R: RootRoute selects routing-prefix targets<br/>then pool, hash and failover routes run<br/>TKO destinations fast-fail and consult fail-open

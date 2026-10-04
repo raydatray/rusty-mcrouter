@@ -4,7 +4,7 @@ use rusty_mcrouter_frontend::{FrontendConnectionOptions, FrontendMetricsShard};
 use tokio::sync::mpsc::Sender;
 
 use crate::generation::RouteGeneration;
-use crate::{ProxyRequest, ProxySet, ThreadMode};
+use crate::{ProxySet, RoutedRequest, ThreadMode};
 
 /// Worker-local routing state and inputs for constructing frontend connections.
 pub(crate) struct ProxyContext {
@@ -17,7 +17,7 @@ pub(crate) struct ProxyContext {
 }
 
 impl ProxyContext {
-    pub(crate) fn request_sender(&self) -> Sender<ProxyRequest> {
+    pub(crate) fn request_sender(&self) -> Sender<RoutedRequest> {
         self.proxies
             .choose(self.thread_mode, self.proxy_id)
             .request_sender()

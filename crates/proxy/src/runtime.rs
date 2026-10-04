@@ -9,7 +9,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::context::ProxyContext;
 use crate::generation::GenerationBuilder;
 use crate::routing::route_request;
-use crate::{ProxyCommand, ProxyInbox, ProxyRequest};
+use crate::{ProxyCommand, ProxyInbox, RoutedRequest};
 
 /// Long-lived tasks the runtime supervises; either one exiting stops the proxy.
 pub(crate) struct BackgroundTasks {
@@ -112,7 +112,7 @@ impl ProxyRuntime {
         Ok(())
     }
 
-    fn spawn_request(&mut self, request: ProxyRequest) {
+    fn spawn_request(&mut self, request: RoutedRequest) {
         let generation = Rc::clone(&self.context.routes);
         self.route_tasks.spawn_local(async move {
             let reply = route_request(&generation, request.request).await;
@@ -290,7 +290,7 @@ mod tests {
             let (reply_tx, reply_rx) = oneshot::channel();
             handle
                 .request_sender()
-                .send(ProxyRequest {
+                .send(RoutedRequest {
                     request: get(b"key"),
                     reply_tx,
                 })

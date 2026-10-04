@@ -5,18 +5,18 @@ use tokio::sync::{mpsc::Sender, oneshot};
 
 /// A semantic request and the channel for its worker's reply. Client reply
 /// plans and sequence numbers stay in the frontend connection.
-pub struct ProxyRequest {
+pub struct RoutedRequest {
     pub request: Request,
     pub reply_tx: oneshot::Sender<Reply>,
 }
 
 /// Submit through a worker mailbox and await its reply. The same transport
 /// serves connections and callers using a proxy handle.
-pub async fn send_request(request_tx: &Sender<ProxyRequest>, request: Request) -> Reply {
+pub async fn send_request(request_tx: &Sender<RoutedRequest>, request: Request) -> Reply {
     let (reply_tx, reply_rx) = oneshot::channel();
 
     if request_tx
-        .send(ProxyRequest { request, reply_tx })
+        .send(RoutedRequest { request, reply_tx })
         .await
         .is_err()
     {
