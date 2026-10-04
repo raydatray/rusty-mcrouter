@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context};
 use rusty_mcrouter_backend::destination::DestinationConfig;
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::RootRouteOptions;
-use rusty_mcrouter_proxy::ProxyHandle;
+use rusty_mcrouter_worker::WorkerHandle;
 use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
 
 use crate::{ConfigMetrics, ReloadStage};
@@ -26,13 +26,13 @@ pub struct ReloaderSetup {
     pub path: PathBuf,
     pub delay: Duration,
     pub running: RunningConfig,
-    pub proxies: Vec<ProxyHandle>,
+    pub workers: Vec<WorkerHandle>,
     pub defaults: DestinationConfig,
     pub root_options: RootRouteOptions,
     pub metrics: Arc<ConfigMetrics>,
 }
 
-/// Watches settled config changes and coordinates generation application across proxies.
+/// Watches settled config changes and coordinates generation application across workers.
 pub struct ConfigReloader {
     path: PathBuf,
     delay: Duration,
@@ -41,7 +41,7 @@ pub struct ConfigReloader {
     last_seen: FileState,
     running: Running,
     next_generation: u64,
-    proxies: Vec<ProxyHandle>,
+    workers: Vec<WorkerHandle>,
     defaults: DestinationConfig,
     root_options: RootRouteOptions,
     metrics: Arc<ConfigMetrics>,
@@ -109,7 +109,7 @@ impl ConfigReloader {
                 document,
             },
             next_generation: 2,
-            proxies: cfg.proxies,
+            workers: cfg.workers,
             defaults: cfg.defaults,
             root_options: cfg.root_options,
             metrics: cfg.metrics,
@@ -162,7 +162,7 @@ impl ConfigReloader {
             }
             Ok(Outcome::Unchanged) => self.metrics.in_sync(),
             Ok(Outcome::ShuttingDown) => {
-                tracing::debug!("config reload abandoned: proxies are stopping");
+                tracing::debug!("config reload abandoned: workers are stopping");
             }
             Err(Rejected { stage, error }) => {
                 self.metrics.rejected(stage);
@@ -202,13 +202,13 @@ impl ConfigReloader {
         self.next_generation += 1;
         let document = Arc::new(document);
 
-        let mut pending = Vec::with_capacity(self.proxies.len());
-        for proxy in &self.proxies {
-            match proxy
+        let mut pending = Vec::with_capacity(self.workers.len());
+        for worker in &self.workers {
+            match worker
                 .begin_reconfigure(generation, Arc::clone(&document))
                 .await
             {
-                Ok(applied) => pending.push((proxy.id(), applied)),
+                Ok(applied) => pending.push((worker.id(), applied)),
                 Err(_) => return Ok(Outcome::ShuttingDown),
             }
         }
@@ -217,7 +217,7 @@ impl ConfigReloader {
         for (id, applied) in pending {
             match applied.await {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => failed.push(format!("proxy-{id}: {error}")),
+                Ok(Err(error)) => failed.push(format!("worker-{id}: {error}")),
                 Err(_) => return Ok(Outcome::ShuttingDown),
             }
         }
@@ -239,7 +239,7 @@ impl ConfigReloader {
 mod tests {
     use std::sync::Mutex;
 
-    use rusty_mcrouter_proxy::ProxyCommand;
+    use rusty_mcrouter_worker::WorkerCommand;
 
     use super::*;
 
@@ -254,7 +254,7 @@ mod tests {
     }
 
     impl Fixture {
-        fn new(name: &str, proxies: usize) -> Self {
+        fn new(name: &str, workers: usize) -> Self {
             let path = std::env::temp_dir().join(format!(
                 "rusty-mcrouter-reload-{}-{name}.json",
                 std::process::id()
@@ -264,8 +264,8 @@ mod tests {
             let document = parse_config(&bytes).unwrap();
             let metrics = ConfigMetrics::started(1);
             let applied = Arc::new(Mutex::new(Vec::new()));
-            let handles = (0..proxies)
-                .map(|id| fake_proxy(id, Arc::clone(&applied)))
+            let handles = (0..workers)
+                .map(|id| fake_worker(id, Arc::clone(&applied)))
                 .collect();
 
             let reloader = ConfigReloader::new(ReloaderSetup {
@@ -275,7 +275,7 @@ mod tests {
                     bytes,
                     document: Arc::new(document),
                 },
-                proxies: handles,
+                workers: handles,
                 defaults: DestinationConfig::default(),
                 root_options: RootRouteOptions::default(),
                 metrics: Arc::clone(&metrics),
@@ -315,12 +315,12 @@ mod tests {
         }
     }
 
-    fn fake_proxy(id: usize, applied: Arc<Mutex<Vec<(usize, u64)>>>) -> ProxyHandle {
-        let (handle, inbox) = ProxyHandle::allocate(id);
+    fn fake_worker(id: usize, applied: Arc<Mutex<Vec<(usize, u64)>>>) -> WorkerHandle {
+        let (handle, inbox) = WorkerHandle::allocate(id);
         let mut commands = inbox.command_rx;
         tokio::spawn(async move {
             while let Some(command) = commands.recv().await {
-                if let ProxyCommand::Reconfigure {
+                if let WorkerCommand::Reconfigure {
                     generation,
                     applied: ack,
                     ..
@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn applies_a_changed_file_to_every_proxy() {
+    async fn applies_a_changed_file_to_every_worker() {
         let mut fixture = Fixture::new("applies", 2);
 
         fixture.write(V2);
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unbuildable_config_is_rejected_before_any_proxy_sees_it() {
+    async fn unbuildable_config_is_rejected_before_any_worker_sees_it() {
         let mut fixture = Fixture::new("unbuildable", 1);
 
         // plural routes without the default /././ prefix

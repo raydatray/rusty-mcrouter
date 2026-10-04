@@ -1,7 +1,7 @@
 # rusty-mcrouter threading model (architecture)
 
 > Historical MVP snapshot. The current tree owns client connections in
-> `crates/frontend`, routes every request through a `ProxyRuntime` mailbox,
+> `crates/frontend`, routes every request through a `WorkerRuntime` mailbox,
 > owns OS-thread lifecycle through thread owners in the binary, and hosts
 > observability under `ControlRuntime`. See
 > [`../../architecture/README.md`](../../architecture/README.md) for the current

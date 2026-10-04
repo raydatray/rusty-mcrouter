@@ -14,7 +14,7 @@ use rusty_mcrouter_core::{
 };
 use rusty_mcrouter_frontend::FrontendMetricsShard;
 use rusty_mcrouter_protocol::RequestKind;
-use rusty_mcrouter_proxy::ProxyShards;
+use rusty_mcrouter_worker::WorkerShards;
 
 use crate::metrics::{ControlMetrics, MetricsRegistry, MetricsSource, MetricsText};
 use crate::shard_source;
@@ -27,7 +27,7 @@ pub struct ProcessMetadata {
 
 pub struct ScrapeInputs {
     pub metadata: ProcessMetadata,
-    pub proxies: Vec<ProxyShards>,
+    pub workers: Vec<WorkerShards>,
     pub tko_map: Arc<TkoTrackerMap>,
     pub destinations: Arc<DestinationMetricsRegistry>,
     pub control: Arc<ControlMetrics>,
@@ -37,17 +37,17 @@ pub struct ScrapeInputs {
 impl ScrapeInputs {
     pub fn into_registry(self) -> MetricsRegistry {
         let backend: Vec<_> = self
-            .proxies
+            .workers
             .iter()
             .map(|p| Arc::clone(&p.backend))
             .collect();
         let frontend: Vec<_> = self
-            .proxies
+            .workers
             .iter()
             .map(|p| Arc::clone(&p.frontend))
             .collect();
         let routing: Vec<_> = self
-            .proxies
+            .workers
             .iter()
             .map(|p| Arc::clone(&p.routing))
             .collect();
@@ -585,14 +585,14 @@ mod tests {
 
     #[test]
     fn scrape_inputs_assemble_every_source_in_order() {
-        let proxies = vec![ProxyShards::new(), ProxyShards::new()];
-        // a live generation on proxy 0 is what makes its pools scrapeable
-        let _generation = proxies[0].routing.table_for(&pools_config(&["pool_a"]));
-        proxies[0]
+        let workers = vec![WorkerShards::new(), WorkerShards::new()];
+        // a live generation on worker 0 is what makes its pools scrapeable
+        let _generation = workers[0].routing.table_for(&pools_config(&["pool_a"]));
+        workers[0]
             .backend
             .record_result(RequestKind::Get, ResultCode::Success);
-        proxies[1].frontend.failed.inc();
-        proxies[1].routing.dev_null_requests.inc();
+        workers[1].frontend.failed.inc();
+        workers[1].routing.dev_null_requests.inc();
         let control = Arc::new(ControlMetrics::default());
         control.events_dropped.inc();
 
@@ -601,7 +601,7 @@ mod tests {
                 start_unix_secs: 1_700_000_000,
                 num_proxies: 2,
             },
-            proxies,
+            workers,
             tko_map: TkoTrackerMap::new(noop_sink()),
             destinations: DestinationMetricsRegistry::new(),
             control,

@@ -21,7 +21,7 @@ the reloader is constructed with the control thread, which starts before the
 proxy fleet. polling begins only after every proxy is ready, keeping metrics
 and event handling available throughout worker startup.
 
-the app supplies the control inbox and proxy handles through setup values.
+the app supplies the control inbox and worker handles through setup values.
 worker threads construct their own route graphs using a `GenerationSetup`;
 each build gets a fresh backend factory over the worker's persistent destination
 map. the control reloader owns reload logging and metric updates, including the
@@ -43,7 +43,7 @@ a half-written file.
 sequenceDiagram
     participant F as config file
     participant R as ConfigReloader (control thread)
-    participant P as each proxy thread
+    participant P as each worker thread
 
     R->>F: read every delay
     Note over R: bytes changed -> wait one more delay -> re-read
@@ -62,11 +62,11 @@ sequenceDiagram
    editor shuffles settle first.
 2. **validate.** the new config is parsed, then built with inert backends
    that open no connections and touch no shared state. a config that fails
-   either step never reaches a proxy.
-3. **apply.** every proxy receives the new config on its command channel,
+   either step never reaches a worker.
+3. **apply.** every worker receives the new config on its command channel,
    which is prioritized ahead of requests. each builds its own route graph,
    because graphs are thread-local, then swaps it in.
-4. **finish.** the proxy pins a request's graph when it receives the request
+4. **finish.** the worker pins a request's graph when it receives the request
    from its mailbox. a request already executing keeps that graph; subsequent
    requests on an open client connection use the graph current when received.
    the old graph is dropped when its last request finishes.
@@ -103,7 +103,7 @@ config`. a removed pool's series leave `/metrics` at the same point.
 | file missing or unreadable | running config kept, reported once per state change | `read` |
 | invalid JSON or schema | running config kept | `parse` |
 | unbuildable, e.g. `--route-prefix` missing from `routes` | running config kept | `validate` |
-| a proxy fails to build a validated config | that proxy keeps its old graph | `apply` |
+| a worker fails to build a validated config | that worker keeps its old graph | `apply` |
 
 a failed attempt is not sticky: the next change to the file is attempted
 again. restoring the running config's content returns the router to in sync.
@@ -133,7 +133,7 @@ rusty_mcrouter_config_last_reload_successful == 0
   not change while the pool keeps its name.
 - a server that is TKO'd while it moves to a different gated pool is unmarked
   against the wrong gate. upstream mcrouter behaves the same.
-- proxies switch one after another, so for a moment they can run different
+- workers switch one after another, so for a moment they can run different
   generations.
 
 design and upstream comparison:

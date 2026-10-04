@@ -15,7 +15,7 @@ rusty-mcrouter-config.workspace = true
 rusty-mcrouter-core.workspace = true
 rusty-mcrouter-observability.workspace = true
 rusty-mcrouter-observability-primitives.workspace = true
-rusty-mcrouter-proxy.workspace = true
+rusty-mcrouter-worker.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "macros", "time"] }
 tracing.workspace = true
 

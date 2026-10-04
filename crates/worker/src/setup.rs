@@ -9,14 +9,14 @@ use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::{RootRouteOptions, RoutingEventSink, RoutingMetricsShard};
 use rusty_mcrouter_frontend::{FrontendConnectionOptions, FrontendMetricsShard, ListenerConfig};
 
-use crate::{ProxyInbox, ProxySet, ThreadMode, WorkerEventSink};
+use crate::{ThreadMode, WorkerEventSink, WorkerInbox, WorkerSet};
 
-pub struct ProxyThreadSetup {
-    pub proxy_id: usize,
-    pub inbox: ProxyInbox,
-    pub shards: ProxyShards,
-    pub shared: Arc<ProxyShared>,
-    pub proxies: ProxySet,
+pub struct WorkerSetup {
+    pub worker_id: usize,
+    pub inbox: WorkerInbox,
+    pub shards: WorkerShards,
+    pub shared: Arc<WorkerShared>,
+    pub workers: WorkerSet,
     pub listener: Option<ListenerConfig>,
     pub routing_events: RoutingEventSink,
     /// Worker lifecycle events are emitted through a leaf-owned sink.
@@ -24,13 +24,13 @@ pub struct ProxyThreadSetup {
 }
 
 #[derive(Clone)]
-pub struct ProxyShards {
+pub struct WorkerShards {
     pub backend: Arc<BackendMetricsShard>,
     pub frontend: Arc<FrontendMetricsShard>,
     pub routing: Arc<RoutingMetricsShard>,
 }
 
-impl ProxyShards {
+impl WorkerShards {
     pub fn new() -> Self {
         Self {
             backend: BackendMetricsShard::new(),
@@ -40,13 +40,13 @@ impl ProxyShards {
     }
 }
 
-impl Default for ProxyShards {
+impl Default for WorkerShards {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub struct ProxyShared {
+pub struct WorkerShared {
     pub tokens: Arc<DestTokenAllocator>,
     pub config: Arc<ConfigDocument>,
     /// Cross-thread health: same-server destinations on different threads

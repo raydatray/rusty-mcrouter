@@ -1,4 +1,4 @@
-use crate::ProxyHandle;
+use crate::WorkerHandle;
 
 /// Worker placement for a connection's request mailbox. All requests use the
 /// mailbox, including requests served by the connection's own worker.
@@ -8,35 +8,35 @@ pub enum ThreadMode {
     // todo - thread modes: constructed once dispatch policy is configurable
     #[allow(dead_code)]
     FixedRemote {
-        proxy_id: usize,
+        worker_id: usize,
     },
     #[allow(dead_code)]
     AffinitizedRemote,
 }
 
 #[derive(Clone)]
-pub struct ProxySet {
-    proxies: Vec<ProxyHandle>,
+pub struct WorkerSet {
+    workers: Vec<WorkerHandle>,
 }
 
-impl ProxySet {
-    pub fn new(proxies: Vec<ProxyHandle>) -> Self {
-        assert!(!proxies.is_empty(), "proxyset empty");
+impl WorkerSet {
+    pub fn new(workers: Vec<WorkerHandle>) -> Self {
+        assert!(!workers.is_empty(), "workerset empty");
 
-        Self { proxies }
+        Self { workers }
     }
 
-    pub fn choose(&self, mode: ThreadMode, current_id: usize) -> ProxyHandle {
+    pub fn choose(&self, mode: ThreadMode, current_id: usize) -> WorkerHandle {
         let idx = match mode {
             ThreadMode::SameThread => current_id,
-            ThreadMode::FixedRemote { proxy_id } => proxy_id % self.proxies.len(),
+            ThreadMode::FixedRemote { worker_id } => worker_id % self.workers.len(),
             ThreadMode::AffinitizedRemote => current_id, // todo - implement request-based affinity
         };
 
-        self.proxies[idx].clone()
+        self.workers[idx].clone()
     }
 
-    pub fn nth(&self, n: usize) -> &ProxyHandle {
-        &self.proxies[n % self.proxies.len()]
+    pub fn nth(&self, n: usize) -> &WorkerHandle {
+        &self.workers[n % self.workers.len()]
     }
 }

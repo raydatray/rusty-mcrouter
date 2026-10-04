@@ -11,39 +11,39 @@ use tokio::sync::{
 };
 
 use crate::error::Result;
-use crate::{ProxyCommand, ProxyError, RoutedRequest};
+use crate::{RoutedRequest, WorkerCommand, WorkerError};
 
 const WORK_CAPACITY: usize = 1024;
 const REQUEST_CAPACITY: usize = 1024;
 const COMMAND_CAPACITY: usize = 16;
 
-pub struct ProxyInbox {
+pub struct WorkerInbox {
     pub work_rx: Receiver<TcpStream>,
     pub request_rx: Receiver<RoutedRequest>,
-    pub command_rx: Receiver<ProxyCommand>,
+    pub command_rx: Receiver<WorkerCommand>,
 }
 
 #[derive(Clone)]
-pub struct ProxyHandle {
+pub struct WorkerHandle {
     id: usize,
     request_tx: Sender<RoutedRequest>,
-    command_tx: Sender<ProxyCommand>,
+    command_tx: Sender<WorkerCommand>,
     work_tx: Sender<TcpStream>,
 }
 
-impl ProxyHandle {
-    pub fn allocate(id: usize) -> (ProxyHandle, ProxyInbox) {
+impl WorkerHandle {
+    pub fn allocate(id: usize) -> (WorkerHandle, WorkerInbox) {
         let (request_tx, request_rx) = mpsc::channel(REQUEST_CAPACITY);
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (work_tx, work_rx) = mpsc::channel(WORK_CAPACITY);
         (
-            ProxyHandle {
+            WorkerHandle {
                 id,
                 request_tx,
                 command_tx,
                 work_tx,
             },
-            ProxyInbox {
+            WorkerInbox {
                 work_rx,
                 request_rx,
                 command_rx,
@@ -67,22 +67,22 @@ impl ProxyHandle {
         self.work_tx
             .send(stream)
             .await
-            .map_err(|_| ProxyError::WorkerClosed { worker: self.id })
+            .map_err(|_| WorkerError::WorkerClosed { worker: self.id })
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         let (acknowledged, acknowledgement) = oneshot::channel();
         self.command_tx
-            .send(ProxyCommand::Shutdown { acknowledged })
+            .send(WorkerCommand::Shutdown { acknowledged })
             .await
-            .context("proxy command channel closed")?;
+            .context("worker command channel closed")?;
         acknowledgement
             .await
-            .context("proxy exited before acknowledging shutdown")
+            .context("worker exited before acknowledging shutdown")
     }
 
     /// Returns without waiting for the outcome, so a caller can enqueue on
-    /// every proxy before awaiting any of them.
+    /// every worker before awaiting any of them.
     pub async fn begin_reconfigure(
         &self,
         generation: u64,
@@ -90,23 +90,23 @@ impl ProxyHandle {
     ) -> anyhow::Result<oneshot::Receiver<std::result::Result<(), BuildError>>> {
         let (applied, outcome) = oneshot::channel();
         self.command_tx
-            .send(ProxyCommand::Reconfigure {
+            .send(WorkerCommand::Reconfigure {
                 generation,
                 config,
                 applied,
             })
             .await
-            .context("proxy command channel closed")?;
+            .context("worker command channel closed")?;
         Ok(outcome)
     }
 
     pub fn shutdown_blocking(&self) -> anyhow::Result<()> {
         let (acknowledged, acknowledgement) = oneshot::channel();
         self.command_tx
-            .blocking_send(ProxyCommand::Shutdown { acknowledged })
-            .context("proxy command channel closed")?;
+            .blocking_send(WorkerCommand::Shutdown { acknowledged })
+            .context("worker command channel closed")?;
         acknowledgement
             .blocking_recv()
-            .context("proxy exited before acknowledging shutdown")
+            .context("worker exited before acknowledging shutdown")
     }
 }

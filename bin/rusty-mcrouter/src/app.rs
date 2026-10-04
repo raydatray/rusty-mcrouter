@@ -10,7 +10,7 @@ use rusty_mcrouter_control::{
 use rusty_mcrouter_observability::{
     channel, logging, ControlMetrics, ProcessMetadata, ScrapeInputs,
 };
-use rusty_mcrouter_proxy::{ProxyHandle, ProxyShards, ProxyShared, ThreadMode};
+use rusty_mcrouter_worker::{ThreadMode, WorkerHandle, WorkerShards, WorkerShared};
 
 use crate::args::Args;
 use crate::config;
@@ -45,10 +45,10 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let tko_map = TkoTrackerMap::new(events.sink());
     let tokens = Arc::new(DestTokenAllocator::new());
     let destinations = DestinationMetricsRegistry::new();
-    let (workers, proxy_handles, proxy_shards): (Vec<_>, Vec<_>, Vec<_>) = (0..args.num_proxies)
+    let (workers, worker_handles, worker_shards): (Vec<_>, Vec<_>, Vec<_>) = (0..args.num_proxies)
         .map(|id| {
-            let (handle, inbox) = ProxyHandle::allocate(id);
-            let shards = ProxyShards::new();
+            let (handle, inbox) = WorkerHandle::allocate(id);
+            let shards = WorkerShards::new();
             let worker = ProxyWorkerResources {
                 handle: handle.clone(),
                 inbox,
@@ -60,7 +60,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
 
     let (config_bytes, config) = config::load(&args.config)?;
     let config = Arc::new(config);
-    let shared = Arc::new(ProxyShared {
+    let shared = Arc::new(WorkerShared {
         tokens,
         config: Arc::clone(&config),
         tko_map,
@@ -85,7 +85,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
 
     let registry = ScrapeInputs {
         metadata,
-        proxies: proxy_shards,
+        workers: worker_shards,
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
         control: Arc::clone(&control_metrics),
@@ -103,7 +103,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
                 bytes: config_bytes,
                 document: config,
             },
-            proxies: proxy_handles,
+            workers: worker_handles,
             defaults: args.destination_defaults(),
             root_options: args.root_route_options(),
             metrics: Arc::clone(&config_metrics),

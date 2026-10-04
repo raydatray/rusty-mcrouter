@@ -115,19 +115,19 @@ impl EventConsumer {
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_proxy::{WorkerEvent, WorkerEventRecord};
+    use rusty_mcrouter_worker::{WorkerEvent, WorkerEventRecord};
 
     use super::*;
 
-    fn worker_record(proxy_id: usize) -> WorkerEventRecord {
+    fn worker_record(worker_id: usize) -> WorkerEventRecord {
         WorkerEventRecord {
-            proxy_id,
+            worker_id,
             event: WorkerEvent::Started,
         }
     }
 
-    fn worker_event(proxy_id: usize) -> Event {
-        Event::Worker(worker_record(proxy_id))
+    fn worker_event(worker_id: usize) -> Event {
+        Event::Worker(worker_record(worker_id))
     }
 
     fn test_channel(capacity: usize) -> (EventSender, EventConsumer, Arc<ControlMetrics>) {
@@ -158,7 +158,7 @@ mod tests {
         drop(tx);
         let mut seen = Vec::new();
         while let Some(Event::Worker(w)) = consumer.rx.recv().await {
-            seen.push(w.proxy_id);
+            seen.push(w.worker_id);
         }
         assert_eq!(seen, vec![0, 1, 2, 3]);
     }
@@ -178,7 +178,7 @@ mod tests {
         let event = consumer.rx.try_recv().expect("event emitted from Drop");
         assert!(matches!(
             event,
-            Event::Worker(WorkerEventRecord { proxy_id: 99, .. })
+            Event::Worker(WorkerEventRecord { worker_id: 99, .. })
         ));
     }
 

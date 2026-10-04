@@ -1,5 +1,5 @@
 [package]
-name = "rusty-mcrouter-proxy"
+name = "rusty-mcrouter-worker"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

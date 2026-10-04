@@ -6,12 +6,12 @@ use rusty_mcrouter_core::BuildError;
 use rusty_mcrouter_frontend::{Connection, FrontendConnectionSetup};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::context::ProxyContext;
+use crate::context::WorkerContext;
 use crate::generation::GenerationBuilder;
 use crate::routing::route_request;
-use crate::{ProxyCommand, ProxyInbox, RoutedRequest};
+use crate::{RoutedRequest, WorkerCommand, WorkerInbox};
 
-/// Long-lived tasks the runtime supervises; either one exiting stops the proxy.
+/// Long-lived tasks the runtime supervises; either one exiting stops the worker.
 pub(crate) struct BackgroundTasks {
     pub(crate) listener: Option<JoinHandle<anyhow::Result<()>>>,
     pub(crate) sweep: Option<JoinHandle<()>>,
@@ -28,20 +28,20 @@ impl Drop for BackgroundTasks {
     }
 }
 
-pub(crate) struct ProxyRuntime {
-    context: ProxyContext,
+pub(crate) struct WorkerRuntime {
+    context: WorkerContext,
     builder: GenerationBuilder,
-    inbox: ProxyInbox,
+    inbox: WorkerInbox,
     tasks: BackgroundTasks,
     route_tasks: JoinSet<()>,
     connection_tasks: JoinSet<()>,
 }
 
-impl ProxyRuntime {
+impl WorkerRuntime {
     pub(crate) fn new(
-        context: ProxyContext,
+        context: WorkerContext,
         builder: GenerationBuilder,
-        inbox: ProxyInbox,
+        inbox: WorkerInbox,
         tasks: BackgroundTasks,
     ) -> Self {
         Self {
@@ -61,25 +61,25 @@ impl ProxyRuntime {
 
                 command = self.inbox.command_rx.recv() => {
                     match command {
-                        Some(ProxyCommand::Shutdown { acknowledged }) => {
+                        Some(WorkerCommand::Shutdown { acknowledged }) => {
                             self.shutdown().await;
                             let _ = acknowledged.send(());
                             return Ok(());
                         }
-                        Some(ProxyCommand::Reconfigure { generation, config, applied }) => {
+                        Some(WorkerCommand::Reconfigure { generation, config, applied }) => {
                             let _ = applied.send(self.reconfigure(generation, &config));
                         }
-                        None => anyhow::bail!("proxy command channel closed"),
+                        None => anyhow::bail!("worker command channel closed"),
                     }
                 }
 
                 request = self.inbox.request_rx.recv() => {
-                    let request = request.context("proxy request channel closed")?;
+                    let request = request.context("worker request channel closed")?;
                     self.spawn_request(request);
                 }
 
                 stream = self.inbox.work_rx.recv() => {
-                    let stream = stream.context("proxy work channel closed")?;
+                    let stream = stream.context("worker work channel closed")?;
                     self.spawn_connection(stream);
                 }
 
@@ -190,10 +190,10 @@ mod tests {
 
     use super::*;
     use crate::generation::{GenerationSetup, RouteGeneration};
-    use crate::ProxyHandle;
+    use crate::WorkerHandle;
 
-    fn test_runtime(config: &str) -> (ProxyRuntime, ProxyHandle) {
-        let (handle, inbox) = ProxyHandle::allocate(0);
+    fn test_runtime(config: &str) -> (WorkerRuntime, WorkerHandle) {
+        let (handle, inbox) = WorkerHandle::allocate(0);
         let map = destination::Map::new(destination::DestinationMapSetup {
             tko_map: TkoTrackerMap::new(noop_sink()),
             assembler: destination::DestinationAssembler::new(
@@ -216,17 +216,17 @@ mod tests {
             events: noop_sink(),
         });
         let initial = builder.build(1, &parse(config).unwrap()).unwrap();
-        let context = ProxyContext::solo(handle.clone(), initial, FrontendMetricsShard::new());
+        let context = WorkerContext::solo(handle.clone(), initial, FrontendMetricsShard::new());
         let tasks = BackgroundTasks {
             listener: None,
             sweep: None,
         };
-        let runtime = ProxyRuntime::new(context, builder, inbox, tasks);
+        let runtime = WorkerRuntime::new(context, builder, inbox, tasks);
         (runtime, handle)
     }
 
     async fn reconfigure(
-        handle: &ProxyHandle,
+        handle: &WorkerHandle,
         generation: u64,
         config: &str,
     ) -> Result<(), BuildError> {
@@ -239,7 +239,7 @@ mod tests {
             .unwrap()
     }
 
-    async fn connect(handle: &ProxyHandle) -> tokio::net::TcpStream {
+    async fn connect(handle: &WorkerHandle) -> tokio::net::TcpStream {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
             .await
@@ -391,7 +391,7 @@ mod tests {
             let (mut runtime, _handle) = test_runtime(r#"{"route": "NullRoute"}"#);
             runtime.inbox.work_rx.close();
             let error = runtime.run().await.unwrap_err();
-            assert_eq!(error.to_string(), "proxy work channel closed");
+            assert_eq!(error.to_string(), "worker work channel closed");
         })
         .await;
     }
