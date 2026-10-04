@@ -6,10 +6,10 @@ use std::sync::{
 use std::thread::{Builder, JoinHandle};
 
 use anyhow::Context;
+use rusty_mcrouter_frontend::ListenerConfig;
 use rusty_mcrouter_observability::EventSender;
 use rusty_mcrouter_proxy::{
-    ListenerConfig, ProxyHandle, ProxyInbox, ProxySet, ProxyShards, ProxyShared, ProxyThreadSetup,
-    ProxyWorker,
+    ProxyHandle, ProxyInbox, ProxySet, ProxyShards, ProxyShared, ProxyThreadSetup, ProxyWorker,
 };
 
 use crate::lifecycle::{report_startup, ProcessEvent, Supervisor};

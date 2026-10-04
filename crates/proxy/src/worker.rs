@@ -2,13 +2,13 @@ use std::{net::SocketAddr, rc::Rc, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use rusty_mcrouter_backend::destination;
+use rusty_mcrouter_frontend::{bind_listener, Server};
 
 use crate::context::ProxyContext;
 use crate::generation::{GenerationBuilder, GenerationSetup, RouteSlot};
 use crate::runtime::{BackgroundTasks, ProxyRuntime};
 use crate::{
-    bind_listener, ProxyInbox, ProxySet, ProxyThreadSetup, Server, WorkerEvent, WorkerEventRecord,
-    WorkerEventSink,
+    ProxyInbox, ProxySet, ProxyThreadSetup, WorkerEvent, WorkerEventRecord, WorkerEventSink,
 };
 
 /// Thread-local worker state, constructed inside its owner's Tokio LocalSet.

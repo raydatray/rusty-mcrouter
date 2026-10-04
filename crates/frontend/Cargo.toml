@@ -1,0 +1,20 @@
+[package]
+name = "rusty-mcrouter-frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+rusty-mcrouter-observability-primitives.workspace = true
+rusty-mcrouter-protocol.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync"] }
+
+[dev-dependencies]
+rusty-mcrouter-protocol = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["full"] }

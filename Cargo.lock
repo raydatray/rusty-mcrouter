@@ -428,6 +428,7 @@ dependencies = [
  "rusty-mcrouter-config",
  "rusty-mcrouter-control",
  "rusty-mcrouter-core",
+ "rusty-mcrouter-frontend",
  "rusty-mcrouter-observability",
  "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-protocol",
@@ -489,6 +490,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-mcrouter-frontend"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rusty-mcrouter-observability-primitives",
+ "rusty-mcrouter-protocol",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "rusty-mcrouter-observability"
 version = "0.1.0"
 dependencies = [
@@ -500,6 +512,7 @@ dependencies = [
  "rusty-mcrouter-backend",
  "rusty-mcrouter-config",
  "rusty-mcrouter-core",
+ "rusty-mcrouter-frontend",
  "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-protocol",
  "rusty-mcrouter-proxy",
@@ -532,11 +545,11 @@ dependencies = [
  "rusty-mcrouter-backend",
  "rusty-mcrouter-config",
  "rusty-mcrouter-core",
+ "rusty-mcrouter-frontend",
  "rusty-mcrouter-observability-primitives",
  "rusty-mcrouter-protocol",
  "thiserror",
  "tokio",
- "tracing",
 ]
 
 [[package]]

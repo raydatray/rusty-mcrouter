@@ -5,6 +5,7 @@ members = [
     "crates/config",
     "crates/control",
     "crates/core",
+    "crates/frontend",
     "crates/observability",
     "crates/observability-primitives",
     "crates/protocol",
@@ -33,6 +34,7 @@ rusty-mcrouter-backend = { path = "crates/backend" }
 rusty-mcrouter-config = { path = "crates/config" }
 rusty-mcrouter-control = { path = "crates/control" }
 rusty-mcrouter-core = { path = "crates/core" }
+rusty-mcrouter-frontend = { path = "crates/frontend" }
 rusty-mcrouter-observability = { path = "crates/observability" }
 rusty-mcrouter-observability-primitives = { path = "crates/observability-primitives" }
 rusty-mcrouter-protocol = { path = "crates/protocol" }

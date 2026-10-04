@@ -1,8 +1,4 @@
-use std::{
-    net::{SocketAddr, TcpStream},
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::TcpStream, sync::Arc, time::Duration};
 
 use rusty_mcrouter_backend::{
     destination::{DestinationConfig, DestinationMetricsRegistry},
@@ -11,9 +7,10 @@ use rusty_mcrouter_backend::{
 };
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::{RootRouteOptions, RoutingEventSink, RoutingMetricsShard};
+use rusty_mcrouter_frontend::{FrontendConnectionOptions, FrontendMetricsShard, ListenerConfig};
 use tokio::sync::mpsc::Receiver;
 
-use crate::{FrontendMetricsShard, ProxyCommand, ProxyRequest, ProxySet, WorkerEventSink};
+use crate::{ProxyCommand, ProxyRequest, ProxySet, WorkerEventSink};
 
 pub struct ProxyThreadSetup {
     pub proxy_id: usize,
@@ -75,19 +72,6 @@ pub struct ProxyShared {
     pub connection_options: FrontendConnectionOptions,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct FrontendConnectionOptions {
-    pub read_buf_initial_capacity: usize,
-}
-
-impl Default for FrontendConnectionOptions {
-    fn default() -> Self {
-        Self {
-            read_buf_initial_capacity: 4096,
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub enum ThreadMode {
     SameThread,
@@ -98,9 +82,4 @@ pub enum ThreadMode {
     },
     #[allow(dead_code)]
     AffinitizedRemote,
-}
-
-pub struct ListenerConfig {
-    pub listen_addr: SocketAddr,
-    pub use_reuseport: bool,
 }

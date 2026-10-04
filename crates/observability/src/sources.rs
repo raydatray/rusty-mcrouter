@@ -12,8 +12,9 @@ use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_core::{
     FailoverErrorClass, FailoverPolicyKind, PoolMetrics, RoutingMetricsShard,
 };
+use rusty_mcrouter_frontend::FrontendMetricsShard;
 use rusty_mcrouter_protocol::RequestKind;
-use rusty_mcrouter_proxy::{FrontendMetricsShard, ProxyShards};
+use rusty_mcrouter_proxy::ProxyShards;
 
 use crate::metrics::{ControlMetrics, MetricsRegistry, MetricsSource, MetricsText};
 use crate::shard_source;
