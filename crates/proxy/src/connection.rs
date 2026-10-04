@@ -116,7 +116,6 @@ impl Connection {
                         self.input_closed = true;
                         // A partial frame at EOF has no valid answer; drain
                         // whatever is already in flight, then close.
-                        // todo - logger for decode_eof violations
                         let _ = self.decoder.decode_eof(&self.buf);
                     }
                 }

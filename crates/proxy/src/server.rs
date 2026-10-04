@@ -47,15 +47,14 @@ impl Server {
         loop {
             let (tokio_stream, _) = match self.listener.accept().await {
                 Ok(pair) => pair,
-                Err(e) if is_transient_accept_error(&e) => {
-                    // todo - logger
-                    eprintln!("transient accept error, continuing: {e}");
-                    continue;
-                }
+                Err(e) if is_transient_accept_error(&e) => continue,
                 Err(e) => return Err(e.into()),
             };
 
-            let std_stream = tokio_stream.into_std()?;
+            let std_stream = match tokio_stream.into_std() {
+                Ok(stream) => stream,
+                Err(_) => continue,
+            };
 
             // todo - thread modes, accepted sockets are round-robin today; per-request affinity belongs behind a proxy message queue
             proxies.nth(next).send_connection(std_stream).await?;
