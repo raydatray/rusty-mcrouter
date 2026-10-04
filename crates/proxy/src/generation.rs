@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{rc::Rc, sync::Arc};
 
 use rusty_mcrouter_backend::destination::{self, DestinationConfig};
 use rusty_mcrouter_backend::DestinationFactory;
@@ -12,23 +12,6 @@ pub(crate) struct RouteGeneration {
     pub(crate) generation: u64,
     pub(crate) route: Rc<dyn DynRoute>,
     pub(crate) state: Rc<RoutingState>,
-}
-
-/// Borrowed only to clone or replace, never across an `.await`.
-pub(crate) struct RouteSlot(RefCell<Rc<RouteGeneration>>);
-
-impl RouteSlot {
-    pub(crate) fn new(initial: Rc<RouteGeneration>) -> Rc<Self> {
-        Rc::new(Self(RefCell::new(initial)))
-    }
-
-    pub(crate) fn current(&self) -> Rc<RouteGeneration> {
-        Rc::clone(&self.0.borrow())
-    }
-
-    pub(crate) fn replace(&self, next: Rc<RouteGeneration>) -> Rc<RouteGeneration> {
-        self.0.replace(next)
-    }
 }
 
 pub(crate) struct GenerationSetup {

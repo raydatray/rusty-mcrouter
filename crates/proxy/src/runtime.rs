@@ -1,4 +1,4 @@
-use std::{net::TcpStream, sync::Arc};
+use std::{net::TcpStream, rc::Rc, sync::Arc};
 
 use anyhow::Context;
 use rusty_mcrouter_config::ConfigDocument;
@@ -104,16 +104,16 @@ impl ProxyRuntime {
 
     fn reconfigure(&mut self, generation: u64, config: &ConfigDocument) -> Result<(), BuildError> {
         debug_assert!(
-            generation > self.context.routes.current().generation,
+            generation > self.context.routes.generation,
             "generations only move forward"
         );
         let next = self.builder.build(generation, config)?;
-        drop(self.context.routes.replace(next));
+        self.context.routes = next;
         Ok(())
     }
 
     fn spawn_request(&mut self, request: ProxyRequest) {
-        let generation = self.context.routes.current();
+        let generation = Rc::clone(&self.context.routes);
         self.route_tasks.spawn_local(async move {
             let reply = route_request(&generation, request.request).await;
             let _ = request.reply_tx.send(reply);
@@ -189,7 +189,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::generation::{GenerationSetup, RouteGeneration, RouteSlot};
+    use crate::generation::{GenerationSetup, RouteGeneration};
     use crate::ProxyHandle;
 
     fn test_runtime(config: &str) -> (ProxyRuntime, ProxyHandle) {
@@ -216,11 +216,7 @@ mod tests {
             events: noop_sink(),
         });
         let initial = builder.build(1, &parse(config).unwrap()).unwrap();
-        let context = ProxyContext::solo(
-            handle.clone(),
-            RouteSlot::new(initial),
-            FrontendMetricsShard::new(),
-        );
+        let context = ProxyContext::solo(handle.clone(), initial, FrontendMetricsShard::new());
         let tasks = BackgroundTasks {
             listener: None,
             sweep: None,
@@ -323,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn frontend_mailbox_requests_finish_pool_metrics() {
         run_local(async {
-            let (runtime, handle) = test_runtime(r#"{"route": "NullRoute"}"#);
+            let (mut runtime, handle) = test_runtime(r#"{"route": "NullRoute"}"#);
             let config = parse(
                 r#"{"pools": {"pool": {"servers": ["unused:1"]}}, "route": "PoolRoute|pool"}"#,
             )
@@ -336,11 +332,11 @@ mod tests {
             .unwrap();
             let state =
                 RoutingState::new(RoutingMetricsShard::new(), Rc::new(noop_sink()), &config);
-            runtime.context.routes.replace(Rc::new(RouteGeneration {
+            runtime.context.routes = Rc::new(RouteGeneration {
                 generation: 1,
                 route,
                 state: Rc::clone(&state),
-            }));
+            });
             let metrics = Arc::clone(&runtime.context.metrics);
             let task = tokio::task::spawn_local(runtime.run());
             let mut client = connect(&handle).await;
