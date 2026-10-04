@@ -15,8 +15,9 @@ use crate::meta::request_decoder::{
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
 };
+use crate::meta::write::{self, write_bare_flag};
 use crate::meta::{
-    wire, DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
+    DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
     MetaReplyEncodeError, MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError,
     MetaRequestEncodeError,
 };
@@ -102,7 +103,7 @@ pub fn encode_request(
     let key_is_base64 = write_backend_key(out, &request.key)?;
 
     if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
+        write_bare_flag(out, b'b');
     }
     if let Some(cas) = request.compare_cas {
         write_u64_flag(out, b'C', cas);
@@ -114,16 +115,16 @@ pub fn encode_request(
         write_u64_flag(out, b'F', u64::from(flags));
     }
     if request.invalidate {
-        wire::write_bare_flag(out, b'I');
+        write_bare_flag(out, b'I');
     }
     if let Some(ttl) = request.ttl {
         write_i32_flag(out, b'T', ttl);
     }
     if request.remove_value {
-        wire::write_bare_flag(out, b'x');
+        write_bare_flag(out, b'x');
     }
 
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+    write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
     Ok(MetaReplyExpectation::Delete)
 }
 
@@ -171,5 +172,5 @@ pub fn encode_reply(
             }
         }
     }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
+    write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }

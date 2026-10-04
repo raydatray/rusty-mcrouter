@@ -19,8 +19,9 @@ use crate::meta::request_decoder::{
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
 };
+use crate::meta::write::{self, write_bare_flag};
 use crate::meta::{
-    wire, DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
+    DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
     MetaReplyEncodeError, MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError,
     MetaRequestEncodeError,
 };
@@ -152,13 +153,13 @@ pub fn encode_request(
     let key_is_base64 = write_backend_key(out, &request.key)?;
 
     if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
+        write_bare_flag(out, b'b');
     }
     if request.return_value {
-        wire::write_bare_flag(out, b'v');
+        write_bare_flag(out, b'v');
     }
     if request.return_cas {
-        wire::write_bare_flag(out, b'c');
+        write_bare_flag(out, b'c');
     }
     if let Some(cas) = request.compare_cas {
         write_u64_flag(out, b'C', cas);
@@ -179,11 +180,11 @@ pub fn encode_request(
         match instruction {
             ArithmeticTemporalInstruction::Vivify(ttl) => write_i32_flag(out, b'N', *ttl),
             ArithmeticTemporalInstruction::UpdateTtl(ttl) => write_i32_flag(out, b'T', *ttl),
-            ArithmeticTemporalInstruction::ReturnTtl => wire::write_bare_flag(out, b't'),
+            ArithmeticTemporalInstruction::ReturnTtl => write::write_bare_flag(out, b't'),
         }
     }
 
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+    write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
     Ok(MetaReplyExpectation::Arithmetic {
         value: request.return_value,
         cas: request.return_cas,
@@ -292,12 +293,12 @@ pub fn encode_reply(
     let mut value_digits = [0; 20];
     let value_body = result
         .value
-        .map(|value| wire::format_u64(value, &mut value_digits));
+        .map(|value| write::format_u64(value, &mut value_digits));
     let line_start = out.len();
     out.extend_from_slice(code);
     if let Some(value) = value_body {
         out.extend_from_slice(b" ");
-        wire::write_u64(out, value.len() as u64);
+        write::write_u64(out, value.len() as u64);
     }
 
     for token in plan.output_order.iter() {
@@ -317,7 +318,7 @@ pub fn encode_reply(
             }
         }
     }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
+    write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
     if let Some(value) = value_body {
         out.extend_from_slice(value);
         out.extend_from_slice(b"\r\n");

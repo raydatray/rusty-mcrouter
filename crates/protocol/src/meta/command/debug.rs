@@ -11,8 +11,9 @@ use crate::meta::request_decoder::{
     BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
 };
 use crate::meta::request_encoder::{command_line_too_long, write_backend_key};
+use crate::meta::write::{self, write_bare_flag};
 use crate::meta::{
-    wire, DecodedMetaCommand, KeyEncoding, MetaReplyDecodeError, MetaReplyEncodeError,
+    DecodedMetaCommand, KeyEncoding, MetaReplyDecodeError, MetaReplyEncodeError,
     MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError, MetaRequestEncodeError,
 };
 
@@ -64,9 +65,9 @@ pub fn encode_request(
     out.extend_from_slice(b"me ");
     let key_is_base64 = write_backend_key(out, &request.key)?;
     if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
+        write_bare_flag(out, b'b');
     }
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+    write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
 
     Ok(MetaReplyExpectation::Debug {
         key: request.key.clone_without_routing_prefix(),
@@ -139,7 +140,7 @@ pub fn encode_reply(
             write_fields(hit, out)?;
         }
     }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
+    write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn write_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
@@ -158,7 +159,7 @@ fn write_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEn
             out.extend_from_slice(key);
         }
         KeyEncoding::Base64 => {
-            wire::write_base64_key(out, key).map_err(encoded_key_too_long)?;
+            write::write_base64_key(out, key).map_err(encoded_key_too_long)?;
         }
     }
     Ok(())

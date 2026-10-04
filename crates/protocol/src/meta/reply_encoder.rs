@@ -4,7 +4,8 @@ use thiserror::Error;
 use crate::key::MAX_KEY_BYTES;
 use crate::meta::reply_decoder::MAX_REPLY_LINE_BYTES;
 use crate::meta::request_decoder::MAX_OPAQUE_BYTES;
-use crate::meta::{command, wire, KeyEncoding, MetaQuietPolicy, MetaReplyPlan};
+use crate::meta::write::{self, write_bare_flag, write_i64, write_u64};
+use crate::meta::{command, KeyEncoding, MetaQuietPolicy, MetaReplyPlan};
 use crate::reply::{ArithmeticReply, DeleteReply, ErrorReply, GetReply, StoreReply};
 use crate::Reply;
 
@@ -98,7 +99,7 @@ fn encode_error(reply: &ErrorReply, out: &mut BytesMut) -> Result<(), MetaReplyE
             write_error_message(out, message.as_ref())?;
         }
     }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
+    write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
 fn write_error_message(
@@ -124,7 +125,7 @@ pub fn write_opaque(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), Meta
     if opaque.is_empty() || opaque.len() > MAX_OPAQUE_BYTES {
         return Err(MetaReplyEncodeError::InvalidData("invalid opaque token"));
     }
-    wire::write_bare_flag(out, b'O');
+    write_bare_flag(out, b'O');
     out.extend_from_slice(opaque);
     Ok(())
 }
@@ -143,12 +144,12 @@ pub fn write_key_token(
         return Err(MetaReplyEncodeError::InvalidData("empty external key"));
     }
 
-    wire::write_bare_flag(out, b'k');
+    write_bare_flag(out, b'k');
     match plan.key_encoding {
         KeyEncoding::Text => out.extend_from_slice(key),
         KeyEncoding::Base64 => {
-            wire::write_base64_key(out, key).map_err(encoded_key_too_long)?;
-            wire::write_bare_flag(out, b'b');
+            write::write_base64_key(out, key).map_err(encoded_key_too_long)?;
+            write_bare_flag(out, b'b');
         }
     }
     Ok(())
@@ -166,8 +167,8 @@ pub fn write_field(
 ) -> Result<(), MetaReplyEncodeError> {
     match value {
         Some(value) => {
-            wire::write_bare_flag(out, flag);
-            wire::write_u64(out, value);
+            write_bare_flag(out, flag);
+            write_u64(out, value);
             Ok(())
         }
         None if required => Err(MetaReplyEncodeError::MissingField(name)),
@@ -185,8 +186,8 @@ pub fn write_i64_field(
 ) -> Result<(), MetaReplyEncodeError> {
     match value {
         Some(value) => {
-            wire::write_bare_flag(out, flag);
-            wire::write_i64(out, value);
+            write_bare_flag(out, flag);
+            write_i64(out, value);
             Ok(())
         }
         None if required => Err(MetaReplyEncodeError::MissingField(name)),
@@ -194,13 +195,13 @@ pub fn write_i64_field(
     }
 }
 
-pub fn encoded_key_too_long(_: wire::EncodedKeyTooLong) -> MetaReplyEncodeError {
+pub fn encoded_key_too_long(_: write::EncodedKeyTooLong) -> MetaReplyEncodeError {
     MetaReplyEncodeError::EncodedKeyTooLong {
         maximum: MAX_KEY_BYTES,
     }
 }
 
-pub fn reply_line_too_long(error: wire::LineTooLong) -> MetaReplyEncodeError {
+pub fn reply_line_too_long(error: write::LineTooLong) -> MetaReplyEncodeError {
     MetaReplyEncodeError::FrameTooLarge {
         maximum: error.maximum,
     }
