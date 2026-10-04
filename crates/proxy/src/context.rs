@@ -1,9 +1,10 @@
 use std::{rc::Rc, sync::Arc};
 
+use rusty_mcrouter_frontend::{FrontendConnectionOptions, FrontendMetricsShard};
 use tokio::sync::mpsc::Sender;
 
 use crate::generation::RouteSlot;
-use crate::{FrontendConnectionOptions, FrontendMetricsShard, ProxyRequest, ProxySet, ThreadMode};
+use crate::{ProxyRequest, ProxySet, ThreadMode};
 
 /// Worker-local routing state and inputs for constructing frontend connections.
 /// Thread-local; cloning is refcount bumps.

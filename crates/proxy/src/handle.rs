@@ -10,6 +10,7 @@ use tokio::sync::{
     oneshot,
 };
 
+use crate::error::Result;
 use crate::{ProxyCommand, ProxyError, ProxyInbox, ProxyRequest};
 
 const WORK_CAPACITY: usize = 1024;
@@ -49,14 +50,14 @@ impl ProxyHandle {
     }
 
     pub async fn send_request(&self, request: Request) -> Reply {
-        crate::request::send_request(&self.request_tx, request).await
+        rusty_mcrouter_frontend::send_request(&self.request_tx, request).await
     }
 
     pub fn request_sender(&self) -> Sender<ProxyRequest> {
         self.request_tx.clone()
     }
 
-    pub async fn send_connection(&self, stream: TcpStream) -> Result<(), ProxyError> {
+    pub async fn send_connection(&self, stream: TcpStream) -> Result<()> {
         self.work_tx
             .send(stream)
             .await

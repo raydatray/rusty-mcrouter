@@ -15,6 +15,7 @@ rusty-mcrouter-config.workspace = true
 rusty-mcrouter-control.workspace = true
 rusty-mcrouter-backend.workspace = true
 rusty-mcrouter-core.workspace = true
+rusty-mcrouter-frontend.workspace = true
 rusty-mcrouter-observability.workspace = true
 rusty-mcrouter-proxy.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros", "signal"] }

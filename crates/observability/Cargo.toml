@@ -19,6 +19,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 rusty-mcrouter-backend.workspace = true
 rusty-mcrouter-core.workspace = true
+rusty-mcrouter-frontend.workspace = true
 rusty-mcrouter-observability-primitives.workspace = true
 rusty-mcrouter-protocol.workspace = true
 rusty-mcrouter-proxy.workspace = true

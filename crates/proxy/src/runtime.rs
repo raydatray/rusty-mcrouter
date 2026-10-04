@@ -3,9 +3,9 @@ use std::{net::TcpStream, sync::Arc};
 use anyhow::Context;
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::BuildError;
+use rusty_mcrouter_frontend::{Connection, FrontendConnectionSetup};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::connection::{Connection, FrontendConnectionSetup};
 use crate::context::ProxyContext;
 use crate::generation::GenerationBuilder;
 use crate::routing::route_request;
@@ -181,6 +181,7 @@ mod tests {
     use rusty_mcrouter_backend::tko::{DestTokenAllocator, TkoTrackerMap};
     use rusty_mcrouter_config::parse;
     use rusty_mcrouter_core::{build_route, RootRouteOptions, RoutingMetricsShard, RoutingState};
+    use rusty_mcrouter_frontend::FrontendMetricsShard;
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -189,7 +190,7 @@ mod tests {
 
     use super::*;
     use crate::generation::{GenerationSetup, RouteGeneration, RouteSlot};
-    use crate::{FrontendMetricsShard, ProxyHandle};
+    use crate::ProxyHandle;
 
     fn test_runtime(config: &str) -> (ProxyRuntime, ProxyHandle) {
         let (handle, inbox) = ProxyHandle::allocate(0);
