@@ -2,10 +2,8 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use anyhow::Context;
-use bytes::Bytes;
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::BuildError;
-use rusty_mcrouter_protocol::reply::ErrorReply;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::{
     mpsc::{self, Sender},
@@ -52,20 +50,11 @@ impl ProxyHandle {
     }
 
     pub async fn send_request(&self, request: Request) -> Reply {
-        let (reply_tx, reply_rx) = oneshot::channel();
+        crate::request::send_request(&self.request_tx, request).await
+    }
 
-        if self
-            .request_tx
-            .send(ProxyRequest { request, reply_tx })
-            .await
-            .is_err()
-        {
-            return server_error(b"proxy unavailable");
-        }
-
-        reply_rx
-            .await
-            .unwrap_or_else(|_| server_error(b"proxy dropped request"))
+    pub fn request_sender(&self) -> Sender<ProxyRequest> {
+        self.request_tx.clone()
     }
 
     pub async fn send_connection(&self, stream: TcpStream) -> Result<()> {
@@ -114,8 +103,4 @@ impl ProxyHandle {
             .blocking_recv()
             .context("proxy exited before acknowledging shutdown")
     }
-}
-
-fn server_error(message: &'static [u8]) -> Reply {
-    Reply::Error(ErrorReply::Server(Some(Bytes::from_static(message))))
 }

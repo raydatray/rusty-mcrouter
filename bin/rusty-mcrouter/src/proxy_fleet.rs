@@ -188,6 +188,7 @@ fn proxy_thread_main(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
     use std::{cell::Cell, net::TcpListener, time::Duration};
 
     use rusty_mcrouter_backend::{
@@ -195,9 +196,89 @@ mod tests {
         tko::{DestTokenAllocator, TkoTrackerMap},
     };
     use rusty_mcrouter_observability::{channel, ControlMetrics};
+    use rusty_mcrouter_protocol::RequestKind;
     use rusty_mcrouter_proxy::ThreadMode;
 
     use super::*;
+
+    #[test]
+    fn frontend_connection_submits_to_a_remote_worker_thread() {
+        let (events, _consumer) = channel(8, Arc::new(ControlMetrics::default()));
+        let shared = |document: &str| {
+            Arc::new(ProxyShared {
+                tokens: Arc::new(DestTokenAllocator::new()),
+                config: Arc::new(crate::config::parse(document.as_bytes()).unwrap()),
+                tko_map: TkoTrackerMap::new(events.sink()),
+                destinations: DestinationMetricsRegistry::new(),
+                defaults: Default::default(),
+                root_route_options: Default::default(),
+                sweep_interval: Duration::ZERO,
+                thread_mode: ThreadMode::FixedRemote { proxy_id: 1 },
+                connection_options: Default::default(),
+            })
+        };
+        let (local_handle, local_inbox) = ProxyHandle::allocate(0);
+        let (remote_handle, remote_inbox) = ProxyHandle::allocate(1);
+        let proxies = ProxySet::new(vec![local_handle.clone(), remote_handle.clone()]);
+        let local_shards = ProxyShards::new();
+        let remote_shards = ProxyShards::new();
+        let supervisor = Supervisor::new();
+
+        let (local, address) = ProxyThreadOwner::spawn(
+            local_handle,
+            ProxyThreadSetup {
+                proxy_id: 0,
+                inbox: local_inbox,
+                shards: local_shards.clone(),
+                shared: shared(r#"{"route": "ErrorRoute|local"}"#),
+                proxies: proxies.clone(),
+                listener: Some(ListenerConfig {
+                    listen_addr: "127.0.0.1:0".parse().unwrap(),
+                    use_reuseport: false,
+                }),
+                routing_events: events.sink(),
+                events: events.sink(),
+            },
+            &supervisor,
+        )
+        .unwrap();
+        let (remote, _) = ProxyThreadOwner::spawn(
+            remote_handle,
+            ProxyThreadSetup {
+                proxy_id: 1,
+                inbox: remote_inbox,
+                shards: remote_shards.clone(),
+                shared: shared(r#"{"route": "ErrorRoute|remote"}"#),
+                proxies,
+                listener: None,
+                routing_events: events.sink(),
+                events: events.sink(),
+            },
+            &supervisor,
+        )
+        .unwrap();
+
+        let mut client = std::net::TcpStream::connect(address.unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client.write_all(b"mg key v\r\n").unwrap();
+        let expected = b"SERVER_ERROR remote\r\n";
+        let mut reply = vec![0u8; expected.len()];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(reply, expected);
+        assert_eq!(
+            local_shards.frontend.requests[RequestKind::Get as usize].load(),
+            1
+        );
+        assert_eq!(
+            remote_shards.frontend.requests[RequestKind::Get as usize].load(),
+            0
+        );
+
+        local.shutdown().unwrap();
+        remote.shutdown().unwrap();
+    }
 
     #[test]
     fn failed_collection_joins_previously_started_proxies() {
