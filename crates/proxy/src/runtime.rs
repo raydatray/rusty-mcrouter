@@ -80,7 +80,7 @@ impl ProxyRuntime {
 
                 stream = self.inbox.work_rx.recv() => {
                     let stream = stream.context("proxy work channel closed")?;
-                    self.spawn_connection(stream)?;
+                    self.spawn_connection(stream);
                 }
 
                 Some(result) = self.route_tasks.join_next(), if !self.route_tasks.is_empty() => {
@@ -120,20 +120,19 @@ impl ProxyRuntime {
         });
     }
 
-    fn spawn_connection(&mut self, stream: TcpStream) -> anyhow::Result<()> {
-        let stream = tokio::net::TcpStream::from_std(stream)
-            .context("could not register accepted stream on proxy runtime")?;
+    fn spawn_connection(&mut self, stream: TcpStream) {
+        let stream = match tokio::net::TcpStream::from_std(stream) {
+            Ok(stream) => stream,
+            Err(_) => return,
+        };
         let connection = Connection::new(FrontendConnectionSetup {
             stream,
             context: self.context.clone(),
             options: self.context.connection_options,
         });
         self.connection_tasks.spawn_local(async move {
-            if let Err(error) = connection.run().await {
-                tracing::warn!(%error, "connection failed");
-            }
+            let _ = connection.run().await;
         });
-        Ok(())
     }
 
     async fn shutdown(&mut self) {
@@ -180,6 +179,8 @@ mod tests {
     use rusty_mcrouter_core::{RootRouteOptions, RoutingMetricsShard};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::test_support::{get, get_miss, server_error};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::timeout;
 
     use super::*;
     use crate::generation::{GenerationSetup, RouteSlot};
@@ -234,6 +235,55 @@ mod tests {
             .unwrap()
             .await
             .unwrap()
+    }
+
+    async fn connect(handle: &ProxyHandle) -> tokio::net::TcpStream {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        handle
+            .send_connection(stream.into_std().unwrap())
+            .await
+            .unwrap();
+        client
+    }
+
+    #[tokio::test]
+    async fn fatal_client_frame_closes_only_that_connection() {
+        run_local(async {
+            let (runtime, handle) = test_runtime(r#"{"route": "NullRoute"}"#);
+            let task = tokio::task::spawn_local(runtime.run());
+            let mut client = connect(&handle).await;
+            client.write_all(&vec![b'x'; 32 * 1024 + 1]).await.unwrap();
+            let mut replies = Vec::new();
+            let closed = timeout(Duration::from_secs(2), client.read_to_end(&mut replies))
+                .await
+                .unwrap();
+            if let Err(error) = closed {
+                // Closing with unread oversized-frame bytes may reset the
+                // socket instead of producing a clean EOF.
+                assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+            }
+            assert!(replies.is_empty());
+
+            assert_eq!(handle.send_request(get(b"key")).await, get_miss());
+            handle.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unexpected_work_mailbox_closure_stops_the_runtime() {
+        run_local(async {
+            let (mut runtime, _handle) = test_runtime(r#"{"route": "NullRoute"}"#);
+            runtime.inbox.work_rx.close();
+            let error = runtime.run().await.unwrap_err();
+            assert_eq!(error.to_string(), "proxy work channel closed");
+        })
+        .await;
     }
 
     #[tokio::test]
