@@ -1,6 +1,6 @@
 use tokio::sync::oneshot;
 
 pub(crate) enum ControlCommand {
-    ProxiesReady,
+    WorkersReady,
     Shutdown { acknowledged: oneshot::Sender<()> },
 }

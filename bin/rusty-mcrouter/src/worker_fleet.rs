@@ -14,14 +14,14 @@ use rusty_mcrouter_worker::{
 
 use crate::lifecycle::{report_startup, ProcessEvent, Supervisor};
 
-pub struct ProxyWorkerResources {
+pub struct WorkerResources {
     pub handle: WorkerHandle,
     pub inbox: WorkerInbox,
     pub shards: WorkerShards,
 }
 
-pub struct ProxyFleetSetup {
-    pub workers: Vec<ProxyWorkerResources>,
+pub struct WorkerFleetSetup {
+    pub workers: Vec<WorkerResources>,
     pub num_listening_sockets: usize,
     pub listen_addr: SocketAddr,
     pub shared: Arc<WorkerShared>,
@@ -29,30 +29,30 @@ pub struct ProxyFleetSetup {
 }
 
 /// External lifetime owner; its handle is a cleanup capability, not a runtime input.
-pub struct ProxyThreadOwner {
+pub struct WorkerThreadOwner {
     handle: WorkerHandle,
     join: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
-pub struct ProxyFleet {
-    threads: Vec<ProxyThreadOwner>,
+pub struct WorkerFleet {
+    threads: Vec<WorkerThreadOwner>,
     bound_addr: SocketAddr,
 }
 
-impl ProxyThreadOwner {
+impl WorkerThreadOwner {
     pub fn spawn(
         handle: WorkerHandle,
         setup: WorkerSetup,
         supervisor: &Supervisor,
     ) -> anyhow::Result<(Self, Option<SocketAddr>)> {
-        let proxy_id = setup.worker_id;
+        let worker_id = setup.worker_id;
         let (ready_tx, ready_rx) = sync_channel(1);
-        let exit = supervisor.exit_notifier(ProcessEvent::ProxyExited { id: proxy_id });
+        let exit = supervisor.exit_notifier(ProcessEvent::WorkerExited { id: worker_id });
         let join = Builder::new()
-            .name(format!("proxy-{proxy_id}"))
+            .name(format!("worker-{worker_id}"))
             .spawn(move || {
                 let _exit = exit;
-                proxy_thread_main(setup, ready_tx)
+                worker_thread_main(setup, ready_tx)
             })?;
 
         let owner = Self {
@@ -61,7 +61,7 @@ impl ProxyThreadOwner {
         };
         let bound_addr = ready_rx
             .recv()
-            .with_context(|| format!("proxy-{proxy_id} died during startup"))
+            .with_context(|| format!("worker-{worker_id} died during startup"))
             .and_then(|result| result)?;
 
         Ok((owner, bound_addr))
@@ -82,21 +82,21 @@ impl ProxyThreadOwner {
         };
         let joined = join
             .join()
-            .map_err(|_| anyhow::anyhow!("proxy thread panicked"))?;
+            .map_err(|_| anyhow::anyhow!("worker thread panicked"))?;
         shutdown.and(joined)
     }
 }
 
-impl Drop for ProxyThreadOwner {
+impl Drop for WorkerThreadOwner {
     fn drop(&mut self) {
         let _ = self.stop();
     }
 }
 
-impl ProxyFleet {
+impl WorkerFleet {
     /// on failure shuts down what it already started
-    pub fn spawn(setup: ProxyFleetSetup, supervisor: &Supervisor) -> anyhow::Result<Self> {
-        let proxies = WorkerSet::new(
+    pub fn spawn(setup: WorkerFleetSetup, supervisor: &Supervisor) -> anyhow::Result<Self> {
+        let workers = WorkerSet::new(
             setup
                 .workers
                 .iter()
@@ -105,28 +105,28 @@ impl ProxyFleet {
         );
 
         let use_reuseport = setup.num_listening_sockets > 1;
-        let spawn_worker = |(proxy_id, worker): (usize, ProxyWorkerResources)| {
-            let ProxyWorkerResources {
+        let spawn_worker = |(worker_id, worker): (usize, WorkerResources)| {
+            let WorkerResources {
                 handle,
                 inbox,
                 shards,
             } = worker;
-            let listener = (proxy_id < setup.num_listening_sockets).then_some(ListenerConfig {
+            let listener = (worker_id < setup.num_listening_sockets).then_some(ListenerConfig {
                 listen_addr: setup.listen_addr,
                 use_reuseport,
             });
             let thread_cfg = WorkerSetup {
-                worker_id: proxy_id,
+                worker_id,
                 inbox,
                 shards,
                 shared: Arc::clone(&setup.shared),
-                workers: proxies.clone(),
+                workers: workers.clone(),
                 listener,
                 routing_events: setup.events.sink(),
                 events: setup.events.sink(),
             };
 
-            ProxyThreadOwner::spawn(handle, thread_cfg, supervisor)
+            WorkerThreadOwner::spawn(handle, thread_cfg, supervisor)
         };
 
         let (threads, addresses): (Vec<_>, Vec<_>) = setup
@@ -137,13 +137,13 @@ impl ProxyFleet {
             .collect::<anyhow::Result<_>>()?;
 
         // threads keep their own clones; the queues stay open until they exit
-        drop((proxies, setup.events));
+        drop((workers, setup.events));
 
         let bound_addr = addresses
             .into_iter()
             .flatten()
             .next()
-            .context("no proxy thread reported a bound address")?;
+            .context("no worker thread reported a bound address")?;
 
         Ok(Self {
             threads,
@@ -167,7 +167,7 @@ impl ProxyFleet {
     }
 }
 
-fn proxy_thread_main(
+fn worker_thread_main(
     setup: WorkerSetup,
     ready_tx: SyncSender<anyhow::Result<Option<SocketAddr>>>,
 ) -> anyhow::Result<()> {
@@ -175,7 +175,7 @@ fn proxy_thread_main(
         .enable_io()
         .enable_time()
         .build()
-        .context("create proxy executor")
+        .context("create worker executor")
         .and_then(|executor| {
             let local = tokio::task::LocalSet::new();
             let worker = local.block_on(&executor, Worker::build(setup))?;
@@ -219,19 +219,19 @@ mod tests {
         };
         let (local_handle, local_inbox) = WorkerHandle::allocate(0);
         let (remote_handle, remote_inbox) = WorkerHandle::allocate(1);
-        let proxies = WorkerSet::new(vec![local_handle.clone(), remote_handle.clone()]);
+        let workers = WorkerSet::new(vec![local_handle.clone(), remote_handle.clone()]);
         let local_shards = WorkerShards::new();
         let remote_shards = WorkerShards::new();
         let supervisor = Supervisor::new();
 
-        let (local, address) = ProxyThreadOwner::spawn(
+        let (local, address) = WorkerThreadOwner::spawn(
             local_handle,
             WorkerSetup {
                 worker_id: 0,
                 inbox: local_inbox,
                 shards: local_shards.clone(),
                 shared: shared(r#"{"route": "ErrorRoute|local"}"#),
-                workers: proxies.clone(),
+                workers: workers.clone(),
                 listener: Some(ListenerConfig {
                     listen_addr: "127.0.0.1:0".parse().unwrap(),
                     use_reuseport: false,
@@ -242,14 +242,14 @@ mod tests {
             &supervisor,
         )
         .unwrap();
-        let (remote, _) = ProxyThreadOwner::spawn(
+        let (remote, _) = WorkerThreadOwner::spawn(
             remote_handle,
             WorkerSetup {
                 worker_id: 1,
                 inbox: remote_inbox,
                 shards: remote_shards.clone(),
                 shared: shared(r#"{"route": "ErrorRoute|remote"}"#),
-                workers: proxies,
+                workers,
                 listener: None,
                 routing_events: events.sink(),
                 events: events.sink(),
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_collection_joins_previously_started_proxies() {
+    fn failed_collection_joins_previously_started_workers() {
         let (events, _consumer) = channel(8, Arc::new(ControlMetrics::default()));
         let shared = |document: &str| {
             Arc::new(WorkerShared {
@@ -309,16 +309,16 @@ mod tests {
             .zip(inboxes)
             .zip(configurations)
             .enumerate()
-            .map(|(proxy_id, ((handle, inbox), shared))| {
-                ProxyThreadOwner::spawn(
+            .map(|(worker_id, ((handle, inbox), shared))| {
+                WorkerThreadOwner::spawn(
                     handle,
                     WorkerSetup {
-                        worker_id: proxy_id,
+                        worker_id,
                         inbox,
                         shards: WorkerShards::new(),
                         shared,
                         workers: peers.clone(),
-                        listener: (proxy_id == 0).then_some(ListenerConfig {
+                        listener: (worker_id == 0).then_some(ListenerConfig {
                             listen_addr: "127.0.0.1:0".parse().unwrap(),
                             use_reuseport: false,
                         }),
@@ -335,7 +335,7 @@ mod tests {
             })
             .collect::<anyhow::Result<Vec<_>>>();
         assert!(result.is_err());
-        TcpListener::bind(bound.get().expect("first proxy never started"))
-            .expect("failed collection left an earlier proxy listening");
+        TcpListener::bind(bound.get().expect("first worker never started"))
+            .expect("failed collection left an earlier worker listening");
     }
 }

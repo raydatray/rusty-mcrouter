@@ -4,7 +4,7 @@ use anyhow::Context;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 pub enum ProcessEvent {
-    ProxyExited { id: usize },
+    WorkerExited { id: usize },
     ControlExited,
 }
 
@@ -77,14 +77,14 @@ mod tests {
     #[tokio::test]
     async fn exit_notifier_reports_a_panicking_thread() {
         let supervisor = Supervisor::new();
-        let exit = supervisor.exit_notifier(ProcessEvent::ProxyExited { id: 7 });
+        let exit = supervisor.exit_notifier(ProcessEvent::WorkerExited { id: 7 });
         let join = std::thread::spawn(move || {
             let _exit = exit;
             panic!("boom");
         });
         assert!(matches!(
             supervisor.wait().await.unwrap(),
-            ProcessEvent::ProxyExited { id: 7 }
+            ProcessEvent::WorkerExited { id: 7 }
         ));
         assert!(join.join().is_err());
     }

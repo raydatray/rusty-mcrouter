@@ -14,7 +14,7 @@ pub struct ControlRuntime {
     events: EventConsumer,
     metrics: MetricsHttp,
     reloader: Option<ConfigReloader>,
-    proxies_ready: bool,
+    workers_ready: bool,
 }
 
 impl ControlRuntime {
@@ -35,7 +35,7 @@ impl ControlRuntime {
             events: setup.events,
             metrics,
             reloader: setup.reloader,
-            proxies_ready: false,
+            workers_ready: false,
         })
     }
 
@@ -50,7 +50,7 @@ impl ControlRuntime {
 
                 command = self.command_rx.recv() => {
                     match command {
-                        Some(ControlCommand::ProxiesReady) => self.proxies_ready = true,
+                        Some(ControlCommand::WorkersReady) => self.workers_ready = true,
                         Some(ControlCommand::Shutdown { acknowledged }) => {
                             self.shutdown().await;
                             let _ = acknowledged.send(());
@@ -71,7 +71,7 @@ impl ControlRuntime {
 
                 // Only the cancel-safe tick races; an apply runs to completion.
                 _ = tick(&mut self.reloader),
-                    if self.proxies_ready && self.reloader.is_some() => {
+                    if self.workers_ready && self.reloader.is_some() => {
                     self.reloader.as_mut().expect("guarded by is_some").poll().await;
                 }
             }
@@ -103,7 +103,7 @@ mod tests {
     use crate::{ConfigMetrics, ControlHandle, ReloaderSetup, RunningConfig};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn metrics_work_before_proxy_readiness_and_reload_waits_for_it() {
+    async fn metrics_work_before_worker_readiness_and_reload_waits_for_it() {
         let initial = br#"{ "route": "NullRoute" }"#;
         let path = std::env::temp_dir().join(format!(
             "rusty-mcrouter-control-readiness-{}.json",
@@ -156,10 +156,10 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
         assert_eq!(config_metrics.reload_attempts.load(), 0);
         config_metrics.applied(1, 1);
-        handle.proxies_ready().await.unwrap();
+        handle.workers_ready().await.unwrap();
         let command = tokio::time::timeout(Duration::from_secs(5), worker_inbox.command_rx.recv())
             .await
-            .expect("reload did not start after proxies became ready")
+            .expect("reload did not start after workers became ready")
             .unwrap();
         let WorkerCommand::Reconfigure {
             generation,

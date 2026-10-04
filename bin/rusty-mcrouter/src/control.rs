@@ -127,7 +127,7 @@ mod tests {
         let handle = control.handle.clone();
         drop(control);
         TcpListener::bind(bound).expect("control listener survived its thread owner");
-        assert!(handle.proxies_ready_blocking().is_err());
+        assert!(handle.workers_ready_blocking().is_err());
     }
 
     #[test]
