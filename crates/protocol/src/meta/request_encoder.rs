@@ -2,6 +2,7 @@ use bytes::BytesMut;
 use thiserror::Error;
 
 use crate::key::MAX_KEY_BYTES;
+use crate::meta::request_decoder::MAX_COMMAND_LINE_BYTES;
 use crate::meta::write::{self, write_bare_flag, write_i64, write_u64};
 use crate::meta::{command, MetaReplyExpectation};
 use crate::{Key, Request};
@@ -97,9 +98,9 @@ fn encoded_key_too_long(_: write::EncodedKeyTooLong) -> MetaRequestEncodeError {
     }
 }
 
-pub fn command_line_too_long(error: write::LineTooLong) -> MetaRequestEncodeError {
+pub fn command_line_too_long(_: write::LineTooLong) -> MetaRequestEncodeError {
     MetaRequestEncodeError::FrameTooLarge {
-        maximum: error.maximum,
+        maximum: MAX_COMMAND_LINE_BYTES,
     }
 }
 

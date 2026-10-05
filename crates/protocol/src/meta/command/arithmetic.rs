@@ -19,7 +19,7 @@ use crate::meta::request_decoder::{
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
 };
-use crate::meta::write::{self, write_bare_flag};
+use crate::meta::write::{self, write_bare_flag, write_u64};
 use crate::meta::{
     DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
     MetaReplyEncodeError, MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError,
@@ -290,15 +290,15 @@ pub fn encode_reply(
         ));
     }
 
-    let mut value_digits = [0; 20];
-    let value_body = result
-        .value
-        .map(|value| write::format_u64(value, &mut value_digits));
     let line_start = out.len();
     out.extend_from_slice(code);
-    if let Some(value) = value_body {
+
+    if let Some(value) = result.value {
+        // zero has one digit, all other values have floor(log10(value)) + 1.
+        let body_len = value.checked_ilog10().unwrap_or(0) + 1;
+
         out.extend_from_slice(b" ");
-        write::write_u64(out, value.len() as u64);
+        write_u64(out, u64::from(body_len));
     }
 
     for token in plan.output_order.iter() {
@@ -319,8 +319,8 @@ pub fn encode_reply(
         }
     }
     write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
-    if let Some(value) = value_body {
-        out.extend_from_slice(value);
+    if let Some(value) = result.value {
+        write_u64(out, value);
         out.extend_from_slice(b"\r\n");
     }
     Ok(())
