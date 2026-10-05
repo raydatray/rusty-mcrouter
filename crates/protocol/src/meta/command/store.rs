@@ -3,9 +3,7 @@ use bytes::{Bytes, BytesMut};
 use crate::meta::read::{
     flags, parse_i32, parse_u32, parse_u64, require_no_argument, split_tokens, Flag, FlagBudget,
 };
-use crate::meta::reply_decoder::{
-    invalid_flag, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH,
-};
+use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
 use crate::meta::reply_encoder::{reply_line_too_long, write_field, write_key_token, write_opaque};
 use crate::meta::request_decoder::{
     bad_argument, flag_error, parse_opaque, parse_output_flag, recoverable_client_error,
@@ -257,7 +255,7 @@ fn parse_attributes<'a>(
     let mut result = StoreResult::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let Flag { letter, argument } = flag.map_err(invalid_flag)?;
+        let Flag { letter, argument } = flag?;
         match letter {
             b'c' => result.cas = Some(parse_u64(argument)?),
             b's' => result.size = Some(parse_u64(argument)?),

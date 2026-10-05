@@ -16,8 +16,8 @@ pub const MAX_REPLY_VALUE_BYTES: usize = 1024 * 1024;
 pub const INVALID_RESPONSE: &str = "invalid Meta backend response";
 pub const SHAPE_MISMATCH: &str = "Meta backend response does not match request";
 
-/// A stateless decoder: each call frames one complete reply — the line plus,
-/// for an expected `VA`, its value block — and parses it in a single pass.
+/// stateless decoder, each call frames one complete reply and
+/// parses it in one pass
 #[derive(Debug, Default)]
 pub struct MetaReplyDecoder;
 
@@ -42,13 +42,25 @@ impl From<BadNumberError> for MetaReplyDecodeError {
     }
 }
 
+impl From<UnexpectedFlagArgumentError> for MetaReplyDecodeError {
+    fn from(_: UnexpectedFlagArgumentError) -> Self {
+        Self::InvalidResponse(INVALID_RESPONSE)
+    }
+}
+
+impl From<FlagError> for MetaReplyDecodeError {
+    fn from(_: FlagError) -> Self {
+        Self::InvalidResponse(INVALID_RESPONSE)
+    }
+}
+
 impl MetaReplyDecoder {
     pub const fn new() -> Self {
         Self
     }
 
-    /// Decodes at most one complete Meta reply. `Ok(None)` means the reply
-    /// is not fully buffered yet; nothing is consumed until it is.
+    /// decodes at most one complete Meta reply `Ok(None)` means the reply is
+    /// not fully buffered yet, nothing is consumed until the reply is
     pub fn decode(
         &self,
         expectation: &MetaReplyExpectation,
@@ -69,20 +81,24 @@ impl MetaReplyDecoder {
             Some(length) => line_frame_len + length + 2,
             None => line_frame_len,
         };
+        // value has not yet fully buffered, so return nothing
         if src.len() < frame_len {
             return Ok(None);
         }
 
         let frame = src.split_to(frame_len).freeze();
+
         let value = match value_length {
             Some(length) => {
                 if &frame[frame_len - 2..] != b"\r\n" {
                     return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
                 }
+
                 Some(frame.slice(line_frame_len..line_frame_len + length))
             }
             None => None,
         };
+
         parse_line(expectation, &frame[..line_end], value).map(Some)
     }
 
@@ -95,10 +111,8 @@ impl MetaReplyDecoder {
     }
 }
 
-/// Pre-parses the `VA <length>` token so framing can wait for the complete
-/// value block — but only when `expectation` allows a value reply. For
-/// header-only expectations a bogus backend `VA` fails in the command parser
-/// immediately, without waiting for a body that may never arrive.
+/// pre-parses the `VA <length>` token so framing can wait for the complete
+/// value block when `expectation` allows a value reply
 fn expected_value_length(
     expectation: &MetaReplyExpectation,
     line: &[u8],
@@ -115,17 +129,18 @@ fn expected_value_length(
     let raw_length = split_tokens(line)
         .nth(1)
         .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+
     let length = parse_usize(raw_length)?;
     if length > MAX_REPLY_VALUE_BYTES {
         return Err(MetaReplyDecodeError::ValueTooLarge {
             maximum: MAX_REPLY_VALUE_BYTES,
         });
     }
+
     Ok(Some(length))
 }
 
-/// Parses one complete reply: the line and, when framing sized one from the
-/// line's `VA` length token, its value.
+/// parses one complete reply
 fn parse_line(
     expectation: &MetaReplyExpectation,
     line: &[u8],
@@ -134,6 +149,7 @@ fn parse_line(
     if let Some(error) = parse_error_reply(line)? {
         return Ok(Reply::Error(error));
     }
+
     if line.first() == Some(&b' ') {
         return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
     }
@@ -162,6 +178,7 @@ fn parse_error_reply(line: &[u8]) -> Result<Option<ErrorReply>, MetaReplyDecodeE
     if line == b"ERROR" {
         return Ok(Some(ErrorReply::Error));
     }
+
     for (prefix, constructor) in [
         (
             b"CLIENT_ERROR".as_slice(),
@@ -175,26 +192,30 @@ fn parse_error_reply(line: &[u8]) -> Result<Option<ErrorReply>, MetaReplyDecodeE
         if line == prefix {
             return Ok(Some(constructor(None)));
         }
+
         if line.starts_with(prefix) {
             if line.get(prefix.len()) != Some(&b' ') {
                 return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
             }
+
             let message = &line[prefix.len() + 1..];
+
             return Ok(Some(constructor(
                 (!message.is_empty()).then(|| Bytes::copy_from_slice(message)),
             )));
         }
     }
+
     if line.starts_with(b"ERROR") {
         return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
     }
+
     Ok(None)
 }
 
-/// Consumes a `VA` line's length token and yields the value block framing
-/// sized from it. [`expected_value_length`] validated both before the
-/// command parser ran; either missing here means the backend and framing
-/// disagree on the line's shape.
+/// returns the already-extracted body of a `VA` reply
+/// requires both len token and body to be present
+/// the decoder has already validated the len and body framing
 pub fn framed_value(
     length_token: Option<&[u8]>,
     value: Option<Bytes>,
@@ -202,17 +223,8 @@ pub fn framed_value(
     if length_token.is_none() {
         return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
     }
+
     value.ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-}
-
-/// A bare reply flag carried an unexpected argument.
-pub fn invalid_argument(_: UnexpectedFlagArgumentError) -> MetaReplyDecodeError {
-    MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
-}
-
-/// Maps reply flag validation failures to an invalid response.
-pub fn invalid_flag(_: FlagError) -> MetaReplyDecodeError {
-    MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
 }
 
 #[cfg(test)]
