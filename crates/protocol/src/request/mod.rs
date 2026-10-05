@@ -103,6 +103,7 @@ mod tests {
     #[test]
     fn all_covers_the_index_range() {
         assert_eq!(RequestKind::COUNT, 5);
+
         for (index, kind) in RequestKind::ALL.into_iter().enumerate() {
             assert_eq!(kind as usize, index);
         }
