@@ -1,5 +1,3 @@
-//! `mg`: parse/encode for the Meta get command on both proxy hops.
-
 use bytes::{Bytes, BytesMut};
 
 use crate::meta::read::{
@@ -37,6 +35,7 @@ pub fn parse_request<'a>(
     let raw_key = tokens
         .next()
         .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+
     let mut return_value = false;
     let mut return_client_flags = false;
     let mut return_cas = false;
@@ -50,56 +49,67 @@ pub fn parse_request<'a>(
     let mut reply_plan = MetaReplyPlan::default();
     let mut return_key = false;
 
-    // 20 line tokens minus `mg` and the key.
+    // `mg` has max 20 line tokens minus the command and key upstream
     for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 2)) {
         let Flag { letter, argument } = flag.map_err(flag_error)?;
         match letter {
             b'b' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
                 parse_output_flag(argument, MetaOutputToken::Cas, &mut reply_plan)?;
+
                 return_cas = true;
             }
             b'C' => check_cas = Some(parse_u64(argument)?),
             b'f' => {
                 parse_output_flag(argument, MetaOutputToken::ClientFlags, &mut reply_plan)?;
+
                 return_client_flags = true;
             }
             b'h' => {
                 parse_output_flag(argument, MetaOutputToken::HitState, &mut reply_plan)?;
+
                 return_hit_state = true;
             }
             b'k' => {
                 parse_output_flag(argument, MetaOutputToken::Key, &mut reply_plan)?;
+
                 return_key = true;
             }
             b'l' => {
                 parse_output_flag(argument, MetaOutputToken::LastAccess, &mut reply_plan)?;
+
                 return_last_access = true;
             }
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 reply_plan.quiet = MetaQuietPolicy::SuppressMiss;
             }
             b's' => {
                 parse_output_flag(argument, MetaOutputToken::Size, &mut reply_plan)?;
+
                 return_size = true;
             }
             b't' => {
                 parse_output_flag(argument, MetaOutputToken::Ttl, &mut reply_plan)?;
+
                 temporal
                     .push(GetTemporalInstruction::ReturnTtl)
                     .map_err(capacity_error)?;
             }
             b'u' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 no_lru_bump = true;
             }
             b'v' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 return_value = true;
             }
             b'E' => override_cas = Some(parse_u64(argument)?),
@@ -118,6 +128,7 @@ pub fn parse_request<'a>(
     }
 
     let key = resolve_key(raw_key, return_key, &mut reply_plan)?;
+
     Ok(DecodedMetaCommand::Request {
         request: Request::Get(GetRequest {
             key,
@@ -141,39 +152,46 @@ pub fn encode_request(
     out: &mut BytesMut,
 ) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
     let line_start = out.len();
-    out.extend_from_slice(b"mg ");
-    let key_is_base64 = write_backend_key(out, &request.key)?;
 
+    out.extend_from_slice(b"mg ");
+
+    let key_is_base64 = write_backend_key(out, &request.key)?;
     if key_is_base64 {
         write_bare_flag(out, b'b');
     }
 
-    // Direct fields use canonical order. Only the temporal program has
-    // request-order semantics in memcached.
     if request.return_value {
         write_bare_flag(out, b'v');
     }
+
     if request.return_client_flags {
         write_bare_flag(out, b'f');
     }
+
     if request.return_cas {
         write_bare_flag(out, b'c');
     }
+
     if request.return_size {
         write_bare_flag(out, b's');
     }
+
     if request.return_hit_state {
         write_bare_flag(out, b'h');
     }
+
     if request.return_last_access {
         write_bare_flag(out, b'l');
     }
+
     if let Some(cas) = request.check_cas {
         write_u64_flag(out, b'C', cas);
     }
+
     if let Some(cas) = request.override_cas {
         write_u64_flag(out, b'E', cas);
     }
+
     if request.no_lru_bump {
         write_bare_flag(out, b'u');
     }
@@ -188,6 +206,7 @@ pub fn encode_request(
     }
 
     write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+
     Ok(MetaReplyExpectation::Get(
         match (request.return_value, request.check_cas.is_some()) {
             (false, _) => GetSuccessShape::Header,
@@ -208,25 +227,32 @@ pub fn parse_reply(
             if tokens.next().is_some() {
                 return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
             }
+
             Ok(Reply::Get(GetReply::Miss))
         }
         Some(b"HD") => {
             if shape == GetSuccessShape::Value {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
+
             let hit = parse_attributes(tokens)?;
+
             Ok(Reply::Get(GetReply::Hit(hit)))
         }
         Some(b"VA") => {
             if shape == GetSuccessShape::Header {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
+
             let value = framed_value(tokens.next(), value)?;
+
             let mut hit = parse_attributes(tokens)?;
             if hit.size.is_some_and(|size| size != value.len() as u64) {
                 return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
             }
+
             hit.value = Some(value);
+
             Ok(Reply::Get(GetReply::Hit(hit)))
         }
         _ => Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
@@ -236,45 +262,49 @@ pub fn parse_reply(
 fn parse_attributes<'a>(
     tokens: impl Iterator<Item = &'a [u8]>,
 ) -> Result<GetHit, MetaReplyDecodeError> {
-    let mut hit = GetHit::default();
+    let mut result = GetHit::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
         let Flag { letter, argument } = flag.map_err(invalid_flag)?;
         match letter {
-            b'c' => hit.cas = Some(parse_u64(argument)?),
-            b'f' => hit.client_flags = Some(parse_u32(argument)?),
-            b's' => hit.size = Some(parse_u64(argument)?),
-            b't' => hit.ttl = Some(parse_i64(argument)?),
+            b'c' => result.cas = Some(parse_u64(argument)?),
+            b'f' => result.client_flags = Some(parse_u32(argument)?),
+            b's' => result.size = Some(parse_u64(argument)?),
+            b't' => result.ttl = Some(parse_i64(argument)?),
             b'h' => {
-                hit.hit_before = Some(match argument {
+                result.hit_before = Some(match argument {
                     b"0" => false,
                     b"1" => true,
                     _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
                 });
             }
-            b'l' => hit.last_access_seconds = Some(parse_u64(argument)?),
+            b'l' => result.last_access_seconds = Some(parse_u64(argument)?),
             b'W' => {
                 require_no_argument(argument).map_err(invalid_argument)?;
-                if hit.recache != RecacheState::None {
+
+                if result.recache != RecacheState::None {
                     return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
                 }
-                hit.recache = RecacheState::Won;
+
+                result.recache = RecacheState::Won;
             }
             b'Z' => {
                 require_no_argument(argument).map_err(invalid_argument)?;
-                if hit.recache != RecacheState::None {
+
+                if result.recache != RecacheState::None {
                     return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
                 }
-                hit.recache = RecacheState::AlreadyWon;
+
+                result.recache = RecacheState::AlreadyWon;
             }
             b'X' => {
                 require_no_argument(argument).map_err(invalid_argument)?;
-                hit.stale = true;
+                result.stale = true;
             }
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
         }
     }
-    Ok(hit)
+    Ok(result)
 }
 
 pub fn encode_reply(
@@ -290,7 +320,9 @@ pub fn encode_reply(
 
 fn encode_miss(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
     let line_start = out.len();
+
     out.extend_from_slice(b"EN");
+
     for token in plan.output_order.iter() {
         match token {
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
@@ -298,6 +330,7 @@ fn encode_miss(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReply
             _ => {}
         }
     }
+
     write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
 
@@ -307,15 +340,18 @@ fn encode_hit(
     out: &mut BytesMut,
 ) -> Result<(), MetaReplyEncodeError> {
     let line_start = out.len();
+
     if let Some(value) = &hit.value {
         if value.len() > MAX_REPLY_VALUE_BYTES {
             return Err(MetaReplyEncodeError::ValueTooLarge {
                 maximum: MAX_REPLY_VALUE_BYTES,
             });
         }
+
         if hit.size.is_some_and(|size| size != value.len() as u64) {
             return Err(MetaReplyEncodeError::SizeMismatch);
         }
+
         out.extend_from_slice(b"VA ");
         write_u64(out, value.len() as u64);
     } else {
@@ -346,6 +382,7 @@ fn encode_hit(
                 let value = hit
                     .hit_before
                     .ok_or(MetaReplyEncodeError::MissingField("hit state"))?;
+
                 write_bare_flag(out, b'h');
                 out.extend_from_slice(if value { b"1" } else { b"0" });
             }
@@ -360,17 +397,21 @@ fn encode_hit(
     if hit.recache == RecacheState::AlreadyWon {
         write_bare_flag(out, b'Z');
     }
+
     if hit.stale {
         write_bare_flag(out, b'X');
     }
+
     if hit.recache == RecacheState::Won {
         write_bare_flag(out, b'W');
     }
 
     write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
+
     if let Some(value) = &hit.value {
         out.extend_from_slice(value);
         out.extend_from_slice(b"\r\n");
     }
+
     Ok(())
 }
