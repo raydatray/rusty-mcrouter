@@ -6,9 +6,7 @@ use crate::meta::read::{
 use crate::meta::reply_decoder::{
     framed_value, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH,
 };
-use crate::meta::reply_encoder::{
-    reply_line_too_long, write_field, write_i64_field, write_key_token, write_opaque,
-};
+use crate::meta::reply_encoder::{write_field, write_i64_field, write_key_token, write_opaque};
 use crate::meta::request_decoder::{
     bad_argument, capacity_error, flag_error, parse_opaque, parse_output_flag,
     recoverable_client_error, require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG,
@@ -17,7 +15,7 @@ use crate::meta::request_decoder::{
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
 };
-use crate::meta::write::{self, write_bare_flag, write_u64};
+use crate::meta::write::{self, finish_line, write_bare_flag, write_u64};
 use crate::meta::{
     DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
     MetaReplyEncodeError, MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError,
@@ -330,7 +328,7 @@ pub fn encode_reply(
         }
     }
 
-    write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
+    finish_line(out, line_start, MAX_REPLY_LINE_BYTES)?;
 
     if let Some(value) = result.value {
         write_u64(out, value);

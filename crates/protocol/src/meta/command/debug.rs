@@ -3,13 +3,12 @@ use bytes::{Bytes, BytesMut};
 
 use crate::meta::read::{flags, require_no_argument, split_tokens, Flag, FlagBudget};
 use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
-use crate::meta::reply_encoder::{encoded_key_too_long, reply_line_too_long};
 use crate::meta::request_decoder::{
     bad_argument, flag_error, parse_key, recoverable_client_error, require_hint_argument,
     BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
 };
 use crate::meta::request_encoder::{command_line_too_long, write_backend_key};
-use crate::meta::write::{self, write_bare_flag};
+use crate::meta::write::{self, finish_line, write_bare_flag, write_base64_key};
 use crate::meta::{
     DecodedMetaCommand, KeyEncoding, MetaReplyDecodeError, MetaReplyEncodeError,
     MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError, MetaRequestEncodeError,
@@ -152,7 +151,9 @@ pub fn encode_reply(
         }
     }
 
-    write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
+    finish_line(out, line_start, MAX_REPLY_LINE_BYTES)?;
+
+    Ok(())
 }
 
 fn write_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
@@ -173,7 +174,7 @@ fn write_key(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEn
             out.extend_from_slice(key);
         }
         KeyEncoding::Base64 => {
-            write::write_base64_key(out, key).map_err(encoded_key_too_long)?;
+            write_base64_key(out, key)?;
         }
     }
 
