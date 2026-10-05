@@ -5,8 +5,7 @@ use crate::meta::read::{
     FlagBudget,
 };
 use crate::meta::reply_decoder::{
-    framed_value, invalid_argument, invalid_flag, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES,
-    MAX_REPLY_VALUE_BYTES, SHAPE_MISMATCH,
+    framed_value, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES, SHAPE_MISMATCH,
 };
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_field, write_i64_field, write_key_token, write_opaque,
@@ -265,7 +264,7 @@ fn parse_attributes<'a>(
     let mut result = GetHit::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let Flag { letter, argument } = flag.map_err(invalid_flag)?;
+        let Flag { letter, argument } = flag?;
         match letter {
             b'c' => result.cas = Some(parse_u64(argument)?),
             b'f' => result.client_flags = Some(parse_u32(argument)?),
@@ -280,7 +279,7 @@ fn parse_attributes<'a>(
             }
             b'l' => result.last_access_seconds = Some(parse_u64(argument)?),
             b'W' => {
-                require_no_argument(argument).map_err(invalid_argument)?;
+                require_no_argument(argument)?;
 
                 if result.recache != RecacheState::None {
                     return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
@@ -289,7 +288,7 @@ fn parse_attributes<'a>(
                 result.recache = RecacheState::Won;
             }
             b'Z' => {
-                require_no_argument(argument).map_err(invalid_argument)?;
+                require_no_argument(argument)?;
 
                 if result.recache != RecacheState::None {
                     return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
@@ -298,7 +297,7 @@ fn parse_attributes<'a>(
                 result.recache = RecacheState::AlreadyWon;
             }
             b'X' => {
-                require_no_argument(argument).map_err(invalid_argument)?;
+                require_no_argument(argument)?;
                 result.stale = true;
             }
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
