@@ -7,14 +7,14 @@ use crate::meta::read::{
     FlagBudget,
 };
 use crate::meta::reply_decoder::{
-    framed_value, invalid_argument, invalid_flag, invalid_number, INVALID_RESPONSE,
-    MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES, SHAPE_MISMATCH,
+    framed_value, invalid_argument, invalid_flag, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES,
+    MAX_REPLY_VALUE_BYTES, SHAPE_MISMATCH,
 };
 use crate::meta::reply_encoder::{
     reply_line_too_long, write_field, write_i64_field, write_key_token, write_opaque,
 };
 use crate::meta::request_decoder::{
-    bad_argument, bad_number, capacity_error, flag_error, parse_opaque, parse_output_flag,
+    bad_argument, capacity_error, flag_error, parse_opaque, parse_output_flag,
     recoverable_client_error, require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG,
     MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
 };
@@ -62,7 +62,7 @@ pub fn parse_request<'a>(
                 parse_output_flag(argument, MetaOutputToken::Cas, &mut reply_plan)?;
                 return_cas = true;
             }
-            b'C' => check_cas = Some(parse_u64(argument).map_err(bad_number)?),
+            b'C' => check_cas = Some(parse_u64(argument)?),
             b'f' => {
                 parse_output_flag(argument, MetaOutputToken::ClientFlags, &mut reply_plan)?;
                 return_client_flags = true;
@@ -102,21 +102,15 @@ pub fn parse_request<'a>(
                 require_no_argument(argument).map_err(bad_argument)?;
                 return_value = true;
             }
-            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_number)?),
+            b'E' => override_cas = Some(parse_u64(argument)?),
             b'N' => temporal
-                .push(GetTemporalInstruction::Vivify(
-                    parse_i32(argument).map_err(bad_number)?,
-                ))
+                .push(GetTemporalInstruction::Vivify(parse_i32(argument)?))
                 .map_err(capacity_error)?,
             b'R' => temporal
-                .push(GetTemporalInstruction::WinForRecache(
-                    parse_i32(argument).map_err(bad_number)?,
-                ))
+                .push(GetTemporalInstruction::WinForRecache(parse_i32(argument)?))
                 .map_err(capacity_error)?,
             b'T' => temporal
-                .push(GetTemporalInstruction::UpdateTtl(
-                    parse_i32(argument).map_err(bad_number)?,
-                ))
+                .push(GetTemporalInstruction::UpdateTtl(parse_i32(argument)?))
                 .map_err(capacity_error)?,
             b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
@@ -247,10 +241,10 @@ fn parse_attributes<'a>(
     for flag in flags(tokens, FlagBudget::Unlimited) {
         let Flag { letter, argument } = flag.map_err(invalid_flag)?;
         match letter {
-            b'c' => hit.cas = Some(parse_u64(argument).map_err(invalid_number)?),
-            b'f' => hit.client_flags = Some(parse_u32(argument).map_err(invalid_number)?),
-            b's' => hit.size = Some(parse_u64(argument).map_err(invalid_number)?),
-            b't' => hit.ttl = Some(parse_i64(argument).map_err(invalid_number)?),
+            b'c' => hit.cas = Some(parse_u64(argument)?),
+            b'f' => hit.client_flags = Some(parse_u32(argument)?),
+            b's' => hit.size = Some(parse_u64(argument)?),
+            b't' => hit.ttl = Some(parse_i64(argument)?),
             b'h' => {
                 hit.hit_before = Some(match argument {
                     b"0" => false,
@@ -258,7 +252,7 @@ fn parse_attributes<'a>(
                     _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
                 });
             }
-            b'l' => hit.last_access_seconds = Some(parse_u64(argument).map_err(invalid_number)?),
+            b'l' => hit.last_access_seconds = Some(parse_u64(argument)?),
             b'W' => {
                 require_no_argument(argument).map_err(invalid_argument)?;
                 if hit.recache != RecacheState::None {
