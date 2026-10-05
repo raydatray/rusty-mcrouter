@@ -8,9 +8,8 @@ use crate::meta::reply_decoder::{
 };
 use crate::meta::reply_encoder::{write_field, write_i64_field, write_key_token, write_opaque};
 use crate::meta::request_decoder::{
-    bad_argument, capacity_error, flag_error, parse_opaque, parse_output_flag,
-    recoverable_client_error, require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG,
-    MAX_COMMAND_LINE_BYTES,
+    parse_opaque, parse_output_flag, recoverable_client_error, require_hint_argument, resolve_key,
+    BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
@@ -50,10 +49,10 @@ pub fn parse_request<'a>(
 
     // `ma` has no upstream token budget
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let Flag { letter, argument } = flag.map_err(flag_error)?;
+        let Flag { letter, argument } = flag?;
         match letter {
             b'b' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
 
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
@@ -79,32 +78,26 @@ pub fn parse_request<'a>(
                 };
             }
             b'N' => {
-                temporal
-                    .push(ArithmeticTemporalInstruction::Vivify(parse_i32(argument)?))
-                    .map_err(capacity_error)?;
+                temporal.push(ArithmeticTemporalInstruction::Vivify(parse_i32(argument)?))?;
 
                 has_vivify = true;
             }
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
 
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
             b't' => {
                 parse_output_flag(argument, MetaOutputToken::Ttl, &mut reply_plan)?;
 
-                temporal
-                    .push(ArithmeticTemporalInstruction::ReturnTtl)
-                    .map_err(capacity_error)?;
+                temporal.push(ArithmeticTemporalInstruction::ReturnTtl)?;
             }
-            b'T' => temporal
-                .push(ArithmeticTemporalInstruction::UpdateTtl(parse_i32(
-                    argument,
-                )?))
-                .map_err(capacity_error)?,
+            b'T' => temporal.push(ArithmeticTemporalInstruction::UpdateTtl(parse_i32(
+                argument,
+            )?))?,
             b'v' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
 
                 return_value = true;
             }

@@ -9,9 +9,8 @@ use crate::meta::reply_decoder::{
 };
 use crate::meta::reply_encoder::{write_field, write_i64_field, write_key_token, write_opaque};
 use crate::meta::request_decoder::{
-    bad_argument, capacity_error, flag_error, parse_opaque, parse_output_flag,
-    recoverable_client_error, require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG,
-    MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
+    parse_opaque, parse_output_flag, recoverable_client_error, require_hint_argument, resolve_key,
+    BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
@@ -48,10 +47,10 @@ pub fn parse_request<'a>(
 
     // `mg` has max 20 line tokens minus the command and key upstream
     for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 2)) {
-        let Flag { letter, argument } = flag.map_err(flag_error)?;
+        let Flag { letter, argument } = flag?;
         match letter {
             b'b' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
 
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
@@ -83,7 +82,7 @@ pub fn parse_request<'a>(
             }
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
 
                 reply_plan.quiet = MetaQuietPolicy::SuppressMiss;
             }
@@ -95,30 +94,22 @@ pub fn parse_request<'a>(
             b't' => {
                 parse_output_flag(argument, MetaOutputToken::Ttl, &mut reply_plan)?;
 
-                temporal
-                    .push(GetTemporalInstruction::ReturnTtl)
-                    .map_err(capacity_error)?;
+                temporal.push(GetTemporalInstruction::ReturnTtl)?;
             }
             b'u' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
 
                 no_lru_bump = true;
             }
             b'v' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
 
                 return_value = true;
             }
             b'E' => override_cas = Some(parse_u64(argument)?),
-            b'N' => temporal
-                .push(GetTemporalInstruction::Vivify(parse_i32(argument)?))
-                .map_err(capacity_error)?,
-            b'R' => temporal
-                .push(GetTemporalInstruction::WinForRecache(parse_i32(argument)?))
-                .map_err(capacity_error)?,
-            b'T' => temporal
-                .push(GetTemporalInstruction::UpdateTtl(parse_i32(argument)?))
-                .map_err(capacity_error)?,
+            b'N' => temporal.push(GetTemporalInstruction::Vivify(parse_i32(argument)?))?,
+            b'R' => temporal.push(GetTemporalInstruction::WinForRecache(parse_i32(argument)?))?,
+            b'T' => temporal.push(GetTemporalInstruction::UpdateTtl(parse_i32(argument)?))?,
             b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }

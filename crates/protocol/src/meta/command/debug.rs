@@ -4,8 +4,8 @@ use bytes::{Bytes, BytesMut};
 use crate::meta::read::{flags, require_no_argument, split_tokens, Flag, FlagBudget};
 use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
 use crate::meta::request_decoder::{
-    bad_argument, flag_error, parse_key, recoverable_client_error, require_hint_argument,
-    BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
+    parse_key, recoverable_client_error, require_hint_argument, BAD_COMMAND_LINE, INVALID_FLAG,
+    MAX_COMMAND_LINE_BYTES,
 };
 use crate::meta::request_encoder::{command_line_too_long, write_backend_key};
 use crate::meta::write::{self, finish_line, write_bare_flag, write_base64_key};
@@ -32,10 +32,10 @@ pub fn parse_request<'a>(
 
     // `me` has no upstream token budget
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let Flag { letter, argument } = flag.map_err(flag_error)?;
+        let Flag { letter, argument } = flag?;
         match letter {
             b'b' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
 
                 key_encoding = KeyEncoding::Base64;
             }
