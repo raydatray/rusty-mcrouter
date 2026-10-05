@@ -8,9 +8,9 @@ use crate::meta::read::{
 use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
 use crate::meta::reply_encoder::{reply_line_too_long, write_key_token, write_opaque};
 use crate::meta::request_decoder::{
-    bad_argument, bad_number, capacity_error, flag_error, parse_opaque, recoverable_client_error,
-    require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
-    MAX_LINE_TOKENS,
+    bad_argument, bad_number, flag_error, parse_opaque, parse_output_flag,
+    recoverable_client_error, require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG,
+    MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
@@ -57,12 +57,8 @@ pub fn parse_request<'a>(
                 invalidate = true;
             }
             b'k' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Key, &mut reply_plan)?;
                 return_key = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Key)
-                    .map_err(capacity_error)?;
             }
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {

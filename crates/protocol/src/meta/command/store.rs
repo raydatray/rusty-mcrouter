@@ -10,9 +10,9 @@ use crate::meta::reply_decoder::{
 };
 use crate::meta::reply_encoder::{reply_line_too_long, write_field, write_key_token, write_opaque};
 use crate::meta::request_decoder::{
-    bad_argument, bad_number, capacity_error, flag_error, parse_opaque, recoverable_client_error,
-    require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
-    MAX_LINE_TOKENS, MAX_VALUE_BYTES,
+    bad_argument, bad_number, flag_error, parse_opaque, parse_output_flag,
+    recoverable_client_error, require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG,
+    MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS, MAX_VALUE_BYTES,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
@@ -86,12 +86,8 @@ pub fn parse_request(
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Cas, &mut reply_plan)?;
                 return_cas = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Cas)
-                    .map_err(capacity_error)?;
             }
             b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_number)?),
             b'E' => override_cas = Some(parse_u64(argument).map_err(bad_number)?),
@@ -101,12 +97,8 @@ pub fn parse_request(
                 invalidate = true;
             }
             b'k' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Key, &mut reply_plan)?;
                 return_key = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Key)
-                    .map_err(capacity_error)?;
             }
             b'M' => {
                 mode = match argument {
@@ -125,12 +117,8 @@ pub fn parse_request(
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
             b's' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Size, &mut reply_plan)?;
                 return_size = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Size)
-                    .map_err(capacity_error)?;
             }
             b'T' => ttl = Some(parse_i32(argument).map_err(bad_number)?),
             b'P' | b'L' => require_hint_argument(argument)?,
