@@ -10,9 +10,9 @@ use crate::meta::request_decoder::{
     BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS, MAX_VALUE_BYTES,
 };
 use crate::meta::request_encoder::{
-    command_line_too_long, write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
+    write_backend_key, write_i32_flag, write_mode_flag, write_u64_flag,
 };
-use crate::meta::write::{self, finish_line, write_bare_flag, write_u64};
+use crate::meta::write::{finish_line, write_bare_flag, write_u64};
 use crate::meta::{
     DecodedMetaCommand, KeyEncoding, MetaOutputToken, MetaQuietPolicy, MetaReplyDecodeError,
     MetaReplyEncodeError, MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError,
@@ -211,7 +211,7 @@ pub fn encode_request(
         write_i32_flag(out, b'N', ttl);
     }
 
-    write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+    finish_line(out, line_start, MAX_COMMAND_LINE_BYTES)?;
 
     out.extend_from_slice(&request.value);
     out.extend_from_slice(b"\r\n");

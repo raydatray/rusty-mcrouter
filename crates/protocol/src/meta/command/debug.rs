@@ -7,8 +7,8 @@ use crate::meta::request_decoder::{
     parse_key, recoverable_client_error, require_hint_argument, BAD_COMMAND_LINE, INVALID_FLAG,
     MAX_COMMAND_LINE_BYTES,
 };
-use crate::meta::request_encoder::{command_line_too_long, write_backend_key};
-use crate::meta::write::{self, finish_line, write_bare_flag, write_base64_key};
+use crate::meta::request_encoder::write_backend_key;
+use crate::meta::write::{finish_line, write_bare_flag, write_base64_key};
 use crate::meta::{
     DecodedMetaCommand, KeyEncoding, MetaReplyDecodeError, MetaReplyEncodeError,
     MetaReplyExpectation, MetaReplyPlan, MetaRequestDecodeError, MetaRequestEncodeError,
@@ -71,7 +71,7 @@ pub fn encode_request(
         write_bare_flag(out, b'b');
     }
 
-    write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+    finish_line(out, line_start, MAX_COMMAND_LINE_BYTES)?;
 
     Ok(MetaReplyExpectation::Debug {
         key: request.key.clone_without_routing_prefix(),
