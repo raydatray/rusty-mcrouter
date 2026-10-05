@@ -13,9 +13,8 @@ pub enum MetaReplyExpectation {
         cas: bool,
         ttl: bool,
     },
-    /// `key` is the backend key (routing prefix removed) used to correlate
-    /// the `ME` echo. memcached may echo it plain or base64 regardless of the
-    /// request encoding, so no encoding is retained here.
+    /// memcached may echo it plain or base64 regardless of the request encoding
+    /// so do not retain encoding
     Debug {
         key: Bytes,
     },

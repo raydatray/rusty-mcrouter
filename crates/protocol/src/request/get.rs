@@ -22,8 +22,7 @@ pub struct GetRequest {
     pub temporal: GetTemporalInstructions,
 }
 
-/// `mg` has four distinct order-sensitive flags, so its temporal program
-/// never exceeds four instructions.
+/// `mg` has four distinct order-sensitive flags
 pub type GetTemporalInstructions = BoundedList<GetTemporalInstruction, 4>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
