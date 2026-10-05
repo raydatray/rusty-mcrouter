@@ -15,13 +15,8 @@ use crate::{Key, Request};
 
 pub const MAX_COMMAND_LINE_BYTES: usize = 32 * 1024;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
-/// memcached's meta parser rejects `mg`/`ms`/`md` lines with more than 20
-/// space-separated tokens as "options flags are too long"; `ma` and `me` use
-/// a different upstream parser with no token budget (verified against
-/// memcached 1.6.45). Upstream applies the budget before validating flags; we
-/// count in-line instead, so a line that is over budget *and* malformed
-/// earlier reports the earlier flag error. The accepted/rejected request sets
-/// are identical.
+/// `mg`/`ms`/`md` has 20 token budget, `ma` and `me` has unlimited token
+/// budget upstream
 pub const MAX_LINE_TOKENS: usize = 20;
 pub const MAX_OPAQUE_BYTES: usize = 31;
 
@@ -32,8 +27,8 @@ const BAD_DATA_CHUNK: &[u8] = b"bad data chunk";
 const OBJECT_TOO_LARGE: &[u8] = b"object too large for cache";
 const OPTIONS_FLAGS_TOO_LONG: &[u8] = b"options flags are too long";
 
-// `Request` is ~224 bytes to `NoOp`'s zero; boxing the request to appease
-// the lint would put an allocation on the per-request hot path.
+// `Request` is ~224 bytes, `NoOp` is 0, do not box as this would put an
+// allocation on hot path
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodedMetaCommand {
@@ -44,39 +39,55 @@ pub enum DecodedMetaCommand {
     NoOp, // mn
 }
 
-/// Nearly stateless: each call frames one complete command — the line plus,
-/// for `ms`, its value block — and parses it in a single pass. The one piece
-/// of state is the swallow counter: an `ms` header may declare a body too
-/// large to ever buffer, and memcached semantics require consuming and
-/// discarding that body before reporting the error.
+/// nearly stateless, each call frames one complete command
+/// maintains `swallow` state in the case a `ms` header declares a body too
+/// large to buffer that needs to be discarded
 #[derive(Debug, Default)]
 pub struct MetaRequestDecoder {
     swallow: Option<Swallow>,
 }
 
-/// `remaining` body bytes to discard before reporting `reply`.
 #[derive(Debug)]
 struct Swallow {
     remaining: usize,
     reply: ErrorReply,
 }
 
-/// an error produced while incrementally decoding a frontend Meta command
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum MetaRequestDecodeError {
-    /// one complete malformed command was consumed. the session should encode
-    /// this reply and may continue decoding the connection.
     #[error("recoverable Meta request error")]
     Recoverable(ErrorReply),
 
-    /// frame alignment is not trustworthy. the session must close the
-    /// connection rather than attempt to decode another command.
     #[error(transparent)]
     Fatal(#[from] FatalDecodeError),
 }
 
 impl From<BadNumberError> for MetaRequestDecodeError {
     fn from(_: BadNumberError) -> Self {
+        recoverable_client_error(BAD_COMMAND_LINE)
+    }
+}
+
+impl From<FlagError> for MetaRequestDecodeError {
+    fn from(error: FlagError) -> Self {
+        let message = match error {
+            FlagError::OverBudget => OPTIONS_FLAGS_TOO_LONG,
+            FlagError::InvalidToken => INVALID_FLAG,
+            FlagError::Duplicate => DUPLICATE_FLAG,
+        };
+
+        recoverable_client_error(message)
+    }
+}
+
+impl From<UnexpectedFlagArgumentError> for MetaRequestDecodeError {
+    fn from(_: UnexpectedFlagArgumentError) -> Self {
+        recoverable_client_error(BAD_COMMAND_LINE)
+    }
+}
+
+impl From<CapacityExceededError> for MetaRequestDecodeError {
+    fn from(_: CapacityExceededError) -> Self {
         recoverable_client_error(BAD_COMMAND_LINE)
     }
 }
@@ -95,12 +106,8 @@ impl MetaRequestDecoder {
         Self { swallow: None }
     }
 
-    /// Decodes at most one complete Meta command.
-    ///
-    /// `Ok(None)` means the command is not fully buffered yet; nothing is
-    /// consumed until it is. A recoverable error consumes exactly one
-    /// complete command, while a fatal error requires the session to close
-    /// the connection.
+    /// decodes at most one complete Meta request `Ok(None)` means the request
+    /// is not fully buffered yet, nothing is consumed until the request is
     pub fn decode(
         &mut self,
         src: &mut BytesMut,
@@ -111,12 +118,9 @@ impl MetaRequestDecoder {
 
         let (line_end, line_frame_len) = match find_line(src, MAX_COMMAND_LINE_BYTES) {
             FindLine::Incomplete => return Ok(None),
-            FindLine::OverLimit => {
-                return Err(FatalDecodeError::FrameTooLarge {
-                    maximum: MAX_COMMAND_LINE_BYTES,
-                }
-                .into());
-            }
+            FindLine::OverLimit => Err(FatalDecodeError::FrameTooLarge {
+                maximum: MAX_COMMAND_LINE_BYTES,
+            })?,
             FindLine::Line { end, frame_len } => (end, frame_len),
         };
 
@@ -127,6 +131,7 @@ impl MetaRequestDecoder {
 
         let command = parse_command(line);
         src.advance(line_frame_len);
+
         command.map(Some)
     }
 
@@ -138,9 +143,8 @@ impl MetaRequestDecoder {
         }
     }
 
-    /// Frames `ms`: the value length is pre-parsed from the (complete)
-    /// command line so the body can be framed — or swallowed when it exceeds
-    /// what we are willing to buffer — before the header is fully validated.
+    /// frames `ms`, parse its value length and verify it can be buffered
+    /// before validating the header
     fn decode_store(
         &mut self,
         line_end: usize,
@@ -150,41 +154,47 @@ impl MetaRequestDecoder {
         let value_len = match command::store::parse_value_length(&src[..line_end]) {
             Ok(value_len) => value_len,
             Err(error) => {
-                // A malformed datalen never swallows a body: frame alignment
-                // resumes at the next line, matching memcached.
+                // malformed datalen never swallows a body, the frame
+                // is realigned at next line, like memcached
                 src.advance(line_frame_len);
                 return Err(error);
             }
         };
         if value_len > MAX_VALUE_BYTES {
             src.advance(line_frame_len);
+
             self.swallow = Some(Swallow {
                 remaining: value_len + 2,
                 reply: ErrorReply::Server(Some(Bytes::from_static(OBJECT_TOO_LARGE))),
             });
+
             return self.swallow_buffered(src);
         }
 
         let frame_len = line_frame_len + value_len + 2;
+        // value has not fully buffered, so return nothing
         if src.len() < frame_len {
             return Ok(None);
         }
 
         let frame = src.split_to(frame_len).freeze();
-        // Header errors take precedence over a malformed body terminator,
-        // matching memcached, which validates the header before the chunk.
+
+        // header errors take precedence over a malformed body terminator,
+        // matching memcached, which validates the header before the chunk
         let command = command::store::parse_request(
             &frame[..line_end],
             frame.slice(line_frame_len..line_frame_len + value_len),
         )?;
+
         if &frame[frame_len - 2..] != b"\r\n" {
             return Err(recoverable_client_error(BAD_DATA_CHUNK));
         }
+
         Ok(Some(command))
     }
 
-    /// Discards buffered bytes of a swallowed body, reporting the pending
-    /// error once the body has been fully consumed.
+    /// discards buffered bytes of a swallowed body, reporting the pending
+    /// error once the body has been fully consumed
     fn swallow_buffered(
         &mut self,
         src: &mut BytesMut,
@@ -192,13 +202,17 @@ impl MetaRequestDecoder {
         let Some(mut swallow) = self.swallow.take() else {
             return Ok(None);
         };
+
         let consumed = swallow.remaining.min(src.len());
         src.advance(consumed);
+
         swallow.remaining -= consumed;
         if swallow.remaining != 0 {
             self.swallow = Some(swallow);
+
             return Ok(None);
         }
+
         Err(MetaRequestDecodeError::Recoverable(swallow.reply))
     }
 }
@@ -234,6 +248,7 @@ pub fn parse_key(raw: &[u8], encoding: KeyEncoding) -> Result<Key, MetaRequestDe
             if raw.is_empty() || raw.iter().any(|byte| *byte <= b' ' || *byte == 0x7f) {
                 return Err(recoverable_client_error(BAD_COMMAND_LINE));
             }
+
             Bytes::copy_from_slice(raw)
         }
         KeyEncoding::Base64 => Bytes::from(
@@ -246,8 +261,6 @@ pub fn parse_key(raw: &[u8], encoding: KeyEncoding) -> Result<Key, MetaRequestDe
     Key::new(bytes).map_err(|_| recoverable_client_error(BAD_COMMAND_LINE))
 }
 
-/// `P` and `L` are proxy hints that carry no cache semantics; they are
-/// validated (argument required) and dropped on every command.
 pub fn require_hint_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeError> {
     if argument.is_empty() {
         Err(recoverable_client_error(BAD_COMMAND_LINE))
@@ -256,18 +269,17 @@ pub fn require_hint_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeErr
     }
 }
 
-/// Validates a bare output flag and records its position in the reply token order.
 pub(super) fn parse_output_flag(
     argument: &[u8],
     token: MetaOutputToken,
     plan: &mut MetaReplyPlan,
 ) -> Result<(), MetaRequestDecodeError> {
-    require_no_argument(argument).map_err(bad_argument)?;
-    plan.output_order.push(token).map_err(capacity_error)
+    require_no_argument(argument)?;
+    plan.output_order.push(token)?;
+
+    Ok(())
 }
 
-/// `O<token>`: retain the opaque for the local reply and record its output
-/// position. Never forwarded to the backend.
 pub fn parse_opaque(
     argument: &[u8],
     reply_plan: &mut MetaReplyPlan,
@@ -275,43 +287,25 @@ pub fn parse_opaque(
     if argument.is_empty() || argument.len() > MAX_OPAQUE_BYTES {
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
+
     reply_plan.opaque = Some(Bytes::copy_from_slice(argument));
-    reply_plan
-        .output_order
-        .push(MetaOutputToken::Opaque)
-        .map_err(capacity_error)
+    reply_plan.output_order.push(MetaOutputToken::Opaque)?;
+
+    Ok(())
 }
 
-/// Parses the key under the plan's encoding and, for `k`, retains the
-/// client-visible form for the local reply.
 pub fn resolve_key(
     raw_key: &[u8],
     return_key: bool,
     reply_plan: &mut MetaReplyPlan,
 ) -> Result<Key, MetaRequestDecodeError> {
     let key = parse_key(raw_key, reply_plan.key_encoding)?;
+
     if return_key {
         reply_plan.external_key = Some(key.clone_bytes());
     }
+
     Ok(key)
-}
-
-pub fn flag_error(error: FlagError) -> MetaRequestDecodeError {
-    match error {
-        FlagError::OverBudget => recoverable_client_error(OPTIONS_FLAGS_TOO_LONG),
-        FlagError::InvalidToken => recoverable_client_error(INVALID_FLAG),
-        FlagError::Duplicate => recoverable_client_error(DUPLICATE_FLAG),
-    }
-}
-
-/// A bare flag that unexpectedly carried an argument.
-pub fn bad_argument(_: UnexpectedFlagArgumentError) -> MetaRequestDecodeError {
-    recoverable_client_error(BAD_COMMAND_LINE)
-}
-
-/// More flags than the reply plan or a temporal program can hold.
-pub fn capacity_error(_: CapacityExceededError) -> MetaRequestDecodeError {
-    recoverable_client_error(BAD_COMMAND_LINE)
 }
 
 pub fn recoverable_client_error(message: &'static [u8]) -> MetaRequestDecodeError {
