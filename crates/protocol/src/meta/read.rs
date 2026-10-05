@@ -109,34 +109,34 @@ pub enum FlagError {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct BadNumber;
+pub struct BadNumberError;
 
-fn parse_number<T: FromStr>(raw: &[u8]) -> Result<T, BadNumber>
+fn parse_number<T>(raw: &[u8]) -> Result<T, BadNumberError>
 where
     T: FromStr,
 {
-    let text = std::str::from_utf8(raw).map_err(|_| BadNumber)?;
+    let text = std::str::from_utf8(raw).map_err(|_| BadNumberError)?;
 
-    text.parse().map_err(|_| BadNumber)
+    text.parse().map_err(|_| BadNumberError)
 }
 
-pub fn parse_u64(raw: &[u8]) -> Result<u64, BadNumber> {
+pub fn parse_u64(raw: &[u8]) -> Result<u64, BadNumberError> {
     parse_number(raw)
 }
 
-pub fn parse_u32(raw: &[u8]) -> Result<u32, BadNumber> {
+pub fn parse_u32(raw: &[u8]) -> Result<u32, BadNumberError> {
     parse_number(raw)
 }
 
-pub fn parse_usize(raw: &[u8]) -> Result<usize, BadNumber> {
+pub fn parse_usize(raw: &[u8]) -> Result<usize, BadNumberError> {
     parse_number(raw)
 }
 
-pub fn parse_i32(raw: &[u8]) -> Result<i32, BadNumber> {
+pub fn parse_i32(raw: &[u8]) -> Result<i32, BadNumberError> {
     parse_number(raw)
 }
 
-pub fn parse_i64(raw: &[u8]) -> Result<i64, BadNumber> {
+pub fn parse_i64(raw: &[u8]) -> Result<i64, BadNumberError> {
     parse_number(raw)
 }
 
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn parses_numeric_boundaries() {
         assert_eq!(parse_u64(b"18446744073709551615"), Ok(u64::MAX));
-        assert_eq!(parse_u64(b"18446744073709551616"), Err(BadNumber));
+        assert_eq!(parse_u64(b"18446744073709551616"), Err(BadNumberError));
         assert_eq!(parse_u64(b"+123"), Ok(123)); // memcached accepts a bare sign
         assert_eq!(parse_i32(b"-2147483648"), Ok(i32::MIN));
         assert_eq!(parse_i32(b"2147483647"), Ok(i32::MAX));
@@ -262,8 +262,8 @@ mod tests {
     #[test]
     fn rejects_empty_signs_and_non_digits() {
         for raw in [b"".as_slice(), b"+", b"-", b"1x", b" 1", b"++1", b"+-1"] {
-            assert_eq!(parse_u64(raw), Err(BadNumber));
-            assert_eq!(parse_i64(raw), Err(BadNumber));
+            assert_eq!(parse_u64(raw), Err(BadNumberError));
+            assert_eq!(parse_i64(raw), Err(BadNumberError));
         }
     }
 

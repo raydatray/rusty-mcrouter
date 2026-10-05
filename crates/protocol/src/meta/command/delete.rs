@@ -8,9 +8,9 @@ use crate::meta::read::{
 use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
 use crate::meta::reply_encoder::{reply_line_too_long, write_key_token, write_opaque};
 use crate::meta::request_decoder::{
-    bad_argument, bad_number, flag_error, parse_opaque, parse_output_flag,
-    recoverable_client_error, require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG,
-    MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
+    bad_argument, flag_error, parse_opaque, parse_output_flag, recoverable_client_error,
+    require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
+    MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
@@ -49,9 +49,9 @@ pub fn parse_request<'a>(
                 require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
-            b'C' => compare_cas = Some(parse_u64(argument).map_err(bad_number)?),
-            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_number)?),
-            b'F' => client_flags = Some(parse_u32(argument).map_err(bad_number)?),
+            b'C' => compare_cas = Some(parse_u64(argument)?),
+            b'E' => override_cas = Some(parse_u64(argument)?),
+            b'F' => client_flags = Some(parse_u32(argument)?),
             b'I' => {
                 require_no_argument(argument).map_err(bad_argument)?;
                 invalidate = true;
@@ -65,7 +65,7 @@ pub fn parse_request<'a>(
                 require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
-            b'T' => ttl = Some(parse_i32(argument).map_err(bad_number)?),
+            b'T' => ttl = Some(parse_i32(argument)?),
             b'x' => {
                 require_no_argument(argument).map_err(bad_argument)?;
                 remove_value = true;

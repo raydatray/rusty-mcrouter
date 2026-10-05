@@ -6,7 +6,7 @@ use crate::bounded_list::CapacityExceeded;
 use crate::key::MAX_KEY_BYTES;
 use crate::meta::command;
 use crate::meta::read::{
-    find_line, require_no_argument, split_tokens, BadNumber, FindLine, FlagError,
+    find_line, require_no_argument, split_tokens, BadNumberError, FindLine, FlagError,
     UnexpectedFlagArgument,
 };
 use crate::meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan};
@@ -73,6 +73,12 @@ pub enum MetaRequestDecodeError {
     /// connection rather than attempt to decode another command.
     #[error(transparent)]
     Fatal(#[from] FatalDecodeError),
+}
+
+impl From<BadNumberError> for MetaRequestDecodeError {
+    fn from(_: BadNumberError) -> Self {
+        recoverable_client_error(BAD_COMMAND_LINE)
+    }
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -296,12 +302,6 @@ pub fn flag_error(error: FlagError) -> MetaRequestDecodeError {
         FlagError::InvalidToken => recoverable_client_error(INVALID_FLAG),
         FlagError::Duplicate => recoverable_client_error(DUPLICATE_FLAG),
     }
-}
-
-/// A numeric flag argument that is not a decimal number of its width.
-/// memcached gives no diagnostics beyond its generic complaint.
-pub fn bad_number(_: BadNumber) -> MetaRequestDecodeError {
-    recoverable_client_error(BAD_COMMAND_LINE)
 }
 
 /// A bare flag that unexpectedly carried an argument.

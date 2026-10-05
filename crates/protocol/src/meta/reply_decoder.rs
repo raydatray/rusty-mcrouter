@@ -3,7 +3,8 @@ use thiserror::Error;
 
 use crate::meta::command;
 use crate::meta::read::{
-    find_line, parse_usize, split_tokens, BadNumber, FindLine, FlagError, UnexpectedFlagArgument,
+    find_line, parse_usize, split_tokens, BadNumberError, FindLine, FlagError,
+    UnexpectedFlagArgument,
 };
 use crate::meta::{GetSuccessShape, MetaReplyExpectation};
 use crate::reply::ErrorReply;
@@ -33,6 +34,12 @@ pub enum MetaReplyDecodeError {
 
     #[error("backend connection ended with a partial Meta reply")]
     UnexpectedEof,
+}
+
+impl From<BadNumberError> for MetaReplyDecodeError {
+    fn from(_: BadNumberError) -> Self {
+        Self::InvalidResponse(INVALID_RESPONSE)
+    }
 }
 
 impl MetaReplyDecoder {
@@ -105,10 +112,10 @@ fn expected_value_length(
         return Ok(None);
     }
 
-    let length = split_tokens(line)
+    let raw_length = split_tokens(line)
         .nth(1)
-        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
-        .and_then(|raw| parse_usize(raw).map_err(invalid_number))?;
+        .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+    let length = parse_usize(raw_length)?;
     if length > MAX_REPLY_VALUE_BYTES {
         return Err(MetaReplyDecodeError::ValueTooLarge {
             maximum: MAX_REPLY_VALUE_BYTES,
@@ -198,18 +205,12 @@ pub fn framed_value(
     value.ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))
 }
 
-/// Every token-level failure maps to the one reply-decode error: a
-/// misbehaving backend gets no diagnostics, just a torn-down connection.
-pub fn invalid_number(_: BadNumber) -> MetaReplyDecodeError {
-    MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
-}
-
-/// See [`invalid_number`].
+/// A bare reply flag carried an unexpected argument.
 pub fn invalid_argument(_: UnexpectedFlagArgument) -> MetaReplyDecodeError {
     MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
 }
 
-/// See [`invalid_number`].
+/// Maps reply flag validation failures to an invalid response.
 pub fn invalid_flag(_: FlagError) -> MetaReplyDecodeError {
     MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
 }
