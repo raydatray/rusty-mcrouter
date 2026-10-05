@@ -3,7 +3,7 @@
 use bytes::{Bytes, BytesMut};
 
 use crate::meta::read::{
-    flags, parse_i32, parse_i64, parse_u32, parse_u64, require_no_argument, split_tokens,
+    flags, parse_i32, parse_i64, parse_u32, parse_u64, require_no_argument, split_tokens, Flag,
     FlagBudget,
 };
 use crate::meta::reply_decoder::{
@@ -52,8 +52,8 @@ pub fn parse_request<'a>(
 
     // 20 line tokens minus `mg` and the key.
     for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 2)) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
+        let Flag { letter, argument } = flag.map_err(flag_error)?;
+        match letter {
             b'b' => {
                 require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
@@ -273,8 +273,8 @@ fn parse_attributes<'a>(
     let mut hit = GetHit::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(invalid_flag)?;
-        match flag {
+        let Flag { letter, argument } = flag.map_err(invalid_flag)?;
+        match letter {
             b'c' => hit.cas = Some(parse_u64(argument).map_err(invalid_number)?),
             b'f' => hit.client_flags = Some(parse_u32(argument).map_err(invalid_number)?),
             b's' => hit.size = Some(parse_u64(argument).map_err(invalid_number)?),

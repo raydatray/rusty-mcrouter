@@ -6,7 +6,7 @@ use crate::bounded_list::CapacityExceeded;
 use crate::key::MAX_KEY_BYTES;
 use crate::meta::command;
 use crate::meta::read::{
-    find_line, split_tokens, BadNumber, FindLine, FlagError, UnexpectedArgument,
+    find_line, split_tokens, BadNumber, FindLine, FlagError, UnexpectedFlagArgument,
 };
 use crate::meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan};
 use crate::reply::ErrorReply;
@@ -294,7 +294,7 @@ pub fn bad_number(_: BadNumber) -> MetaRequestDecodeError {
 }
 
 /// A bare flag that unexpectedly carried an argument.
-pub fn bad_argument(_: UnexpectedArgument) -> MetaRequestDecodeError {
+pub fn bad_argument(_: UnexpectedFlagArgument) -> MetaRequestDecodeError {
     recoverable_client_error(BAD_COMMAND_LINE)
 }
 

@@ -3,7 +3,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Bytes, BytesMut};
 
-use crate::meta::read::{flags, require_no_argument, split_tokens, FlagBudget};
+use crate::meta::read::{flags, require_no_argument, split_tokens, Flag, FlagBudget};
 use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
 use crate::meta::reply_encoder::{encoded_key_too_long, reply_line_too_long};
 use crate::meta::request_decoder::{
@@ -34,8 +34,8 @@ pub fn parse_request<'a>(
 
     // `me` has no upstream token budget; see the `ma` note on termination.
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
+        let Flag { letter, argument } = flag.map_err(flag_error)?;
+        match letter {
             b'b' => {
                 require_no_argument(argument).map_err(bad_argument)?;
                 key_encoding = KeyEncoding::Base64;

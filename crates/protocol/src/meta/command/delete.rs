@@ -3,7 +3,7 @@
 use bytes::BytesMut;
 
 use crate::meta::read::{
-    flags, parse_i32, parse_u32, parse_u64, require_no_argument, split_tokens, FlagBudget,
+    flags, parse_i32, parse_u32, parse_u64, require_no_argument, split_tokens, Flag, FlagBudget,
 };
 use crate::meta::reply_decoder::{INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH};
 use crate::meta::reply_encoder::{reply_line_too_long, write_key_token, write_opaque};
@@ -43,8 +43,8 @@ pub fn parse_request<'a>(
     // 20 line tokens minus `md` and the key. Unreachable today (only 12
     // distinct valid md flags exist), kept for the same reason as `ms`.
     for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 2)) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
+        let Flag { letter, argument } = flag.map_err(flag_error)?;
+        match letter {
             b'b' => {
                 require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;

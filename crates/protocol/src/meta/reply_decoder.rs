@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::meta::command;
 use crate::meta::read::{
-    find_line, parse_usize, split_tokens, BadNumber, FindLine, FlagError, UnexpectedArgument,
+    find_line, parse_usize, split_tokens, BadNumber, FindLine, FlagError, UnexpectedFlagArgument,
 };
 use crate::meta::{GetSuccessShape, MetaReplyExpectation};
 use crate::reply::ErrorReply;
@@ -205,7 +205,7 @@ pub fn invalid_number(_: BadNumber) -> MetaReplyDecodeError {
 }
 
 /// See [`invalid_number`].
-pub fn invalid_argument(_: UnexpectedArgument) -> MetaReplyDecodeError {
+pub fn invalid_argument(_: UnexpectedFlagArgument) -> MetaReplyDecodeError {
     MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
 }
 
