@@ -1,5 +1,3 @@
-//! `ms`: parse/encode for the Meta store command on both proxy hops.
-
 use bytes::{Bytes, BytesMut};
 
 use crate::meta::read::{
@@ -27,29 +25,32 @@ use crate::reply::{StoreReply, StoreResult};
 use crate::request::{StoreMode, StoreRequest};
 use crate::{Reply, Request};
 
-/// Pre-parses the `<datalen>` token so the decoder can frame the body — or
-/// swallow one too large to buffer — before the header is validated. Errors
-/// here consume only the line: a malformed datalen never swallows a body,
-/// matching memcached.
+/// pre-parses the `<datalen>` token so the decoder can frame the body or
+/// swallow if too large to buffer before validating header errors will consume
+/// the line, a malformed datalen will not swallow the body (matching upstream)
 pub fn parse_value_length(line: &[u8]) -> Result<usize, MetaRequestDecodeError> {
     let mut tokens = split_tokens(line);
     if tokens.next() != Some(b"ms".as_slice()) {
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
+
     let _key = tokens
         .next()
         .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+
     let raw_value_len = tokens
         .next()
         .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+
     let value_len = parse_u64(raw_value_len)?;
     if value_len > (i32::MAX - 2) as u64 {
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
+
     Ok(value_len as usize)
 }
 
-/// Parses one complete, framed `ms` command: the header line plus the value
+/// parses one complete, framed `ms` command: the header line plus the value
 /// the decoder sliced using [`parse_value_length`].
 pub fn parse_request(
     line: &[u8],
@@ -75,18 +76,18 @@ pub fn parse_request(
     let mut reply_plan = MetaReplyPlan::default();
     let mut return_key = false;
 
-    // 20 line tokens minus `ms`, the key, and the datalen. Unreachable today
-    // (only 16 distinct valid ms flags exist, and duplicates are rejected),
-    // but kept so the budget survives future flag leniency.
+    // `mg` has max 20 line tokens minus the command, key and datalen upstream
     for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 3)) {
         let Flag { letter, argument } = flag.map_err(flag_error)?;
         match letter {
             b'b' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
                 parse_output_flag(argument, MetaOutputToken::Cas, &mut reply_plan)?;
+
                 return_cas = true;
             }
             b'C' => compare_cas = Some(parse_u64(argument)?),
@@ -94,10 +95,12 @@ pub fn parse_request(
             b'F' => client_flags = Some(parse_u32(argument)?),
             b'I' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 invalidate = true;
             }
             b'k' => {
                 parse_output_flag(argument, MetaOutputToken::Key, &mut reply_plan)?;
+
                 return_key = true;
             }
             b'M' => {
@@ -114,10 +117,12 @@ pub fn parse_request(
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
             b's' => {
                 parse_output_flag(argument, MetaOutputToken::Size, &mut reply_plan)?;
+
                 return_size = true;
             }
             b'T' => ttl = Some(parse_i32(argument)?),
@@ -127,6 +132,7 @@ pub fn parse_request(
     }
 
     let key = resolve_key(raw_key, return_key, &mut reply_plan)?;
+
     Ok(DecodedMetaCommand::Request {
         request: Request::Store(StoreRequest {
             key,
@@ -156,35 +162,47 @@ pub fn encode_request(
     }
 
     let line_start = out.len();
+
     out.extend_from_slice(b"ms ");
+
     let key_is_base64 = write_backend_key(out, &request.key)?;
+
     out.extend_from_slice(b" ");
+
     write_u64(out, request.value.len() as u64);
 
     if key_is_base64 {
         write_bare_flag(out, b'b');
     }
+
     if request.return_cas {
         write_bare_flag(out, b'c');
     }
+
     if request.return_size {
         write_bare_flag(out, b's');
     }
+
     if let Some(cas) = request.compare_cas {
         write_u64_flag(out, b'C', cas);
     }
+
     if let Some(cas) = request.override_cas {
         write_u64_flag(out, b'E', cas);
     }
+
     if let Some(flags) = request.client_flags {
         write_u64_flag(out, b'F', u64::from(flags));
     }
+
     if request.invalidate {
         write_bare_flag(out, b'I');
     }
+
     if let Some(ttl) = request.ttl {
         write_i32_flag(out, b'T', ttl);
     }
+
     match request.mode {
         StoreMode::Set => {}
         StoreMode::Add => write_mode_flag(out, b'E'),
@@ -197,8 +215,10 @@ pub fn encode_request(
     }
 
     write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+
     out.extend_from_slice(&request.value);
     out.extend_from_slice(b"\r\n");
+
     Ok(MetaReplyExpectation::Store {
         cas: request.return_cas,
         size: request.return_size,
@@ -214,6 +234,7 @@ pub fn parse_reply(
     let code = tokens
         .next()
         .ok_or(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE))?;
+
     let result = parse_attributes(tokens)?;
     if (expect_cas && result.cas.is_none()) || (expect_size && result.size.is_none()) {
         return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
@@ -226,6 +247,7 @@ pub fn parse_reply(
         b"NF" => StoreReply::NotFound(result),
         _ => return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH)),
     };
+
     Ok(Reply::Store(reply))
 }
 
@@ -242,6 +264,7 @@ fn parse_attributes<'a>(
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
         }
     }
+
     Ok(result)
 }
 
@@ -258,7 +281,9 @@ pub fn encode_reply(
     };
 
     let line_start = out.len();
+
     out.extend_from_slice(code);
+
     for token in plan.output_order.iter() {
         match token {
             MetaOutputToken::Cas => write_field(out, b'c', result.cas, "CAS", true)?,
@@ -272,5 +297,6 @@ pub fn encode_reply(
             }
         }
     }
+
     write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
 }
