@@ -1,5 +1,3 @@
-//! `ma`: parse/encode for the Meta arithmetic command on both proxy hops.
-
 use bytes::{Bytes, BytesMut};
 
 use crate::meta::read::{
@@ -38,6 +36,7 @@ pub fn parse_request<'a>(
     let raw_key = tokens
         .next()
         .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+
     let mut return_value = false;
     let mut return_cas = false;
     let mut mode = ArithmeticMode::Increment;
@@ -49,18 +48,20 @@ pub fn parse_request<'a>(
     let mut reply_plan = MetaReplyPlan::default();
     let mut return_key = false;
 
-    // `ma` has no upstream token budget. The loop still terminates quickly:
-    // non-alphabetic or repeated flags error out, so at most 52 distinct
-    // letters are ever processed.
+    let mut has_vivify = false;
+
+    // `ma` has no upstream token budget
     for flag in flags(tokens, FlagBudget::Unlimited) {
         let Flag { letter, argument } = flag.map_err(flag_error)?;
         match letter {
             b'b' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
                 parse_output_flag(argument, MetaOutputToken::Cas, &mut reply_plan)?;
+
                 return_cas = true;
             }
             b'C' => compare_cas = Some(parse_u64(argument)?),
@@ -69,6 +70,7 @@ pub fn parse_request<'a>(
             b'J' => initial_value = Some(parse_u64(argument)?),
             b'k' => {
                 parse_output_flag(argument, MetaOutputToken::Key, &mut reply_plan)?;
+
                 return_key = true;
             }
             b'M' => {
@@ -78,16 +80,22 @@ pub fn parse_request<'a>(
                     _ => return Err(recoverable_client_error(BAD_COMMAND_LINE)),
                 };
             }
-            b'N' => temporal
-                .push(ArithmeticTemporalInstruction::Vivify(parse_i32(argument)?))
-                .map_err(capacity_error)?,
+            b'N' => {
+                temporal
+                    .push(ArithmeticTemporalInstruction::Vivify(parse_i32(argument)?))
+                    .map_err(capacity_error)?;
+
+                has_vivify = true;
+            }
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 reply_plan.quiet = MetaQuietPolicy::SuppressSuccess;
             }
             b't' => {
                 parse_output_flag(argument, MetaOutputToken::Ttl, &mut reply_plan)?;
+
                 temporal
                     .push(ArithmeticTemporalInstruction::ReturnTtl)
                     .map_err(capacity_error)?;
@@ -99,6 +107,7 @@ pub fn parse_request<'a>(
                 .map_err(capacity_error)?,
             b'v' => {
                 require_no_argument(argument).map_err(bad_argument)?;
+
                 return_value = true;
             }
             b'P' | b'L' => require_hint_argument(argument)?,
@@ -106,14 +115,12 @@ pub fn parse_request<'a>(
         }
     }
 
-    let has_vivify = temporal
-        .iter()
-        .any(|instruction| matches!(instruction, ArithmeticTemporalInstruction::Vivify(_)));
     if initial_value.is_some() && !has_vivify {
         return Err(recoverable_client_error(BAD_COMMAND_LINE));
     }
 
     let key = resolve_key(raw_key, return_key, &mut reply_plan)?;
+
     Ok(DecodedMetaCommand::Request {
         request: Request::Arithmetic(ArithmeticRequest {
             key,
@@ -135,49 +142,62 @@ pub fn encode_request(
     out: &mut BytesMut,
 ) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
     let line_start = out.len();
-    out.extend_from_slice(b"ma ");
-    let key_is_base64 = write_backend_key(out, &request.key)?;
 
+    out.extend_from_slice(b"ma ");
+
+    let key_is_base64 = write_backend_key(out, &request.key)?;
     if key_is_base64 {
         write_bare_flag(out, b'b');
     }
+
     if request.return_value {
         write_bare_flag(out, b'v');
     }
+
     if request.return_cas {
         write_bare_flag(out, b'c');
     }
+
     if let Some(cas) = request.compare_cas {
         write_u64_flag(out, b'C', cas);
     }
+
     if let Some(cas) = request.override_cas {
         write_u64_flag(out, b'E', cas);
     }
+
     if let Some(initial) = request.initial_value {
         write_u64_flag(out, b'J', initial);
     }
+
     if request.delta != 1 {
         write_u64_flag(out, b'D', request.delta);
     }
+
     if request.mode == ArithmeticMode::Decrement {
         write_mode_flag(out, b'D');
     }
+
+    let mut has_ttl = false;
+
     for instruction in request.temporal.iter() {
         match instruction {
             ArithmeticTemporalInstruction::Vivify(ttl) => write_i32_flag(out, b'N', *ttl),
             ArithmeticTemporalInstruction::UpdateTtl(ttl) => write_i32_flag(out, b'T', *ttl),
-            ArithmeticTemporalInstruction::ReturnTtl => write::write_bare_flag(out, b't'),
+            ArithmeticTemporalInstruction::ReturnTtl => {
+                write_bare_flag(out, b't');
+
+                has_ttl = true;
+            }
         }
     }
 
     write::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+
     Ok(MetaReplyExpectation::Arithmetic {
         value: request.return_value,
         cas: request.return_cas,
-        ttl: request
-            .temporal
-            .iter()
-            .any(|instruction| matches!(instruction, ArithmeticTemporalInstruction::ReturnTtl)),
+        ttl: has_ttl,
     })
 }
 
@@ -198,18 +218,22 @@ pub fn parse_reply(
             if expect_value {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
+
             let result = parse_attributes(tokens)?;
             validate_success(&result, expect_cas, expect_ttl)?;
+
             Ok(Reply::Arithmetic(ArithmeticReply::Success(result)))
         }
         b"VA" => {
             if !expect_value {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
+
             let value = framed_value(tokens.next(), value)?;
             let mut result = parse_attributes(tokens)?;
             validate_success(&result, expect_cas, expect_ttl)?;
             result.value = Some(parse_u64(&value)?);
+
             Ok(Reply::Arithmetic(ArithmeticReply::Success(result)))
         }
         b"NS" => Ok(Reply::Arithmetic(ArithmeticReply::NotStored(
@@ -270,6 +294,7 @@ pub fn encode_reply(
         ArithmeticReply::Exists(result) => (b"EX".as_slice(), result, false),
         ArithmeticReply::NotFound(result) => (b"NF".as_slice(), result, false),
     };
+
     if !success && result.value.is_some() {
         return Err(MetaReplyEncodeError::InvalidData(
             "arithmetic failure contains a value",
@@ -304,10 +329,13 @@ pub fn encode_reply(
             }
         }
     }
+
     write::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
+
     if let Some(value) = result.value {
         write_u64(out, value);
         out.extend_from_slice(b"\r\n");
     }
+
     Ok(())
 }
