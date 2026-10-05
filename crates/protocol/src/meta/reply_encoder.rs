@@ -201,9 +201,9 @@ pub fn encoded_key_too_long(_: write::EncodedKeyTooLong) -> MetaReplyEncodeError
     }
 }
 
-pub fn reply_line_too_long(error: write::LineTooLong) -> MetaReplyEncodeError {
+pub fn reply_line_too_long(_: write::LineTooLong) -> MetaReplyEncodeError {
     MetaReplyEncodeError::FrameTooLarge {
-        maximum: error.maximum,
+        maximum: MAX_REPLY_LINE_BYTES,
     }
 }
 
