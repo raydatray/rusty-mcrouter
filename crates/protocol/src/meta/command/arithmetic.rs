@@ -3,7 +3,7 @@
 use bytes::{Bytes, BytesMut};
 
 use crate::meta::read::{
-    flags, parse_i32, parse_i64, parse_u64, require_no_argument, split_tokens, FlagBudget,
+    flags, parse_i32, parse_i64, parse_u64, require_no_argument, split_tokens, Flag, FlagBudget,
 };
 use crate::meta::reply_decoder::{
     framed_value, invalid_flag, invalid_number, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES,
@@ -53,8 +53,8 @@ pub fn parse_request<'a>(
     // non-alphabetic or repeated flags error out, so at most 52 distinct
     // letters are ever processed.
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
+        let Flag { letter, argument } = flag.map_err(flag_error)?;
+        match letter {
             b'b' => {
                 require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
@@ -245,8 +245,8 @@ fn parse_attributes<'a>(
     let mut result = ArithmeticResult::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(invalid_flag)?;
-        match flag {
+        let Flag { letter, argument } = flag.map_err(invalid_flag)?;
+        match letter {
             b'c' => result.cas = Some(parse_u64(argument).map_err(invalid_number)?),
             b't' => result.ttl = Some(parse_i64(argument).map_err(invalid_number)?),
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),

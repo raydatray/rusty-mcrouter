@@ -3,7 +3,7 @@
 use bytes::{Bytes, BytesMut};
 
 use crate::meta::read::{
-    flags, parse_i32, parse_u32, parse_u64, require_no_argument, split_tokens, FlagBudget,
+    flags, parse_i32, parse_u32, parse_u64, require_no_argument, split_tokens, Flag, FlagBudget,
 };
 use crate::meta::reply_decoder::{
     invalid_flag, invalid_number, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, SHAPE_MISMATCH,
@@ -79,8 +79,8 @@ pub fn parse_request(
     // (only 16 distinct valid ms flags exist, and duplicates are rejected),
     // but kept so the budget survives future flag leniency.
     for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 3)) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
+        let Flag { letter, argument } = flag.map_err(flag_error)?;
+        match letter {
             b'b' => {
                 require_no_argument(argument).map_err(bad_argument)?;
                 reply_plan.key_encoding = KeyEncoding::Base64;
@@ -247,8 +247,8 @@ fn parse_attributes<'a>(
     let mut result = StoreResult::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(invalid_flag)?;
-        match flag {
+        let Flag { letter, argument } = flag.map_err(invalid_flag)?;
+        match letter {
             b'c' => result.cas = Some(parse_u64(argument).map_err(invalid_number)?),
             b's' => result.size = Some(parse_u64(argument).map_err(invalid_number)?),
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
