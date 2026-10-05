@@ -84,13 +84,13 @@ pub fn flags<'a>(
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct UnexpectedFlagArgument;
+pub struct UnexpectedFlagArgumentError;
 
-pub fn require_no_argument(argument: &[u8]) -> Result<(), UnexpectedFlagArgument> {
+pub fn require_no_argument(argument: &[u8]) -> Result<(), UnexpectedFlagArgumentError> {
     if argument.is_empty() {
         Ok(())
     } else {
-        Err(UnexpectedFlagArgument)
+        Err(UnexpectedFlagArgumentError)
     }
 }
 

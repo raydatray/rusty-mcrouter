@@ -2,12 +2,12 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 
-use crate::bounded_list::CapacityExceeded;
+use crate::bounded_list::CapacityExceededError;
 use crate::key::MAX_KEY_BYTES;
 use crate::meta::command;
 use crate::meta::read::{
     find_line, require_no_argument, split_tokens, BadNumberError, FindLine, FlagError,
-    UnexpectedFlagArgument,
+    UnexpectedFlagArgumentError,
 };
 use crate::meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan};
 use crate::reply::ErrorReply;
@@ -305,12 +305,12 @@ pub fn flag_error(error: FlagError) -> MetaRequestDecodeError {
 }
 
 /// A bare flag that unexpectedly carried an argument.
-pub fn bad_argument(_: UnexpectedFlagArgument) -> MetaRequestDecodeError {
+pub fn bad_argument(_: UnexpectedFlagArgumentError) -> MetaRequestDecodeError {
     recoverable_client_error(BAD_COMMAND_LINE)
 }
 
 /// More flags than the reply plan or a temporal program can hold.
-pub fn capacity_error(_: CapacityExceeded) -> MetaRequestDecodeError {
+pub fn capacity_error(_: CapacityExceededError) -> MetaRequestDecodeError {
     recoverable_client_error(BAD_COMMAND_LINE)
 }
 

@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::meta::command;
 use crate::meta::read::{
     find_line, parse_usize, split_tokens, BadNumberError, FindLine, FlagError,
-    UnexpectedFlagArgument,
+    UnexpectedFlagArgumentError,
 };
 use crate::meta::{GetSuccessShape, MetaReplyExpectation};
 use crate::reply::ErrorReply;
@@ -206,7 +206,7 @@ pub fn framed_value(
 }
 
 /// A bare reply flag carried an unexpected argument.
-pub fn invalid_argument(_: UnexpectedFlagArgument) -> MetaReplyDecodeError {
+pub fn invalid_argument(_: UnexpectedFlagArgumentError) -> MetaReplyDecodeError {
     MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)
 }
 

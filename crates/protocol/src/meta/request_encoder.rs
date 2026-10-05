@@ -92,13 +92,13 @@ pub fn write_mode_flag(out: &mut BytesMut, mode: u8) {
     out.extend_from_slice(&[mode]);
 }
 
-fn encoded_key_too_long(_: write::EncodedKeyTooLong) -> MetaRequestEncodeError {
+fn encoded_key_too_long(_: write::EncodedKeyTooLongError) -> MetaRequestEncodeError {
     MetaRequestEncodeError::EncodedKeyTooLong {
         maximum: MAX_KEY_BYTES,
     }
 }
 
-pub fn command_line_too_long(_: write::LineTooLong) -> MetaRequestEncodeError {
+pub fn command_line_too_long(_: write::LineTooLongError) -> MetaRequestEncodeError {
     MetaRequestEncodeError::FrameTooLarge {
         maximum: MAX_COMMAND_LINE_BYTES,
     }
