@@ -5,15 +5,18 @@ use std::fmt::Write as _;
 use crate::key::MAX_KEY_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct EncodedKeyTooLong;
+pub(super) struct EncodedKeyTooLongError;
 
 /// base64 encodes `key` and appends it to `out`, enforcing `MAX_KEY_BYTES` len
 /// leaves `out` unchanged on failure
-pub(super) fn write_base64_key(out: &mut BytesMut, key: &[u8]) -> Result<(), EncodedKeyTooLong> {
+pub(super) fn write_base64_key(
+    out: &mut BytesMut,
+    key: &[u8],
+) -> Result<(), EncodedKeyTooLongError> {
     let mut scratch = [0; MAX_KEY_BYTES];
     let encoded_len = STANDARD
         .encode_slice(key, &mut scratch)
-        .map_err(|_| EncodedKeyTooLong)?;
+        .map_err(|_| EncodedKeyTooLongError)?;
 
     out.extend_from_slice(&scratch[..encoded_len]);
 
@@ -22,7 +25,7 @@ pub(super) fn write_base64_key(out: &mut BytesMut, key: &[u8]) -> Result<(), Enc
 
 /// the current line including its `\r\n` terminator, exceeds the frame limit
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct LineTooLong;
+pub(super) struct LineTooLongError;
 
 /// finish the line with `\r\n`, checking that it is at most `max_frame`
 /// from `line_start`
@@ -30,9 +33,9 @@ pub(super) fn finish_line(
     out: &mut BytesMut,
     line_start: usize,
     max_frame: usize,
-) -> Result<(), LineTooLong> {
+) -> Result<(), LineTooLongError> {
     if out.len() - line_start + 2 > max_frame {
-        return Err(LineTooLong);
+        return Err(LineTooLongError);
     }
 
     out.extend_from_slice(b"\r\n");

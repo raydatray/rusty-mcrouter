@@ -195,13 +195,13 @@ pub fn write_i64_field(
     }
 }
 
-pub fn encoded_key_too_long(_: write::EncodedKeyTooLong) -> MetaReplyEncodeError {
+pub fn encoded_key_too_long(_: write::EncodedKeyTooLongError) -> MetaReplyEncodeError {
     MetaReplyEncodeError::EncodedKeyTooLong {
         maximum: MAX_KEY_BYTES,
     }
 }
 
-pub fn reply_line_too_long(_: write::LineTooLong) -> MetaReplyEncodeError {
+pub fn reply_line_too_long(_: write::LineTooLongError) -> MetaReplyEncodeError {
     MetaReplyEncodeError::FrameTooLarge {
         maximum: MAX_REPLY_LINE_BYTES,
     }
