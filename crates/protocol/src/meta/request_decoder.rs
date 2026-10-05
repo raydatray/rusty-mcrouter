@@ -6,7 +6,8 @@ use crate::bounded_list::CapacityExceeded;
 use crate::key::MAX_KEY_BYTES;
 use crate::meta::command;
 use crate::meta::read::{
-    find_line, split_tokens, BadNumber, FindLine, FlagError, UnexpectedFlagArgument,
+    find_line, require_no_argument, split_tokens, BadNumber, FindLine, FlagError,
+    UnexpectedFlagArgument,
 };
 use crate::meta::{KeyEncoding, MetaOutputToken, MetaReplyPlan};
 use crate::reply::ErrorReply;
@@ -247,6 +248,16 @@ pub fn require_hint_argument(argument: &[u8]) -> Result<(), MetaRequestDecodeErr
     } else {
         Ok(())
     }
+}
+
+/// Validates a bare output flag and records its position in the reply token order.
+pub(super) fn parse_output_flag(
+    argument: &[u8],
+    token: MetaOutputToken,
+    plan: &mut MetaReplyPlan,
+) -> Result<(), MetaRequestDecodeError> {
+    require_no_argument(argument).map_err(bad_argument)?;
+    plan.output_order.push(token).map_err(capacity_error)
 }
 
 /// `O<token>`: retain the opaque for the local reply and record its output

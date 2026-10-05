@@ -14,9 +14,9 @@ use crate::meta::reply_encoder::{
     reply_line_too_long, write_field, write_i64_field, write_key_token, write_opaque,
 };
 use crate::meta::request_decoder::{
-    bad_argument, bad_number, capacity_error, flag_error, parse_opaque, recoverable_client_error,
-    require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
-    MAX_LINE_TOKENS,
+    bad_argument, bad_number, capacity_error, flag_error, parse_opaque, parse_output_flag,
+    recoverable_client_error, require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG,
+    MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
 };
 use crate::meta::request_encoder::{
     command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
@@ -59,45 +59,25 @@ pub fn parse_request<'a>(
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Cas, &mut reply_plan)?;
                 return_cas = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Cas)
-                    .map_err(capacity_error)?;
             }
             b'C' => check_cas = Some(parse_u64(argument).map_err(bad_number)?),
             b'f' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::ClientFlags, &mut reply_plan)?;
                 return_client_flags = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::ClientFlags)
-                    .map_err(capacity_error)?;
             }
             b'h' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::HitState, &mut reply_plan)?;
                 return_hit_state = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::HitState)
-                    .map_err(capacity_error)?;
             }
             b'k' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Key, &mut reply_plan)?;
                 return_key = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Key)
-                    .map_err(capacity_error)?;
             }
             b'l' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::LastAccess, &mut reply_plan)?;
                 return_last_access = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::LastAccess)
-                    .map_err(capacity_error)?;
             }
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
@@ -105,21 +85,13 @@ pub fn parse_request<'a>(
                 reply_plan.quiet = MetaQuietPolicy::SuppressMiss;
             }
             b's' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Size, &mut reply_plan)?;
                 return_size = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Size)
-                    .map_err(capacity_error)?;
             }
             b't' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Ttl, &mut reply_plan)?;
                 temporal
                     .push(GetTemporalInstruction::ReturnTtl)
-                    .map_err(capacity_error)?;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Ttl)
                     .map_err(capacity_error)?;
             }
             b'u' => {
