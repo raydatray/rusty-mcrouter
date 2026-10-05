@@ -5,7 +5,7 @@ pub struct BoundedList<T, const N: usize> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CapacityExceeded;
+pub struct CapacityExceededError;
 
 impl<T, const N: usize> Default for BoundedList<T, N> {
     fn default() -> Self {
@@ -17,13 +17,15 @@ impl<T, const N: usize> Default for BoundedList<T, N> {
 }
 
 impl<T, const N: usize> BoundedList<T, N> {
-    pub(crate) fn push(&mut self, item: T) -> Result<(), CapacityExceeded> {
+    pub(crate) fn push(&mut self, item: T) -> Result<(), CapacityExceededError> {
         let slot = self
             .items
             .get_mut(usize::from(self.len))
-            .ok_or(CapacityExceeded)?;
+            .ok_or(CapacityExceededError)?;
+
         *slot = Some(item);
         self.len += 1;
+
         Ok(())
     }
 
@@ -42,6 +44,7 @@ mod tests {
         for item in [3, 1, 2] {
             list.push(item).unwrap();
         }
+
         assert_eq!(list.iter().copied().collect::<Vec<_>>(), vec![3, 1, 2]);
     }
 
@@ -50,13 +53,15 @@ mod tests {
         let mut list = BoundedList::<u32, 2>::default();
         list.push(1).unwrap();
         list.push(2).unwrap();
-        assert_eq!(list.push(3), Err(CapacityExceeded));
+
+        assert_eq!(list.push(3), Err(CapacityExceededError));
         assert_eq!(list.iter().copied().collect::<Vec<_>>(), vec![1, 2]);
     }
 
     #[test]
     fn empty_list_iterates_nothing() {
         let list = BoundedList::<u32, 4>::default();
+
         assert_eq!(list.iter().count(), 0);
     }
 }

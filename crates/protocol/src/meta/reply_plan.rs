@@ -26,7 +26,7 @@ pub enum KeyEncoding {
     Base64, // b
 }
 
-/// `mg` has at most eight distinct client-visible output tokens.
+/// `mg` has at most eight distinct client-visible output tokens
 pub type MetaOutputOrder = BoundedList<MetaOutputToken, 8>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

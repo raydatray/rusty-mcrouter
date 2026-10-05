@@ -24,7 +24,9 @@ pub fn decode_command(wire: &[u8]) -> DecodedMetaCommand {
         .decode(&mut src)
         .expect("test command must decode")
         .expect("test command must be complete");
+
     assert!(src.is_empty(), "trailing bytes after one test command");
+
     decoded
 }
 
@@ -37,6 +39,7 @@ pub fn command(wire: &[u8]) -> (Request, MetaReplyPlan) {
     else {
         panic!("expected a routable request, got a session-local command");
     };
+
     (request, reply_plan)
 }
 
@@ -56,6 +59,7 @@ pub fn encode_request(request: &Request) -> (Bytes, MetaReplyExpectation) {
     let expectation = MetaRequestEncoder::new()
         .encode(request, &mut out)
         .expect("test request must encode");
+
     (out.freeze(), expectation)
 }
 
@@ -76,13 +80,16 @@ pub fn decode_reply(expectation: &MetaReplyExpectation, wire: &[u8]) -> Reply {
         .decode(expectation, &mut src)
         .expect("test reply must decode")
         .expect("test reply must be complete");
+
     assert!(src.is_empty(), "trailing bytes after one test reply");
+
     reply
 }
 
 #[track_caller]
 pub fn reply(command: &[u8], backend: &[u8]) -> Reply {
     let expectation = expectation(command);
+
     decode_reply(&expectation, backend)
 }
 
@@ -92,6 +99,7 @@ pub fn encode_reply(reply: &Reply, plan: &MetaReplyPlan) -> Bytes {
     MetaReplyEncoder::new()
         .encode(reply, plan, &mut out)
         .expect("test reply must encode");
+
     out.freeze()
 }
 
@@ -100,6 +108,7 @@ pub fn response(frontend: &[u8], backend: &[u8]) -> Bytes {
     let (request, plan) = command(frontend);
     let (_, expectation) = encode_request(&request);
     let reply = decode_reply(&expectation, backend);
+
     encode_reply(&reply, &plan)
 }
 
@@ -111,6 +120,7 @@ pub fn get(key: &[u8]) -> Request {
 #[track_caller]
 pub fn store(key: &[u8], value: &[u8]) -> Request {
     let header = format!(" {}\r\n", value.len());
+
     request(&[b"ms ", key, header.as_bytes(), value, b"\r\n"].concat())
 }
 
@@ -157,6 +167,7 @@ pub fn delete_success() -> Reply {
 pub fn arithmetic_value(value: u64) -> Reply {
     let value = value.to_string();
     let backend = format!("VA {}\r\n{value}\r\n", value.len());
+
     reply(b"ma fixture v\r\n", backend.as_bytes())
 }
 
@@ -209,6 +220,7 @@ pub fn expect_get_request(request: Request) -> GetRequest {
     let Request::Get(get) = request else {
         panic!("expected get request, got {request:?}");
     };
+
     get
 }
 
@@ -217,6 +229,7 @@ pub fn expect_store_request(request: Request) -> StoreRequest {
     let Request::Store(store) = request else {
         panic!("expected store request, got {request:?}");
     };
+
     store
 }
 
@@ -225,6 +238,7 @@ pub fn expect_delete_request(request: Request) -> DeleteRequest {
     let Request::Delete(delete) = request else {
         panic!("expected delete request, got {request:?}");
     };
+
     delete
 }
 
@@ -233,6 +247,7 @@ pub fn expect_arithmetic_request(request: Request) -> ArithmeticRequest {
     let Request::Arithmetic(arithmetic) = request else {
         panic!("expected arithmetic request, got {request:?}");
     };
+
     arithmetic
 }
 
@@ -241,6 +256,7 @@ pub fn expect_debug_request(request: Request) -> DebugRequest {
     let Request::Debug(debug) = request else {
         panic!("expected debug request, got {request:?}");
     };
+
     debug
 }
 
@@ -249,6 +265,7 @@ pub fn expect_get_hit(reply: Reply) -> GetHit {
     let Reply::Get(GetReply::Hit(hit)) = reply else {
         panic!("expected get hit, got {reply:?}");
     };
+
     hit
 }
 
@@ -264,6 +281,7 @@ pub fn expect_store_success(reply: Reply) -> StoreResult {
     let Reply::Store(StoreReply::Success(result)) = reply else {
         panic!("expected successful store, got {reply:?}");
     };
+
     result
 }
 
@@ -272,6 +290,7 @@ pub fn expect_arithmetic_success(reply: Reply) -> ArithmeticResult {
     let Reply::Arithmetic(ArithmeticReply::Success(result)) = reply else {
         panic!("expected successful arithmetic reply, got {reply:?}");
     };
+
     result
 }
 
@@ -280,6 +299,7 @@ pub fn expect_debug_hit(reply: Reply) -> DebugHit {
     let Reply::Debug(DebugReply::Hit(hit)) = reply else {
         panic!("expected debug hit, got {reply:?}");
     };
+
     hit
 }
 
@@ -288,6 +308,7 @@ pub fn expect_error(reply: Reply) -> ErrorReply {
     let Reply::Error(error) = reply else {
         panic!("expected protocol error, got {reply:?}");
     };
+
     error
 }
 
@@ -296,6 +317,7 @@ pub fn expect_version(reply: Reply) -> Bytes {
     let Reply::Version(version) = reply else {
         panic!("expected version reply, got {reply:?}");
     };
+
     version
 }
 

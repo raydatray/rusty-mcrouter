@@ -4,7 +4,11 @@ use thiserror::Error;
 use crate::key::MAX_KEY_BYTES;
 use crate::meta::reply_decoder::MAX_REPLY_LINE_BYTES;
 use crate::meta::request_decoder::MAX_OPAQUE_BYTES;
-use crate::meta::{command, wire, KeyEncoding, MetaQuietPolicy, MetaReplyPlan};
+use crate::meta::write::{
+    finish_line, write_bare_flag, write_base64_key, write_i64, write_u64, EncodedKeyTooLongError,
+    LineTooLongError,
+};
+use crate::meta::{command, KeyEncoding, MetaQuietPolicy, MetaReplyPlan};
 use crate::reply::{ArithmeticReply, DeleteReply, ErrorReply, GetReply, StoreReply};
 use crate::Reply;
 
@@ -32,6 +36,22 @@ pub enum MetaReplyEncodeError {
     FrameTooLarge { maximum: usize },
 }
 
+impl From<EncodedKeyTooLongError> for MetaReplyEncodeError {
+    fn from(_: EncodedKeyTooLongError) -> Self {
+        Self::EncodedKeyTooLong {
+            maximum: MAX_KEY_BYTES,
+        }
+    }
+}
+
+impl From<LineTooLongError> for MetaReplyEncodeError {
+    fn from(_: LineTooLongError) -> Self {
+        Self::FrameTooLarge {
+            maximum: MAX_REPLY_LINE_BYTES,
+        }
+    }
+}
+
 impl MetaReplyEncoder {
     pub const fn new() -> Self {
         Self
@@ -43,26 +63,24 @@ impl MetaReplyEncoder {
         plan: &MetaReplyPlan,
         out: &mut BytesMut,
     ) -> Result<(), MetaReplyEncodeError> {
-        if matches!(
-            (reply, plan.quiet),
-            (Reply::Get(GetReply::Miss), MetaQuietPolicy::SuppressMiss)
-                | (
-                    Reply::Store(StoreReply::Success(_)),
-                    MetaQuietPolicy::SuppressSuccess
-                )
-                | (
-                    Reply::Delete(DeleteReply::Success),
-                    MetaQuietPolicy::SuppressSuccess
-                )
-                | (
-                    Reply::Arithmetic(ArithmeticReply::Success(_)),
-                    MetaQuietPolicy::SuppressSuccess
-                )
-        ) {
+        let suppress_reply = match plan.quiet {
+            MetaQuietPolicy::None => false,
+            MetaQuietPolicy::SuppressMiss => {
+                matches!(reply, Reply::Get(GetReply::Miss))
+            }
+            MetaQuietPolicy::SuppressSuccess => matches!(
+                reply,
+                Reply::Store(StoreReply::Success(_))
+                    | Reply::Delete(DeleteReply::Success)
+                    | Reply::Arithmetic(ArithmeticReply::Success(_))
+            ),
+        };
+        if suppress_reply {
             return Ok(());
         }
 
         let checkpoint = out.len();
+
         let result = match reply {
             Reply::Get(reply) => command::get::encode_reply(reply, plan, out),
             Reply::Store(reply) => command::store::encode_reply(reply, plan, out),
@@ -77,6 +95,7 @@ impl MetaReplyEncoder {
         if result.is_err() {
             out.truncate(checkpoint);
         }
+
         result
     }
 
@@ -87,6 +106,7 @@ impl MetaReplyEncoder {
 
 fn encode_error(reply: &ErrorReply, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
     let line_start = out.len();
+
     match reply {
         ErrorReply::Error => out.extend_from_slice(b"ERROR"),
         ErrorReply::Client(message) => {
@@ -98,7 +118,10 @@ fn encode_error(reply: &ErrorReply, out: &mut BytesMut) -> Result<(), MetaReplyE
             write_error_message(out, message.as_ref())?;
         }
     }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
+
+    finish_line(out, line_start, MAX_REPLY_LINE_BYTES)?;
+
+    Ok(())
 }
 
 fn write_error_message(
@@ -108,11 +131,14 @@ fn write_error_message(
     let Some(message) = message else {
         return Ok(());
     };
+
     if message.is_empty() || message.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
         return Err(MetaReplyEncodeError::InvalidData("invalid error message"));
     }
+
     out.extend_from_slice(b" ");
     out.extend_from_slice(message);
+
     Ok(())
 }
 
@@ -124,13 +150,13 @@ pub fn write_opaque(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), Meta
     if opaque.is_empty() || opaque.len() > MAX_OPAQUE_BYTES {
         return Err(MetaReplyEncodeError::InvalidData("invalid opaque token"));
     }
-    wire::write_bare_flag(out, b'O');
+
+    write_bare_flag(out, b'O');
     out.extend_from_slice(opaque);
+
     Ok(())
 }
 
-/// Writes the client-facing ` k<key>` token (plus the `b` marker for a
-/// base64-encoded reply key) from the frontend's reply plan.
 pub fn write_key_token(
     plan: &MetaReplyPlan,
     out: &mut BytesMut,
@@ -143,20 +169,19 @@ pub fn write_key_token(
         return Err(MetaReplyEncodeError::InvalidData("empty external key"));
     }
 
-    wire::write_bare_flag(out, b'k');
+    write_bare_flag(out, b'k');
+
     match plan.key_encoding {
         KeyEncoding::Text => out.extend_from_slice(key),
         KeyEncoding::Base64 => {
-            wire::write_base64_key(out, key).map_err(encoded_key_too_long)?;
-            wire::write_bare_flag(out, b'b');
+            write_base64_key(out, key)?;
+            write_bare_flag(out, b'b');
         }
     }
+
     Ok(())
 }
 
-/// Writes one ` <flag><value>` reply token. A `required` projection with no
-/// value is the reply/plan mismatch this encoder exists to catch; optional
-/// fields (arithmetic failure codes) are simply omitted.
 pub fn write_field(
     out: &mut BytesMut,
     flag: u8,
@@ -166,8 +191,9 @@ pub fn write_field(
 ) -> Result<(), MetaReplyEncodeError> {
     match value {
         Some(value) => {
-            wire::write_bare_flag(out, flag);
-            wire::write_u64(out, value);
+            write_bare_flag(out, flag);
+            write_u64(out, value);
+
             Ok(())
         }
         None if required => Err(MetaReplyEncodeError::MissingField(name)),
@@ -175,7 +201,6 @@ pub fn write_field(
     }
 }
 
-/// [`write_field`] for the one signed reply token, `t<ttl>`.
 pub fn write_i64_field(
     out: &mut BytesMut,
     flag: u8,
@@ -185,24 +210,13 @@ pub fn write_i64_field(
 ) -> Result<(), MetaReplyEncodeError> {
     match value {
         Some(value) => {
-            wire::write_bare_flag(out, flag);
-            wire::write_i64(out, value);
+            write_bare_flag(out, flag);
+            write_i64(out, value);
+
             Ok(())
         }
         None if required => Err(MetaReplyEncodeError::MissingField(name)),
         None => Ok(()),
-    }
-}
-
-pub fn encoded_key_too_long(_: wire::EncodedKeyTooLong) -> MetaReplyEncodeError {
-    MetaReplyEncodeError::EncodedKeyTooLong {
-        maximum: MAX_KEY_BYTES,
-    }
-}
-
-pub fn reply_line_too_long(error: wire::LineTooLong) -> MetaReplyEncodeError {
-    MetaReplyEncodeError::FrameTooLarge {
-        maximum: error.maximum,
     }
 }
 

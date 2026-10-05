@@ -26,8 +26,7 @@ pub enum ArithmeticMode {
     Decrement, // M<D> or M<->
 }
 
-/// `ma` has three distinct order-sensitive flags, so its temporal program
-/// never exceeds three instructions.
+/// `ma` has three distinct order-sensitive flags
 pub type ArithmeticTemporalInstructions = BoundedList<ArithmeticTemporalInstruction, 3>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

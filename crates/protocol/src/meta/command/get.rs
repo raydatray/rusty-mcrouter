@@ -1,28 +1,21 @@
-//! `mg`: parse/encode for the Meta get command on both proxy hops.
-
 use bytes::{Bytes, BytesMut};
 
-use crate::meta::reply_decoder::{
-    framed_value, invalid_argument, invalid_flag, invalid_number, INVALID_RESPONSE,
-    MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES, SHAPE_MISMATCH,
-};
-use crate::meta::reply_encoder::{
-    reply_line_too_long, write_field, write_i64_field, write_key_token, write_opaque,
-};
-use crate::meta::request_decoder::{
-    bad_argument, bad_number, capacity_error, flag_error, parse_opaque, recoverable_client_error,
-    require_hint_argument, resolve_key, BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES,
-    MAX_LINE_TOKENS,
-};
-use crate::meta::request_encoder::{
-    command_line_too_long, write_backend_key, write_i32_flag, write_u64_flag,
-};
-use crate::meta::tokens::{
-    flags, parse_i32, parse_i64, parse_u32, parse_u64, require_no_argument, split_tokens,
+use crate::meta::read::{
+    flags, parse_i32, parse_i64, parse_u32, parse_u64, require_no_argument, split_tokens, Flag,
     FlagBudget,
 };
+use crate::meta::reply_decoder::{
+    framed_value, INVALID_RESPONSE, MAX_REPLY_LINE_BYTES, MAX_REPLY_VALUE_BYTES, SHAPE_MISMATCH,
+};
+use crate::meta::reply_encoder::{write_field, write_i64_field, write_key_token, write_opaque};
+use crate::meta::request_decoder::{
+    parse_opaque, parse_output_flag, recoverable_client_error, require_hint_argument, resolve_key,
+    BAD_COMMAND_LINE, INVALID_FLAG, MAX_COMMAND_LINE_BYTES, MAX_LINE_TOKENS,
+};
+use crate::meta::request_encoder::{write_backend_key, write_i32_flag, write_u64_flag};
+use crate::meta::write::{finish_line, write_bare_flag, write_u64};
 use crate::meta::{
-    wire, DecodedMetaCommand, GetSuccessShape, KeyEncoding, MetaOutputToken, MetaQuietPolicy,
+    DecodedMetaCommand, GetSuccessShape, KeyEncoding, MetaOutputToken, MetaQuietPolicy,
     MetaReplyDecodeError, MetaReplyEncodeError, MetaReplyExpectation, MetaReplyPlan,
     MetaRequestDecodeError, MetaRequestEncodeError,
 };
@@ -36,6 +29,7 @@ pub fn parse_request<'a>(
     let raw_key = tokens
         .next()
         .ok_or_else(|| recoverable_client_error(BAD_COMMAND_LINE))?;
+
     let mut return_value = false;
     let mut return_client_flags = false;
     let mut return_cas = false;
@@ -49,108 +43,78 @@ pub fn parse_request<'a>(
     let mut reply_plan = MetaReplyPlan::default();
     let mut return_key = false;
 
-    // 20 line tokens minus `mg` and the key.
+    // `mg` has max 20 line tokens minus the command and key upstream
     for flag in flags(tokens, FlagBudget::Tokens(MAX_LINE_TOKENS - 2)) {
-        let (flag, argument) = flag.map_err(flag_error)?;
-        match flag {
+        let Flag { letter, argument } = flag?;
+        match letter {
             b'b' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
+
                 reply_plan.key_encoding = KeyEncoding::Base64;
             }
             b'c' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Cas, &mut reply_plan)?;
+
                 return_cas = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Cas)
-                    .map_err(capacity_error)?;
             }
-            b'C' => check_cas = Some(parse_u64(argument).map_err(bad_number)?),
+            b'C' => check_cas = Some(parse_u64(argument)?),
             b'f' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::ClientFlags, &mut reply_plan)?;
+
                 return_client_flags = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::ClientFlags)
-                    .map_err(capacity_error)?;
             }
             b'h' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::HitState, &mut reply_plan)?;
+
                 return_hit_state = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::HitState)
-                    .map_err(capacity_error)?;
             }
             b'k' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Key, &mut reply_plan)?;
+
                 return_key = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Key)
-                    .map_err(capacity_error)?;
             }
             b'l' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::LastAccess, &mut reply_plan)?;
+
                 return_last_access = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::LastAccess)
-                    .map_err(capacity_error)?;
             }
             b'O' => parse_opaque(argument, &mut reply_plan)?,
             b'q' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
+
                 reply_plan.quiet = MetaQuietPolicy::SuppressMiss;
             }
             b's' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                parse_output_flag(argument, MetaOutputToken::Size, &mut reply_plan)?;
+
                 return_size = true;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Size)
-                    .map_err(capacity_error)?;
             }
             b't' => {
-                require_no_argument(argument).map_err(bad_argument)?;
-                temporal
-                    .push(GetTemporalInstruction::ReturnTtl)
-                    .map_err(capacity_error)?;
-                reply_plan
-                    .output_order
-                    .push(MetaOutputToken::Ttl)
-                    .map_err(capacity_error)?;
+                parse_output_flag(argument, MetaOutputToken::Ttl, &mut reply_plan)?;
+
+                temporal.push(GetTemporalInstruction::ReturnTtl)?;
             }
             b'u' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
+
                 no_lru_bump = true;
             }
             b'v' => {
-                require_no_argument(argument).map_err(bad_argument)?;
+                require_no_argument(argument)?;
+
                 return_value = true;
             }
-            b'E' => override_cas = Some(parse_u64(argument).map_err(bad_number)?),
-            b'N' => temporal
-                .push(GetTemporalInstruction::Vivify(
-                    parse_i32(argument).map_err(bad_number)?,
-                ))
-                .map_err(capacity_error)?,
-            b'R' => temporal
-                .push(GetTemporalInstruction::WinForRecache(
-                    parse_i32(argument).map_err(bad_number)?,
-                ))
-                .map_err(capacity_error)?,
-            b'T' => temporal
-                .push(GetTemporalInstruction::UpdateTtl(
-                    parse_i32(argument).map_err(bad_number)?,
-                ))
-                .map_err(capacity_error)?,
+            b'E' => override_cas = Some(parse_u64(argument)?),
+            b'N' => temporal.push(GetTemporalInstruction::Vivify(parse_i32(argument)?))?,
+            b'R' => temporal.push(GetTemporalInstruction::WinForRecache(parse_i32(argument)?))?,
+            b'T' => temporal.push(GetTemporalInstruction::UpdateTtl(parse_i32(argument)?))?,
             b'P' | b'L' => require_hint_argument(argument)?,
             _ => return Err(recoverable_client_error(INVALID_FLAG)),
         }
     }
 
     let key = resolve_key(raw_key, return_key, &mut reply_plan)?;
+
     Ok(DecodedMetaCommand::Request {
         request: Request::Get(GetRequest {
             key,
@@ -174,53 +138,61 @@ pub fn encode_request(
     out: &mut BytesMut,
 ) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
     let line_start = out.len();
+
     out.extend_from_slice(b"mg ");
+
     let key_is_base64 = write_backend_key(out, &request.key)?;
-
     if key_is_base64 {
-        wire::write_bare_flag(out, b'b');
+        write_bare_flag(out, b'b');
     }
 
-    // Direct fields use canonical order. Only the temporal program has
-    // request-order semantics in memcached.
     if request.return_value {
-        wire::write_bare_flag(out, b'v');
+        write_bare_flag(out, b'v');
     }
+
     if request.return_client_flags {
-        wire::write_bare_flag(out, b'f');
+        write_bare_flag(out, b'f');
     }
+
     if request.return_cas {
-        wire::write_bare_flag(out, b'c');
+        write_bare_flag(out, b'c');
     }
+
     if request.return_size {
-        wire::write_bare_flag(out, b's');
+        write_bare_flag(out, b's');
     }
+
     if request.return_hit_state {
-        wire::write_bare_flag(out, b'h');
+        write_bare_flag(out, b'h');
     }
+
     if request.return_last_access {
-        wire::write_bare_flag(out, b'l');
+        write_bare_flag(out, b'l');
     }
+
     if let Some(cas) = request.check_cas {
         write_u64_flag(out, b'C', cas);
     }
+
     if let Some(cas) = request.override_cas {
         write_u64_flag(out, b'E', cas);
     }
+
     if request.no_lru_bump {
-        wire::write_bare_flag(out, b'u');
+        write_bare_flag(out, b'u');
     }
 
     for instruction in request.temporal.iter() {
         match instruction {
             GetTemporalInstruction::Vivify(ttl) => write_i32_flag(out, b'N', *ttl),
             GetTemporalInstruction::UpdateTtl(ttl) => write_i32_flag(out, b'T', *ttl),
-            GetTemporalInstruction::ReturnTtl => wire::write_bare_flag(out, b't'),
+            GetTemporalInstruction::ReturnTtl => write_bare_flag(out, b't'),
             GetTemporalInstruction::WinForRecache(ttl) => write_i32_flag(out, b'R', *ttl),
         }
     }
 
-    wire::finish_line(out, line_start, MAX_COMMAND_LINE_BYTES).map_err(command_line_too_long)?;
+    finish_line(out, line_start, MAX_COMMAND_LINE_BYTES)?;
+
     Ok(MetaReplyExpectation::Get(
         match (request.return_value, request.check_cas.is_some()) {
             (false, _) => GetSuccessShape::Header,
@@ -241,25 +213,32 @@ pub fn parse_reply(
             if tokens.next().is_some() {
                 return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
             }
+
             Ok(Reply::Get(GetReply::Miss))
         }
         Some(b"HD") => {
             if shape == GetSuccessShape::Value {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
+
             let hit = parse_attributes(tokens)?;
+
             Ok(Reply::Get(GetReply::Hit(hit)))
         }
         Some(b"VA") => {
             if shape == GetSuccessShape::Header {
                 return Err(MetaReplyDecodeError::InvalidResponse(SHAPE_MISMATCH));
             }
+
             let value = framed_value(tokens.next(), value)?;
+
             let mut hit = parse_attributes(tokens)?;
             if hit.size.is_some_and(|size| size != value.len() as u64) {
                 return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
             }
+
             hit.value = Some(value);
+
             Ok(Reply::Get(GetReply::Hit(hit)))
         }
         _ => Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
@@ -269,45 +248,49 @@ pub fn parse_reply(
 fn parse_attributes<'a>(
     tokens: impl Iterator<Item = &'a [u8]>,
 ) -> Result<GetHit, MetaReplyDecodeError> {
-    let mut hit = GetHit::default();
+    let mut result = GetHit::default();
 
     for flag in flags(tokens, FlagBudget::Unlimited) {
-        let (flag, argument) = flag.map_err(invalid_flag)?;
-        match flag {
-            b'c' => hit.cas = Some(parse_u64(argument).map_err(invalid_number)?),
-            b'f' => hit.client_flags = Some(parse_u32(argument).map_err(invalid_number)?),
-            b's' => hit.size = Some(parse_u64(argument).map_err(invalid_number)?),
-            b't' => hit.ttl = Some(parse_i64(argument).map_err(invalid_number)?),
+        let Flag { letter, argument } = flag?;
+        match letter {
+            b'c' => result.cas = Some(parse_u64(argument)?),
+            b'f' => result.client_flags = Some(parse_u32(argument)?),
+            b's' => result.size = Some(parse_u64(argument)?),
+            b't' => result.ttl = Some(parse_i64(argument)?),
             b'h' => {
-                hit.hit_before = Some(match argument {
+                result.hit_before = Some(match argument {
                     b"0" => false,
                     b"1" => true,
                     _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
                 });
             }
-            b'l' => hit.last_access_seconds = Some(parse_u64(argument).map_err(invalid_number)?),
+            b'l' => result.last_access_seconds = Some(parse_u64(argument)?),
             b'W' => {
-                require_no_argument(argument).map_err(invalid_argument)?;
-                if hit.recache != RecacheState::None {
+                require_no_argument(argument)?;
+
+                if result.recache != RecacheState::None {
                     return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
                 }
-                hit.recache = RecacheState::Won;
+
+                result.recache = RecacheState::Won;
             }
             b'Z' => {
-                require_no_argument(argument).map_err(invalid_argument)?;
-                if hit.recache != RecacheState::None {
+                require_no_argument(argument)?;
+
+                if result.recache != RecacheState::None {
                     return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE));
                 }
-                hit.recache = RecacheState::AlreadyWon;
+
+                result.recache = RecacheState::AlreadyWon;
             }
             b'X' => {
-                require_no_argument(argument).map_err(invalid_argument)?;
-                hit.stale = true;
+                require_no_argument(argument)?;
+                result.stale = true;
             }
             _ => return Err(MetaReplyDecodeError::InvalidResponse(INVALID_RESPONSE)),
         }
     }
-    Ok(hit)
+    Ok(result)
 }
 
 pub fn encode_reply(
@@ -323,7 +306,9 @@ pub fn encode_reply(
 
 fn encode_miss(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReplyEncodeError> {
     let line_start = out.len();
+
     out.extend_from_slice(b"EN");
+
     for token in plan.output_order.iter() {
         match token {
             MetaOutputToken::Opaque => write_opaque(plan, out)?,
@@ -331,7 +316,10 @@ fn encode_miss(plan: &MetaReplyPlan, out: &mut BytesMut) -> Result<(), MetaReply
             _ => {}
         }
     }
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)
+
+    finish_line(out, line_start, MAX_REPLY_LINE_BYTES)?;
+
+    Ok(())
 }
 
 fn encode_hit(
@@ -340,17 +328,20 @@ fn encode_hit(
     out: &mut BytesMut,
 ) -> Result<(), MetaReplyEncodeError> {
     let line_start = out.len();
+
     if let Some(value) = &hit.value {
         if value.len() > MAX_REPLY_VALUE_BYTES {
             return Err(MetaReplyEncodeError::ValueTooLarge {
                 maximum: MAX_REPLY_VALUE_BYTES,
             });
         }
+
         if hit.size.is_some_and(|size| size != value.len() as u64) {
             return Err(MetaReplyEncodeError::SizeMismatch);
         }
+
         out.extend_from_slice(b"VA ");
-        wire::write_u64(out, value.len() as u64);
+        write_u64(out, value.len() as u64);
     } else {
         out.extend_from_slice(b"HD");
     }
@@ -379,7 +370,8 @@ fn encode_hit(
                 let value = hit
                     .hit_before
                     .ok_or(MetaReplyEncodeError::MissingField("hit state"))?;
-                wire::write_bare_flag(out, b'h');
+
+                write_bare_flag(out, b'h');
                 out.extend_from_slice(if value { b"1" } else { b"0" });
             }
             MetaOutputToken::LastAccess => {
@@ -391,19 +383,23 @@ fn encode_hit(
     }
 
     if hit.recache == RecacheState::AlreadyWon {
-        wire::write_bare_flag(out, b'Z');
-    }
-    if hit.stale {
-        wire::write_bare_flag(out, b'X');
-    }
-    if hit.recache == RecacheState::Won {
-        wire::write_bare_flag(out, b'W');
+        write_bare_flag(out, b'Z');
     }
 
-    wire::finish_line(out, line_start, MAX_REPLY_LINE_BYTES).map_err(reply_line_too_long)?;
+    if hit.stale {
+        write_bare_flag(out, b'X');
+    }
+
+    if hit.recache == RecacheState::Won {
+        write_bare_flag(out, b'W');
+    }
+
+    finish_line(out, line_start, MAX_REPLY_LINE_BYTES)?;
+
     if let Some(value) = &hit.value {
         out.extend_from_slice(value);
         out.extend_from_slice(b"\r\n");
     }
+
     Ok(())
 }

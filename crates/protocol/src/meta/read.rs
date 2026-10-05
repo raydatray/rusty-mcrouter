@@ -1,74 +1,64 @@
-//! Read-side primitives shared by the Meta line parsers: locating one
-//! complete line at the head of a streaming buffer, splitting it into
-//! tokens, walking flag tokens, and parsing decimal numbers.
-//!
-//! Both decoders walk space-separated tokens and treat every token after the
-//! positional ones as a single-letter flag with an inline argument. The
-//! budget/shape/duplicate validation around that walk is identical across
-//! commands; only the per-flag semantics differ, so those stay at the call
-//! sites as plain `match` arms.
-
 use std::str::FromStr;
 
 use memchr::memchr;
 
-/// The result of locating one complete line at the head of a buffer
-/// without consuming anything.
 pub enum FindLine {
-    /// No terminator buffered yet; the caller should wait for more bytes.
     Incomplete,
-    /// The complete line (or the unterminated prefix) exceeds the frame
-    /// limit. The buffer is left untouched for diagnostics.
     OverLimit,
-    /// One complete line at the head of the buffer. `end` excludes the
-    /// `\r\n` / `\n` terminator; `frame_len` includes it.
-    Line { end: usize, frame_len: usize },
+    /// `end` excludes the `\r\n` or `\n` terminator, `frame_len` includes it.
+    Line {
+        end: usize,
+        frame_len: usize,
+    },
 }
 
-/// Locates the first `\n`-terminated line in `src`, bounded by `max_frame`
-/// bytes including the terminator. Pure: consumes nothing and keeps no
-/// cursor, so fragmented reads rescan the (bounded) unterminated prefix.
+/// locates the first `\n`-terminated line in src, bounded by `max_frame` len
 pub fn find_line(src: &[u8], max_frame: usize) -> FindLine {
-    let Some(newline) = memchr(b'\n', src) else {
+    let Some(new_line) = memchr(b'\n', src) else {
         if src.len() >= max_frame {
             return FindLine::OverLimit;
         }
+
         return FindLine::Incomplete;
     };
 
-    let frame_len = newline + 1;
+    let frame_len = new_line + 1;
     if frame_len > max_frame {
         return FindLine::OverLimit;
     }
 
-    let end = if newline > 0 && src[newline - 1] == b'\r' {
-        newline - 1
+    let end = if new_line > 0 && src[new_line - 1] == b'\r' {
+        new_line - 1
     } else {
-        newline
+        new_line
     };
+
     FindLine::Line { end, frame_len }
 }
 
-/// Splits one command or reply line into its non-empty tokens. Runs of
-/// spaces collapse, matching memcached's tokenizer.
+/// splits one command or reply line into its non-empty tokens
+/// slices of spaces collapse into nothing, matching memcached's tokenizer
 pub fn split_tokens(line: &[u8]) -> impl Iterator<Item = &[u8]> + Clone {
     line.split(|byte| *byte == b' ')
         .filter(|token| !token.is_empty())
 }
 
-/// Walks flag tokens, yielding `(letter, argument)` pairs after the checks
-/// every Meta command shares: an optional token budget (memcached's
-/// "options flags are too long", counted before any validation), a leading
-/// ASCII letter, and letter-level duplicate rejection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Flag<'a> {
+    pub(super) letter: u8,
+    pub(super) argument: &'a [u8],
+}
+/// walks flag tokens yielding `Flags` with an optional maximum flag count
 pub fn flags<'a>(
     tokens: impl Iterator<Item = &'a [u8]>,
     budget: FlagBudget,
-) -> impl Iterator<Item = Result<(u8, &'a [u8]), FlagError>> {
+) -> impl Iterator<Item = Result<Flag<'a>, FlagError>> {
     let mut seen = SeenFlags::default();
     let mut remaining = match budget {
         FlagBudget::Tokens(count) => Some(count),
         FlagBudget::Unlimited => None,
     };
+
     tokens.map(move |token| {
         if let Some(remaining) = &mut remaining {
             if *remaining == 0 {
@@ -76,37 +66,38 @@ pub fn flags<'a>(
             }
             *remaining -= 1;
         }
-        let Some((&flag, argument)) = token.split_first() else {
+
+        let Some((&letter, argument)) = token.split_first() else {
             return Err(FlagError::InvalidToken);
         };
-        if !flag.is_ascii_alphabetic() {
+
+        if !letter.is_ascii_alphabetic() {
             return Err(FlagError::InvalidToken);
         }
-        if !seen.insert(flag) {
+
+        if !seen.insert(letter) {
             return Err(FlagError::Duplicate);
         }
-        Ok((flag, argument))
+
+        Ok(Flag { letter, argument })
     })
 }
 
-/// A bare flag carried an argument.
 #[derive(Debug, Eq, PartialEq)]
-pub struct UnexpectedArgument;
+pub struct UnexpectedFlagArgumentError;
 
-/// Validates that a bare flag token carries no argument.
-pub fn require_no_argument(argument: &[u8]) -> Result<(), UnexpectedArgument> {
+pub fn require_no_argument(argument: &[u8]) -> Result<(), UnexpectedFlagArgumentError> {
     if argument.is_empty() {
         Ok(())
     } else {
-        Err(UnexpectedArgument)
+        Err(UnexpectedFlagArgumentError)
     }
 }
 
 #[derive(Clone, Copy)]
 pub enum FlagBudget {
-    /// At most this many flag tokens; one more is an error.
     Tokens(usize),
-    /// memcached's `ma` and `me` parsers have no token budget.
+    /// memcached's `ma` and `me` parsers have no token budget
     Unlimited,
 }
 
@@ -117,54 +108,55 @@ pub enum FlagError {
     Duplicate,
 }
 
-/// The token is not a decimal number that fits the requested width.
 #[derive(Debug, Eq, PartialEq)]
-pub struct BadNumber;
+pub struct BadNumberError;
 
-/// Parses one decimal token. std's integer grammar — an optional sign
-/// followed by ASCII digits, overflow-checked, no whitespace — matches
-/// memcached's accepted set exactly.
-fn parse_number<T>(raw: &[u8]) -> Result<T, BadNumber>
+fn parse_number<T>(raw: &[u8]) -> Result<T, BadNumberError>
 where
     T: FromStr,
 {
-    std::str::from_utf8(raw)
-        .ok()
-        .and_then(|raw| raw.parse().ok())
-        .ok_or(BadNumber)
+    let text = std::str::from_utf8(raw).map_err(|_| BadNumberError)?;
+
+    text.parse().map_err(|_| BadNumberError)
 }
 
-pub fn parse_u64(raw: &[u8]) -> Result<u64, BadNumber> {
+pub fn parse_u64(raw: &[u8]) -> Result<u64, BadNumberError> {
     parse_number(raw)
 }
 
-pub fn parse_u32(raw: &[u8]) -> Result<u32, BadNumber> {
+pub fn parse_u32(raw: &[u8]) -> Result<u32, BadNumberError> {
     parse_number(raw)
 }
 
-pub fn parse_usize(raw: &[u8]) -> Result<usize, BadNumber> {
+pub fn parse_usize(raw: &[u8]) -> Result<usize, BadNumberError> {
     parse_number(raw)
 }
 
-pub fn parse_i32(raw: &[u8]) -> Result<i32, BadNumber> {
+pub fn parse_i32(raw: &[u8]) -> Result<i32, BadNumberError> {
     parse_number(raw)
 }
 
-pub fn parse_i64(raw: &[u8]) -> Result<i64, BadNumber> {
+pub fn parse_i64(raw: &[u8]) -> Result<i64, BadNumberError> {
     parse_number(raw)
 }
 
-/// A 256-bit set tracking which flag letters appeared on a line.
+/// a 64-bit set tracking which flag letters appeared on a line
+/// flags are ASCII which maximally 57 entries
 #[derive(Default)]
-struct SeenFlags([u64; 4]);
+struct SeenFlags(u64);
 
 impl SeenFlags {
-    /// Returns true when `flag` was not already present.
+    /// returns true when `flag` was not already present
     fn insert(&mut self, flag: u8) -> bool {
-        let word = usize::from(flag / 64);
-        let bit = 1_u64 << (flag % 64);
-        let inserted = self.0[word] & bit == 0;
-        self.0[word] |= bit;
+        assert!(
+            flag.is_ascii_alphabetic(),
+            "flags must be ASCII, and are validated upstream"
+        );
+
+        let bit = 1_u64 << (flag - b'A');
+        let inserted = self.0 & bit == 0;
+        self.0 |= bit;
+
         inserted
     }
 }
@@ -200,15 +192,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_duplicate_values_across_all_words() {
-        let mut seen = SeenFlags::default();
-        for flag in [0, 63, 64, 127, 128, 191, 192, 255] {
-            assert!(seen.insert(flag));
-            assert!(!seen.insert(flag));
-        }
-    }
-
-    #[test]
     fn split_tokens_collapses_space_runs() {
         assert_eq!(
             split_tokens(b"mg  key   v").collect::<Vec<_>>(),
@@ -224,11 +207,26 @@ mod tests {
 
         assert_eq!(
             collect(b"v Otag", FlagBudget::Unlimited),
-            vec![Ok((b'v', b"".as_slice())), Ok((b'O', b"tag".as_slice()))]
+            vec![
+                Ok(Flag {
+                    letter: b'v',
+                    argument: b"",
+                }),
+                Ok(Flag {
+                    letter: b'O',
+                    argument: b"tag",
+                }),
+            ]
         );
         assert_eq!(
             collect(b"v v", FlagBudget::Unlimited),
-            vec![Ok((b'v', b"".as_slice())), Err(FlagError::Duplicate)]
+            vec![
+                Ok(Flag {
+                    letter: b'v',
+                    argument: b"",
+                }),
+                Err(FlagError::Duplicate),
+            ]
         );
         assert_eq!(
             collect(b"1", FlagBudget::Unlimited),
@@ -237,8 +235,14 @@ mod tests {
         assert_eq!(
             collect(b"a b c", FlagBudget::Tokens(2)),
             vec![
-                Ok((b'a', b"".as_slice())),
-                Ok((b'b', b"".as_slice())),
+                Ok(Flag {
+                    letter: b'a',
+                    argument: b"",
+                }),
+                Ok(Flag {
+                    letter: b'b',
+                    argument: b"",
+                }),
                 Err(FlagError::OverBudget),
             ]
         );
@@ -247,7 +251,7 @@ mod tests {
     #[test]
     fn parses_numeric_boundaries() {
         assert_eq!(parse_u64(b"18446744073709551615"), Ok(u64::MAX));
-        assert_eq!(parse_u64(b"18446744073709551616"), Err(BadNumber));
+        assert_eq!(parse_u64(b"18446744073709551616"), Err(BadNumberError));
         assert_eq!(parse_u64(b"+123"), Ok(123)); // memcached accepts a bare sign
         assert_eq!(parse_i32(b"-2147483648"), Ok(i32::MIN));
         assert_eq!(parse_i32(b"2147483647"), Ok(i32::MAX));
@@ -258,8 +262,18 @@ mod tests {
     #[test]
     fn rejects_empty_signs_and_non_digits() {
         for raw in [b"".as_slice(), b"+", b"-", b"1x", b" 1", b"++1", b"+-1"] {
-            assert_eq!(parse_u64(raw), Err(BadNumber));
-            assert_eq!(parse_i64(raw), Err(BadNumber));
+            assert_eq!(parse_u64(raw), Err(BadNumberError));
+            assert_eq!(parse_i64(raw), Err(BadNumberError));
+        }
+    }
+
+    #[test]
+    fn detects_duplicates_for_all_ascii_letters() {
+        let mut seen = SeenFlags::default();
+
+        for flag in (b'A'..=b'Z').chain(b'a'..=b'z') {
+            assert!(seen.insert(flag));
+            assert!(!seen.insert(flag));
         }
     }
 }

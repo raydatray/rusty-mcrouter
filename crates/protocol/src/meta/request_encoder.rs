@@ -2,7 +2,12 @@ use bytes::BytesMut;
 use thiserror::Error;
 
 use crate::key::MAX_KEY_BYTES;
-use crate::meta::{command, wire, MetaReplyExpectation};
+use crate::meta::request_decoder::MAX_COMMAND_LINE_BYTES;
+use crate::meta::write::{
+    write_bare_flag, write_base64_key, write_i64, write_u64, EncodedKeyTooLongError,
+    LineTooLongError,
+};
+use crate::meta::{command, MetaReplyExpectation};
 use crate::{Key, Request};
 
 #[derive(Debug, Default)]
@@ -23,6 +28,22 @@ pub enum MetaRequestEncodeError {
     FrameTooLarge { maximum: usize },
 }
 
+impl From<EncodedKeyTooLongError> for MetaRequestEncodeError {
+    fn from(_: EncodedKeyTooLongError) -> Self {
+        Self::EncodedKeyTooLong {
+            maximum: MAX_KEY_BYTES,
+        }
+    }
+}
+
+impl From<LineTooLongError> for MetaRequestEncodeError {
+    fn from(_: LineTooLongError) -> Self {
+        Self::FrameTooLarge {
+            maximum: MAX_COMMAND_LINE_BYTES,
+        }
+    }
+}
+
 impl MetaRequestEncoder {
     pub const fn new() -> Self {
         Self
@@ -34,6 +55,7 @@ impl MetaRequestEncoder {
         out: &mut BytesMut,
     ) -> Result<MetaReplyExpectation, MetaRequestEncodeError> {
         let checkpoint = out.len();
+
         let result = match request {
             Request::Get(request) => command::get::encode_request(request, out),
             Request::Store(request) => command::store::encode_request(request, out),
@@ -44,18 +66,19 @@ impl MetaRequestEncoder {
         if result.is_err() {
             out.truncate(checkpoint);
         }
+
         result
     }
 
-    /// Encodes a backend-only health probe. Takes no `Request` since it cannot enter routing graph.
     pub fn encode_version_probe(&self, out: &mut BytesMut) -> MetaReplyExpectation {
         out.extend_from_slice(b"version\r\n");
+
         MetaReplyExpectation::Version
     }
 }
 
-/// Writes the backend form of `key`: the routing prefix is stripped, and a
-/// binary key is base64-encoded (the returned bool asks for the `b` flag).
+/// writes the backend form of `key`, strip the routing prefix and encode
+/// according to requested encoding
 pub fn write_backend_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequestEncodeError> {
     let key = key.key_without_routing_prefix();
     if key.is_empty() {
@@ -64,10 +87,12 @@ pub fn write_backend_key(out: &mut BytesMut, key: &Key) -> Result<bool, MetaRequ
 
     if is_text_key(key) {
         out.extend_from_slice(key);
+
         return Ok(false);
     }
 
-    wire::write_base64_key(out, key).map_err(encoded_key_too_long)?;
+    write_base64_key(out, key)?;
+
     Ok(true)
 }
 
@@ -76,30 +101,18 @@ fn is_text_key(key: &[u8]) -> bool {
 }
 
 pub fn write_u64_flag(out: &mut BytesMut, flag: u8, value: u64) {
-    wire::write_bare_flag(out, flag);
-    wire::write_u64(out, value);
+    write_bare_flag(out, flag);
+    write_u64(out, value);
 }
 
 pub fn write_i32_flag(out: &mut BytesMut, flag: u8, value: i32) {
-    wire::write_bare_flag(out, flag);
-    wire::write_i64(out, i64::from(value));
+    write_bare_flag(out, flag);
+    write_i64(out, i64::from(value));
 }
 
 pub fn write_mode_flag(out: &mut BytesMut, mode: u8) {
-    wire::write_bare_flag(out, b'M');
+    write_bare_flag(out, b'M');
     out.extend_from_slice(&[mode]);
-}
-
-fn encoded_key_too_long(_: wire::EncodedKeyTooLong) -> MetaRequestEncodeError {
-    MetaRequestEncodeError::EncodedKeyTooLong {
-        maximum: MAX_KEY_BYTES,
-    }
-}
-
-pub fn command_line_too_long(error: wire::LineTooLong) -> MetaRequestEncodeError {
-    MetaRequestEncodeError::FrameTooLarge {
-        maximum: error.maximum,
-    }
 }
 
 #[cfg(test)]
