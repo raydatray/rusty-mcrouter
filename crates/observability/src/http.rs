@@ -12,6 +12,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
 use crate::metrics::{ControlMetrics, MetricsRegistry};
@@ -38,6 +39,7 @@ pub struct MetricsHttpSetup {
     pub registry: Arc<MetricsRegistry>,
     pub metrics: Arc<ControlMetrics>,
     pub options: MetricsHttpOptions,
+    pub shutdown: oneshot::Receiver<()>,
 }
 
 pub struct MetricsHttp {
@@ -46,6 +48,7 @@ pub struct MetricsHttp {
     tasks: JoinSet<anyhow::Result<()>>,
     metrics: Arc<ControlMetrics>,
     options: MetricsHttpOptions,
+    shutdown: oneshot::Receiver<()>,
 }
 
 impl MetricsHttp {
@@ -56,43 +59,47 @@ impl MetricsHttp {
             tasks: JoinSet::new(),
             metrics: setup.metrics,
             options: setup.options,
+            shutdown: setup.shutdown,
         }
-    }
-
-    pub async fn step(&mut self) -> anyhow::Result<()> {
-        tokio::select! {
-            accepted = self.listener.accept() => {
-                let (stream, _) = accepted.context("accept metrics connection")?;
-                if self.tasks.len() >= self.options.max_connections {
-                    self.metrics.http_rejected.inc();
-                    drop(stream);
-                    return Ok(());
-                }
-
-                let registry = Arc::clone(&self.registry);
-                let timeout = self.options.request_timeout;
-                self.tasks.spawn(async move { serve_connection(stream, registry, timeout).await });
-            }
-
-            Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
-                match result {
-                    Err(error) => return Err(error).context("metrics connection task failed"),
-                    Ok(Err(error)) => tracing::debug!(%error, "metrics connection failed"),
-                    Ok(Ok(())) => {}
-                }
-            }
-        }
-        Ok(())
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
         loop {
-            self.step().await?;
-        }
-    }
+            tokio::select! {
+                _ = &mut self.shutdown => {
+                    self.tasks.shutdown().await;
+                    return Ok(());
+                }
 
-    pub async fn shutdown(&mut self) {
-        self.tasks.shutdown().await;
+                accepted = self.listener.accept() => {
+                    let (stream, _) = accepted.context("accept metrics connection")?;
+
+                    if self.tasks.len() >= self.options.max_connections {
+                        self.metrics.http_rejected.inc();
+                        drop(stream);
+
+                        continue;
+                    }
+
+                    let registry = Arc::clone(&self.registry);
+                    let timeout = self.options.request_timeout;
+
+                    self.tasks.spawn(async move {
+                        serve_connection(stream, registry, timeout).await
+                    });
+                }
+
+                Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                    match result {
+                        Err(error) => {
+                            return Err(error).context("metrics connection task failed");
+                        }
+                        Ok(Err(error)) => tracing::debug!(%error, "metrics connection failed"),
+                        Ok(Ok(())) => {}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -113,6 +120,7 @@ pub async fn serve_connection(
     .await
     .context("metrics connection timed out")?
     .context("serve metrics connection")?;
+
     Ok(())
 }
 
@@ -126,6 +134,7 @@ async fn respond(
             .header(CONTENT_TYPE, CONTENT_TYPE_VALUE)
             .body(Full::new(Bytes::from(registry.render())))
             .expect("constant response is valid");
+
         return Ok(response);
     }
 
@@ -152,23 +161,25 @@ mod tests {
         }
     }
 
-    async fn start() -> SocketAddr {
+    async fn start() -> (SocketAddr, oneshot::Sender<()>) {
         start_with_options(MetricsHttpOptions::default()).await
     }
 
-    async fn start_with_options(options: MetricsHttpOptions) -> SocketAddr {
+    async fn start_with_options(options: MetricsHttpOptions) -> (SocketAddr, oneshot::Sender<()>) {
         let mut registry = MetricsRegistry::new();
         registry.register(Box::new(Static));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (shutdown, shutdown_rx) = oneshot::channel();
         let server = MetricsHttp::new(MetricsHttpSetup {
             listener,
             registry: Arc::new(registry),
             metrics: Arc::default(),
             options,
+            shutdown: shutdown_rx,
         });
         tokio::spawn(async move { server.run().await.unwrap() });
-        addr
+        (addr, shutdown)
     }
 
     async fn request(addr: SocketAddr, request: &str) -> String {
@@ -181,11 +192,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_metrics_renders_a_scrape() {
-        let response = request(
-            start().await,
-            "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        )
-        .await;
+        let (addr, _shutdown) = start().await;
+        let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
         assert!(response.contains("content-type: text/plain; version=0.0.4\r\n"));
         assert!(response.ends_with("\r\n\r\ntest_total 7\n"), "{response}");
@@ -193,7 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn other_routes_and_methods_are_not_found() {
-        let addr = start().await;
+        let (addr, _shutdown) = start().await;
         for request_head in [
             "GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n",
             "POST /metrics HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
@@ -208,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_http_does_not_stop_the_server() {
-        let addr = start().await;
+        let (addr, _shutdown) = start().await;
         let _ = request(addr, "garbage\r\n\r\n").await;
         let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
@@ -216,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn configured_request_timeout_closes_an_idle_connection() {
-        let addr = start_with_options(MetricsHttpOptions {
+        let (addr, _shutdown) = start_with_options(MetricsHttpOptions {
             request_timeout: Duration::from_millis(10),
             ..MetricsHttpOptions::default()
         })
