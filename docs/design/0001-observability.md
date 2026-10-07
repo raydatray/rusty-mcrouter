@@ -592,7 +592,6 @@ rate(rusty_mcrouter_pool_completed_requests_total[5m])
 
 | metric | type | labels |
 |--------|------|--------|
-| `rusty_mcrouter_build_info` | info gauge | `version` |
 | `rusty_mcrouter_start_time_seconds` | gauge | — |
 | `rusty_mcrouter_proxies` | gauge | — |
 | `rusty_mcrouter_events_dropped_total` | counter | — the bus watching itself |

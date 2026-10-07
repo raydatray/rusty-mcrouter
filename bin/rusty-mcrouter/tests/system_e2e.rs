@@ -238,10 +238,7 @@ async fn metrics_endpoint_reports_traffic() {
         "{body}"
     );
     assert!(body.contains("rusty_mcrouter_proxies 1\n"), "{body}");
-    assert!(
-        body.contains("rusty_mcrouter_build_info{version="),
-        "{body}"
-    );
+    assert!(!body.contains("rusty_mcrouter_build_info"), "{body}");
     // gauges settled after the exchanges closed their connections
     assert!(
         body.contains("rusty_mcrouter_backend_pending_reqs 0\n"),
