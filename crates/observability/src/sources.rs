@@ -382,11 +382,6 @@ impl MetricsSource for SelfSource {
             &[],
             self.start_unix_secs as i64,
         );
-        out.counter(
-            "rusty_mcrouter_build_info",
-            &[("version", env!("CARGO_PKG_VERSION"))],
-            1,
-        );
     }
 }
 
@@ -640,14 +635,10 @@ mod tests {
         });
         assert_eq!(
             text,
-            format!(
-                "rusty_mcrouter_events_dropped_total 2\n\
-                 rusty_mcrouter_metrics_http_rejected_total 0\n\
-                 rusty_mcrouter_proxies 4\n\
-                 rusty_mcrouter_start_time_seconds 1700000000\n\
-                 rusty_mcrouter_build_info{{version=\"{}\"}} 1\n",
-                env!("CARGO_PKG_VERSION")
-            )
+            "rusty_mcrouter_events_dropped_total 2\n\
+             rusty_mcrouter_metrics_http_rejected_total 0\n\
+             rusty_mcrouter_proxies 4\n\
+             rusty_mcrouter_start_time_seconds 1700000000\n"
         );
     }
 }
