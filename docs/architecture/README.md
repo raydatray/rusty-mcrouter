@@ -145,9 +145,14 @@ receives the request and delivers the reply through the request's oneshot.
 fatal framing and session I/O failures end that connection; recoverable parse
 and reply-encoding errors stay in its ordered pipeline. unexpected worker
 mailbox closure and supervised runtime-task panics stop the worker.
-`ControlRuntime` owns event presentation, the metrics listener, at most 32
-concurrent metrics connection tasks, and the config reloader, which sends new
-configs to workers over their command channels. No OS thread or
+`ControlRuntime` owns event presentation, a supervised metrics server task, and
+the config reloader, which sends new configs to workers over their command
+channels. the metrics server owns its listener and at most 32 concurrent
+connection tasks. it runs on the same current-thread Tokio runtime, so scrapes
+continue while a reload awaits worker acknowledgements. control signals and
+joins the metrics server during shutdown. the metrics server aborts and joins
+connection tasks on requested shutdown; fatal exits and cancellation abort the
+tasks through their owner's drop behavior. No OS thread or
 long-lived runtime task is intentionally detached. Wildcard routing is the
 exception for short-lived work: non-primary fanout targets run in detached
 local tasks and may be cancelled when their worker thread stops.

@@ -3,7 +3,8 @@ use std::net::SocketAddr;
 use anyhow::Context;
 use rusty_mcrouter_observability::http::{MetricsHttp, MetricsHttpSetup};
 use rusty_mcrouter_observability::{logging, EventConsumer};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 
 use crate::message::ControlCommand;
 use crate::{ConfigReloader, ControlSetup};
@@ -12,7 +13,8 @@ pub struct ControlRuntime {
     bound_addr: SocketAddr,
     command_rx: mpsc::Receiver<ControlCommand>,
     events: EventConsumer,
-    metrics: MetricsHttp,
+    metrics_task: JoinSet<anyhow::Result<()>>,
+    metrics_shutdown: Option<oneshot::Sender<()>>,
     reloader: Option<ConfigReloader>,
     workers_ready: bool,
 }
@@ -23,17 +25,22 @@ impl ControlRuntime {
             .await
             .with_context(|| format!("bind({}) failed", setup.metrics_addr))?;
         let bound_addr = listener.local_addr()?;
+        let (metrics_shutdown, shutdown_rx) = oneshot::channel();
         let metrics = MetricsHttp::new(MetricsHttpSetup {
             listener,
             registry: setup.registry,
             metrics: setup.metrics,
             options: setup.http_options,
+            shutdown: shutdown_rx,
         });
+        let mut metrics_task = JoinSet::new();
+        metrics_task.spawn(metrics.run());
         Ok(Self {
             bound_addr,
             command_rx: setup.inbox.command_rx,
             events: setup.events,
-            metrics,
+            metrics_task,
+            metrics_shutdown: Some(metrics_shutdown),
             reloader: setup.reloader,
             workers_ready: false,
         })
@@ -52,7 +59,7 @@ impl ControlRuntime {
                     match command {
                         Some(ControlCommand::WorkersReady) => self.workers_ready = true,
                         Some(ControlCommand::Shutdown { acknowledged }) => {
-                            self.shutdown().await;
+                            self.shutdown().await?;
                             let _ = acknowledged.send(());
                             return Ok(());
                         }
@@ -65,8 +72,9 @@ impl ControlRuntime {
                     logging::write(&event);
                 }
 
-                result = self.metrics.step() => {
-                    result?;
+                Some(result) = self.metrics_task.join_next() => {
+                    result.context("metrics task failed")??;
+                    anyhow::bail!("metrics server exited unexpectedly");
                 }
 
                 // Only the cancel-safe tick races; an apply runs to completion.
@@ -78,11 +86,17 @@ impl ControlRuntime {
         }
     }
 
-    async fn shutdown(&mut self) {
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
         while let Some(event) = self.events.try_recv() {
             logging::write(&event);
         }
-        self.metrics.shutdown().await;
+        if let Some(shutdown) = self.metrics_shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(result) = self.metrics_task.join_next().await {
+            result.context("metrics task failed during shutdown")??;
+        }
+        Ok(())
     }
 }
 
@@ -95,15 +109,69 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
-    use rusty_mcrouter_observability::{channel, ControlMetrics, MetricsRegistry};
+    use rusty_mcrouter_observability::metrics::MetricsText;
+    use rusty_mcrouter_observability::{
+        channel, ControlMetrics, EventSender, MetricsRegistry, MetricsSource,
+    };
     use rusty_mcrouter_worker::{WorkerCommand, WorkerHandle};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
     use crate::{ConfigMetrics, ControlHandle, ReloaderSetup, RunningConfig};
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn metrics_work_before_worker_readiness_and_reload_waits_for_it() {
+    async fn scrape(addr: SocketAddr) -> String {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        })
+        .await
+        .expect("metrics scrape timed out")
+    }
+
+    async fn build_runtime(
+        registry: MetricsRegistry,
+    ) -> (ControlHandle, ControlRuntime, EventSender) {
+        let metrics = Arc::new(ControlMetrics::default());
+        let (events, consumer) = channel(8, Arc::clone(&metrics));
+        let (handle, inbox) = ControlHandle::allocate();
+        let runtime = ControlRuntime::build(ControlSetup {
+            inbox,
+            events: consumer,
+            registry: Arc::new(registry),
+            metrics_addr: "127.0.0.1:0".parse().unwrap(),
+            metrics,
+            reloader: None,
+            http_options: MetricsHttpOptions {
+                request_timeout: Duration::from_secs(60),
+                ..MetricsHttpOptions::default()
+            },
+        })
+        .await
+        .unwrap();
+        (handle, runtime, events)
+    }
+
+    async fn assert_metrics_stopped(addr: SocketAddr, mut idle: TcpStream) {
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), idle.read_to_end(&mut response))
+            .await
+            .expect("idle metrics connection survived control")
+            .unwrap();
+        assert!(response.is_empty());
+        TcpListener::bind(addr)
+            .await
+            .expect("metrics listener survived control");
+    }
+
+    #[tokio::test]
+    async fn metrics_work_before_readiness_and_while_reload_waits_for_workers() {
         let initial = br#"{ "route": "NullRoute" }"#;
         let path = std::env::temp_dir().join(format!(
             "rusty-mcrouter-control-readiness-{}.json",
@@ -136,23 +204,17 @@ mod tests {
             metrics_addr: "127.0.0.1:0".parse().unwrap(),
             metrics,
             reloader: Some(reloader),
-            http_options: MetricsHttpOptions::default(),
+            http_options: MetricsHttpOptions {
+                request_timeout: Duration::from_secs(60),
+                ..MetricsHttpOptions::default()
+            },
         })
         .await
         .unwrap();
         let bound = runtime.bound_addr();
         let task = tokio::spawn(runtime.run());
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut stream = tokio::net::TcpStream::connect(bound).await.unwrap();
-        stream
-            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
-        let mut response = String::new();
-        tokio::time::timeout(Duration::from_secs(5), stream.read_to_string(&mut response))
-            .await
-            .unwrap()
-            .unwrap();
+        let response = scrape(bound).await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
         assert_eq!(config_metrics.reload_attempts.load(), 0);
         config_metrics.applied(1, 1);
@@ -170,11 +232,62 @@ mod tests {
             panic!("expected a reconfigure command");
         };
         assert_eq!(generation, 2);
+        let idle = TcpStream::connect(bound).await.unwrap();
+        let response = scrape(bound).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert_eq!(config_metrics.generation.load(), 1);
         applied.send(Ok(())).unwrap();
         handle.shutdown().await.unwrap();
         task.await.unwrap().unwrap();
+        assert_metrics_stopped(bound, idle).await;
         std::fs::remove_file(path).unwrap();
         assert_eq!(config_metrics.reload_attempts.load(), 1);
         assert_eq!(config_metrics.generation.load(), 2);
+    }
+
+    #[tokio::test]
+    async fn aborting_control_stops_metrics_and_its_connections() {
+        let (_handle, runtime, _events) = build_runtime(MetricsRegistry::new()).await;
+        let bound = runtime.bound_addr();
+        let task = tokio::spawn(runtime.run());
+        let idle = TcpStream::connect(bound).await.unwrap();
+        let response = scrape(bound).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_metrics_stopped(bound, idle).await;
+    }
+
+    #[tokio::test]
+    async fn metrics_failure_stops_control() {
+        struct Panicking;
+
+        impl MetricsSource for Panicking {
+            fn encode(&self, _out: &mut MetricsText) {
+                panic!("metrics encoding failed");
+            }
+        }
+
+        let mut registry = MetricsRegistry::new();
+        registry.register(Box::new(Panicking));
+        let (handle, runtime, _events) = build_runtime(registry).await;
+        let bound = runtime.bound_addr();
+        let task = tokio::spawn(runtime.run());
+        let idle = TcpStream::connect(bound).await.unwrap();
+        let mut stream = TcpStream::connect(bound).await.unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("control did not stop after metrics failed")
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("metrics connection task failed"));
+        assert!(handle.workers_ready().await.is_err());
+        assert_metrics_stopped(bound, idle).await;
     }
 }
