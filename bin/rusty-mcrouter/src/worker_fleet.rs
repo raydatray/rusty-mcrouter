@@ -195,7 +195,7 @@ mod tests {
         destination::DestinationMetricsRegistry,
         tko::{DestTokenAllocator, TkoTrackerMap},
     };
-    use rusty_mcrouter_observability::{channel, ControlMetrics};
+    use rusty_mcrouter_observability::{channel, ObservabilityMetrics};
     use rusty_mcrouter_protocol::RequestKind;
     use rusty_mcrouter_worker::ThreadMode;
 
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn frontend_connection_submits_to_a_remote_worker_thread() {
-        let (events, _consumer) = channel(8, Arc::new(ControlMetrics::default()));
+        let (events, _consumer) = channel(8, Arc::new(ObservabilityMetrics::default()));
         let shared = |document: &str| {
             Arc::new(WorkerShared {
                 tokens: Arc::new(DestTokenAllocator::new()),
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn failed_collection_joins_previously_started_workers() {
-        let (events, _consumer) = channel(8, Arc::new(ControlMetrics::default()));
+        let (events, _consumer) = channel(8, Arc::new(ObservabilityMetrics::default()));
         let shared = |document: &str| {
             Arc::new(WorkerShared {
                 tokens: Arc::new(DestTokenAllocator::new()),

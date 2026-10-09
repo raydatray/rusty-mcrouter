@@ -276,7 +276,7 @@ sequenceDiagram
 
 ## observability
 
-owned by a `ConfigMetrics` block (next to `ControlMetrics`), rendered by a
+owned by a `ConfigMetrics` block (next to `ObservabilityMetrics`), rendered by a
 new `ConfigSource`:
 
 | metric | type | upstream |

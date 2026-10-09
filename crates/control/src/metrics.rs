@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rusty_mcrouter_observability::metrics::MetricsText;
+use rusty_mcrouter_observability::prometheus::MetricsText;
 use rusty_mcrouter_observability::MetricsSource;
 use rusty_mcrouter_observability_primitives::{Counter, Gauge};
 

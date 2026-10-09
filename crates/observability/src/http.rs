@@ -15,7 +15,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
-use crate::metrics::{ControlMetrics, MetricsRegistry};
+use crate::metrics::ObservabilityMetrics;
+use crate::prometheus::MetricsRegistry;
 
 const CONTENT_TYPE_VALUE: &str = "text/plain; version=0.0.4";
 
@@ -37,7 +38,7 @@ impl Default for MetricsHttpOptions {
 pub struct MetricsHttpSetup {
     pub listener: TcpListener,
     pub registry: Arc<MetricsRegistry>,
-    pub metrics: Arc<ControlMetrics>,
+    pub metrics: Arc<ObservabilityMetrics>,
     pub options: MetricsHttpOptions,
     pub shutdown: oneshot::Receiver<()>,
 }
@@ -46,7 +47,7 @@ pub struct MetricsHttp {
     listener: TcpListener,
     registry: Arc<MetricsRegistry>,
     tasks: JoinSet<anyhow::Result<()>>,
-    metrics: Arc<ControlMetrics>,
+    metrics: Arc<ObservabilityMetrics>,
     options: MetricsHttpOptions,
     shutdown: oneshot::Receiver<()>,
 }
@@ -151,7 +152,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::metrics::{MetricsSource, MetricsText};
+    use crate::prometheus::{MetricsSource, MetricsText};
 
     struct Static;
 
