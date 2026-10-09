@@ -6,11 +6,11 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{events::Event, logging, metrics::ControlMetrics};
+use crate::{events::Event, logging, metrics::ObservabilityMetrics};
 
 pub struct EventSender {
     tx: Sender<Event>,
-    metrics: Arc<ControlMetrics>,
+    metrics: Arc<ObservabilityMetrics>,
 }
 
 impl Clone for EventSender {
@@ -51,12 +51,15 @@ const DROP_WARN_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct EventConsumer {
     rx: Receiver<Event>,
-    metrics: Arc<ControlMetrics>,
+    metrics: Arc<ObservabilityMetrics>,
     last_seen: u64,
     last_warned: Instant,
 }
 
-pub fn channel(capacity: usize, metrics: Arc<ControlMetrics>) -> (EventSender, EventConsumer) {
+pub fn channel(
+    capacity: usize,
+    metrics: Arc<ObservabilityMetrics>,
+) -> (EventSender, EventConsumer) {
     assert!(capacity > 0, "a zero-capacity event bus drops everything");
 
     let (tx, rx) = tokio::sync::mpsc::channel(capacity);
@@ -130,8 +133,8 @@ mod tests {
         Event::Worker(worker_record(worker_id))
     }
 
-    fn test_channel(capacity: usize) -> (EventSender, EventConsumer, Arc<ControlMetrics>) {
-        let metrics = Arc::new(ControlMetrics::default());
+    fn test_channel(capacity: usize) -> (EventSender, EventConsumer, Arc<ObservabilityMetrics>) {
+        let metrics = Arc::new(ObservabilityMetrics::default());
         let (tx, consumer) = channel(capacity, Arc::clone(&metrics));
         (tx, consumer, metrics)
     }

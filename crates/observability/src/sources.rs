@@ -16,7 +16,8 @@ use rusty_mcrouter_frontend::FrontendMetricsShard;
 use rusty_mcrouter_protocol::RequestKind;
 use rusty_mcrouter_worker::WorkerShards;
 
-use crate::metrics::{ControlMetrics, MetricsRegistry, MetricsSource, MetricsText};
+use crate::metrics::ObservabilityMetrics;
+use crate::prometheus::{MetricsRegistry, MetricsSource, MetricsText};
 use crate::shard_source;
 
 #[derive(Clone, Copy, Debug)]
@@ -30,7 +31,7 @@ pub struct ScrapeInputs {
     pub workers: Vec<WorkerShards>,
     pub tko_map: Arc<TkoTrackerMap>,
     pub destinations: Arc<DestinationMetricsRegistry>,
-    pub control: Arc<ControlMetrics>,
+    pub observability: Arc<ObservabilityMetrics>,
     pub additional_sources: Vec<Box<dyn MetricsSource>>,
 }
 
@@ -67,7 +68,7 @@ impl ScrapeInputs {
             registry: self.destinations,
         }));
         registry.register(Box::new(SelfSource {
-            metrics: self.control,
+            metrics: self.observability,
             num_proxies: self.metadata.num_proxies,
             start_unix_secs: self.metadata.start_unix_secs,
         }));
@@ -358,7 +359,7 @@ impl MetricsSource for DestinationSource {
 }
 
 pub struct SelfSource {
-    pub metrics: Arc<ControlMetrics>,
+    pub metrics: Arc<ObservabilityMetrics>,
     pub num_proxies: usize,
     /// computed once at startup - no clock reads at scrape time
     pub start_unix_secs: u64,
@@ -392,7 +393,7 @@ mod tests {
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
     use super::*;
-    use crate::metrics::MetricsRegistry;
+    use crate::prometheus::MetricsRegistry;
 
     fn render(source: impl MetricsSource + 'static) -> String {
         let mut registry = MetricsRegistry::new();
@@ -588,8 +589,8 @@ mod tests {
             .record_result(RequestKind::Get, ResultCode::Success);
         workers[1].frontend.failed.inc();
         workers[1].routing.dev_null_requests.inc();
-        let control = Arc::new(ControlMetrics::default());
-        control.events_dropped.inc();
+        let observability = Arc::new(ObservabilityMetrics::default());
+        observability.events_dropped.inc();
 
         let text = ScrapeInputs {
             metadata: ProcessMetadata {
@@ -599,7 +600,7 @@ mod tests {
             workers,
             tko_map: TkoTrackerMap::new(noop_sink()),
             destinations: DestinationMetricsRegistry::new(),
-            control,
+            observability,
             additional_sources: vec![Box::new(InjectedSource)],
         }
         .into_registry()
@@ -626,7 +627,7 @@ mod tests {
 
     #[test]
     fn self_source_golden() {
-        let metrics = Arc::new(ControlMetrics::default());
+        let metrics = Arc::new(ObservabilityMetrics::default());
         metrics.events_dropped.add(2);
         let text = render(SelfSource {
             metrics,

@@ -86,7 +86,9 @@ mod tests {
     use std::sync::Arc;
 
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
-    use rusty_mcrouter_observability::{channel, ControlMetrics, EventSender, MetricsRegistry};
+    use rusty_mcrouter_observability::{
+        channel, EventSender, MetricsRegistry, ObservabilityMetrics,
+    };
 
     use super::*;
 
@@ -98,7 +100,7 @@ mod tests {
     fn spawn_control(
         metrics_addr: SocketAddr,
     ) -> anyhow::Result<(ControlThreadOwner, SocketAddr, EventSender)> {
-        let metrics = Arc::new(ControlMetrics::default());
+        let metrics = Arc::new(ObservabilityMetrics::default());
         let (events, consumer) = channel(8, Arc::clone(&metrics));
         let supervisor = Supervisor::new();
         let (handle, inbox) = ControlHandle::allocate();

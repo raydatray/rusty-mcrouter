@@ -109,9 +109,9 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
-    use rusty_mcrouter_observability::metrics::MetricsText;
+    use rusty_mcrouter_observability::prometheus::MetricsText;
     use rusty_mcrouter_observability::{
-        channel, ControlMetrics, EventSender, MetricsRegistry, MetricsSource,
+        channel, EventSender, MetricsRegistry, MetricsSource, ObservabilityMetrics,
     };
     use rusty_mcrouter_worker::{WorkerCommand, WorkerHandle};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -138,7 +138,7 @@ mod tests {
     async fn build_runtime(
         registry: MetricsRegistry,
     ) -> (ControlHandle, ControlRuntime, EventSender) {
-        let metrics = Arc::new(ControlMetrics::default());
+        let metrics = Arc::new(ObservabilityMetrics::default());
         let (events, consumer) = channel(8, Arc::clone(&metrics));
         let (handle, inbox) = ControlHandle::allocate();
         let runtime = ControlRuntime::build(ControlSetup {
@@ -178,7 +178,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&path, br#"{ "route": "ErrorRoute|changed" }"#).unwrap();
-        let metrics = Arc::new(ControlMetrics::default());
+        let metrics = Arc::new(ObservabilityMetrics::default());
         let config_metrics = Arc::new(ConfigMetrics::default());
         let (_events, consumer) = channel(8, Arc::clone(&metrics));
         let (worker, mut worker_inbox) = WorkerHandle::allocate(0);

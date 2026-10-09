@@ -8,7 +8,7 @@ use rusty_mcrouter_control::{
     RunningConfig,
 };
 use rusty_mcrouter_observability::{
-    channel, logging, ControlMetrics, ProcessMetadata, ScrapeInputs,
+    channel, logging, ObservabilityMetrics, ProcessMetadata, ScrapeInputs,
 };
 use rusty_mcrouter_worker::{ThreadMode, WorkerHandle, WorkerShards, WorkerShared};
 
@@ -39,9 +39,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let listen_addr = args.listen_addr()?;
     let metrics_addr = args.metrics_addr()?;
 
-    let control_metrics = Arc::new(ControlMetrics::default());
+    let observability_metrics = Arc::new(ObservabilityMetrics::default());
     let config_metrics = Arc::new(ConfigMetrics::default());
-    let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&control_metrics));
+    let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&observability_metrics));
     let tko_map = TkoTrackerMap::new(events.sink());
     let tokens = Arc::new(DestTokenAllocator::new());
     let destinations = DestinationMetricsRegistry::new();
@@ -88,7 +88,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         workers: worker_shards,
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
-        control: Arc::clone(&control_metrics),
+        observability: Arc::clone(&observability_metrics),
         additional_sources: vec![Box::new(ConfigSource {
             metrics: Arc::clone(&config_metrics),
         })],
@@ -118,7 +118,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
             events: event_consumer,
             registry: Arc::new(registry),
             metrics_addr,
-            metrics: control_metrics,
+            metrics: observability_metrics,
             reloader,
             http_options: Default::default(),
         },
