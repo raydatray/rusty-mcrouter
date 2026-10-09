@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use rusty_mcrouter_observability::prometheus::MetricsText;
-use rusty_mcrouter_observability::MetricsSource;
+use rusty_mcrouter_observability_primitives::prometheus::{MetricsSource, MetricsText};
 use rusty_mcrouter_observability_primitives::{Counter, Gauge};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,7 +99,7 @@ impl MetricsSource for ConfigSource {
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_observability::MetricsRegistry;
+    use rusty_mcrouter_observability_primitives::prometheus::MetricsRegistry;
 
     use super::*;
 

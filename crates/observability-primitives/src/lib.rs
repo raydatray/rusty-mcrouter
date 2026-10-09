@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
+pub mod prometheus;
+
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 

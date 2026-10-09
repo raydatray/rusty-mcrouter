@@ -2,6 +2,16 @@ use std::fmt::Write;
 
 pub trait MetricsSource: Send + Sync {
     fn encode(&self, out: &mut MetricsText);
+
+    fn render(&self) -> String {
+        let mut out = MetricsText::new();
+        self.encode(&mut out);
+        out.buf
+    }
+}
+
+pub fn render(source: &impl MetricsSource) -> String {
+    source.render()
 }
 
 pub struct MetricsText {
@@ -64,13 +74,13 @@ impl MetricsRegistry {
     pub fn register(&mut self, source: Box<dyn MetricsSource>) {
         self.sources.push(source);
     }
+}
 
-    pub fn render(&self) -> String {
-        let mut out = MetricsText::new();
+impl MetricsSource for MetricsRegistry {
+    fn encode(&self, out: &mut MetricsText) {
         for source in &self.sources {
-            source.encode(&mut out);
+            source.encode(out);
         }
-        out.buf
     }
 }
 
@@ -115,7 +125,7 @@ macro_rules! shard_source {
 mod tests {
     use std::sync::Arc;
 
-    use rusty_mcrouter_observability_primitives::{Counter, Gauge};
+    use crate::{Counter, Gauge};
 
     use super::*;
 
@@ -130,10 +140,8 @@ mod tests {
                 out.gauge("test_inflight", &[("proxy", "0")], -3);
             }
         }
-        let mut registry = MetricsRegistry::new();
-        registry.register(Box::new(Static));
         assert_eq!(
-            registry.render(),
+            Static.render(),
             "test_requests_total 42\n\
              test_cmds_total{command=\"mg\"} 1\n\
              test_cmds_total{command=\"ms\"} 2\n\

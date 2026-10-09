@@ -11,12 +11,12 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use rusty_mcrouter_observability_primitives::prometheus::{MetricsRegistry, MetricsSource};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
 use crate::metrics::ObservabilityMetrics;
-use crate::prometheus::MetricsRegistry;
 
 const CONTENT_TYPE_VALUE: &str = "text/plain; version=0.0.4";
 
@@ -152,7 +152,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::prometheus::{MetricsSource, MetricsText};
+    use rusty_mcrouter_observability_primitives::prometheus::{MetricsSource, MetricsText};
 
     struct Static;
 
