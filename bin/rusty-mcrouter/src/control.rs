@@ -86,9 +86,8 @@ mod tests {
     use std::sync::Arc;
 
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
-    use rusty_mcrouter_observability::{
-        channel, EventSender, MetricsRegistry, ObservabilityMetrics,
-    };
+    use rusty_mcrouter_observability::{channel, EventSender, ObservabilityMetrics};
+    use rusty_mcrouter_observability_primitives::prometheus::MetricsRegistry;
 
     use super::*;
 

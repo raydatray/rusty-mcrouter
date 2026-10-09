@@ -109,9 +109,9 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
-    use rusty_mcrouter_observability::prometheus::MetricsText;
-    use rusty_mcrouter_observability::{
-        channel, EventSender, MetricsRegistry, MetricsSource, ObservabilityMetrics,
+    use rusty_mcrouter_observability::{channel, EventSender, ObservabilityMetrics};
+    use rusty_mcrouter_observability_primitives::prometheus::{
+        MetricsRegistry, MetricsSource, MetricsText,
     };
     use rusty_mcrouter_worker::{WorkerCommand, WorkerHandle};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

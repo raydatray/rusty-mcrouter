@@ -13,11 +13,13 @@ use rusty_mcrouter_core::{
     FailoverErrorClass, FailoverPolicyKind, PoolMetrics, RoutingMetricsShard,
 };
 use rusty_mcrouter_frontend::FrontendMetricsShard;
+use rusty_mcrouter_observability_primitives::prometheus::{
+    MetricsRegistry, MetricsSource, MetricsText,
+};
 use rusty_mcrouter_protocol::RequestKind;
 use rusty_mcrouter_worker::WorkerShards;
 
 use crate::metrics::ObservabilityMetrics;
-use crate::prometheus::{MetricsRegistry, MetricsSource, MetricsText};
 use crate::shard_source;
 
 #[derive(Clone, Copy, Debug)]
@@ -393,7 +395,7 @@ mod tests {
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
     use super::*;
-    use crate::prometheus::MetricsRegistry;
+    use rusty_mcrouter_observability_primitives::prometheus::MetricsRegistry;
 
     fn render(source: impl MetricsSource + 'static) -> String {
         let mut registry = MetricsRegistry::new();
