@@ -110,7 +110,7 @@ mod tests {
         metrics.reload_attempts.add(3);
         metrics.rejected(ReloadStage::Parse);
         let mut registry = MetricsRegistry::new();
-        registry.register(Box::new(ConfigSource { metrics }));
+        registry.register(Arc::new(ConfigSource { metrics }));
         assert_eq!(
             registry.render(),
             "rusty_mcrouter_config_generation 3\n\

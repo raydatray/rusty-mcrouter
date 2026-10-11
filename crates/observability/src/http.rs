@@ -37,7 +37,7 @@ impl Default for MetricsHttpOptions {
 
 pub struct MetricsHttpSetup {
     pub listener: TcpListener,
-    pub registry: Arc<MetricsRegistry>,
+    pub source: Arc<MetricsRegistry>,
     pub metrics: Arc<ObservabilityMetrics>,
     pub options: MetricsHttpOptions,
     pub shutdown: oneshot::Receiver<()>,
@@ -45,7 +45,7 @@ pub struct MetricsHttpSetup {
 
 pub struct MetricsHttp {
     listener: TcpListener,
-    registry: Arc<MetricsRegistry>,
+    source: Arc<MetricsRegistry>,
     tasks: JoinSet<anyhow::Result<()>>,
     metrics: Arc<ObservabilityMetrics>,
     options: MetricsHttpOptions,
@@ -56,7 +56,7 @@ impl MetricsHttp {
     pub fn new(setup: MetricsHttpSetup) -> Self {
         Self {
             listener: setup.listener,
-            registry: setup.registry,
+            source: setup.source,
             tasks: JoinSet::new(),
             metrics: setup.metrics,
             options: setup.options,
@@ -82,11 +82,11 @@ impl MetricsHttp {
                         continue;
                     }
 
-                    let registry = Arc::clone(&self.registry);
+                    let source = Arc::clone(&self.source);
                     let timeout = self.options.request_timeout;
 
                     self.tasks.spawn(async move {
-                        serve_connection(stream, registry, timeout).await
+                        serve_connection(stream, source, timeout).await
                     });
                 }
 
@@ -106,11 +106,11 @@ impl MetricsHttp {
 
 pub async fn serve_connection(
     stream: TcpStream,
-    registry: Arc<MetricsRegistry>,
+    source: Arc<MetricsRegistry>,
     request_timeout: Duration,
 ) -> anyhow::Result<()> {
     let io = TokioIo::new(stream);
-    let service = service_fn(move |request| respond(request, Arc::clone(&registry)));
+    let service = service_fn(move |request| respond(request, Arc::clone(&source)));
 
     tokio::time::timeout(
         request_timeout,
@@ -127,13 +127,13 @@ pub async fn serve_connection(
 
 async fn respond(
     request: Request<Incoming>,
-    registry: Arc<MetricsRegistry>,
+    source: Arc<MetricsRegistry>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if request.method() == Method::GET && request.uri().path() == "/metrics" {
         let response = Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, CONTENT_TYPE_VALUE)
-            .body(Full::new(Bytes::from(registry.render())))
+            .body(Full::new(Bytes::from(source.render())))
             .expect("constant response is valid");
 
         return Ok(response);
@@ -167,14 +167,14 @@ mod tests {
     }
 
     async fn start_with_options(options: MetricsHttpOptions) -> (SocketAddr, oneshot::Sender<()>) {
-        let mut registry = MetricsRegistry::new();
-        registry.register(Box::new(Static));
+        let mut source = MetricsRegistry::new();
+        source.register(Arc::new(Static));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = MetricsHttp::new(MetricsHttpSetup {
             listener,
-            registry: Arc::new(registry),
+            source: Arc::new(source),
             metrics: Arc::default(),
             options,
             shutdown: shutdown_rx,
