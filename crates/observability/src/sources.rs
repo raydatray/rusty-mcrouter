@@ -11,15 +11,13 @@ use rusty_mcrouter_backend::BackendMetrics;
 use rusty_mcrouter_core::{
     FailoverErrorClass, FailoverPolicyKind, PoolMetrics, RoutingMetricsShard,
 };
-use rusty_mcrouter_frontend::FrontendMetricsShard;
+use rusty_mcrouter_frontend::FrontendMetrics;
 use rusty_mcrouter_observability_primitives::prometheus::{
     MetricsRegistry, MetricsSource, MetricsText,
 };
-use rusty_mcrouter_protocol::RequestKind;
 use rusty_mcrouter_worker::WorkerShards;
 
 use crate::metrics::ObservabilityMetrics;
-use crate::shard_source;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ProcessMetadata {
@@ -56,10 +54,7 @@ impl ScrapeInputs {
 
         let mut registry = MetricsRegistry::new();
         registry.register(Arc::new(BackendMetrics { shards: backend }));
-        registry.register(Arc::new(FrontendScalarsSource {
-            shards: frontend.clone(),
-        }));
-        registry.register(Arc::new(FrontendRequestsSource { shards: frontend }));
+        registry.register(Arc::new(FrontendMetrics { shards: frontend }));
         registry.register(Arc::new(RoutingSource { shards: routing }));
         registry.register(self.tko_map);
         registry.register(self.destinations);
@@ -72,39 +67,6 @@ impl ScrapeInputs {
             registry.register(source);
         }
         registry
-    }
-}
-
-shard_source! {
-    /// Frontend metric shards -> the client-facing families. the
-    /// per-command matrix is FrontendRequestsSource.
-    pub struct FrontendScalarsSource(FrontendMetricsShard) {
-        counter noops              => "rusty_mcrouter_noops_total";
-        counter parse_errors       => "rusty_mcrouter_parse_errors_total";
-        counter failed             => "rusty_mcrouter_requests_failed_total";
-        gauge   client_connections => "rusty_mcrouter_client_connections";
-        gauge   processing         => "rusty_mcrouter_requests_processing";
-    }
-}
-
-pub struct FrontendRequestsSource {
-    pub shards: Vec<Arc<FrontendMetricsShard>>,
-}
-
-impl MetricsSource for FrontendRequestsSource {
-    fn encode(&self, out: &mut MetricsText) {
-        for kind in RequestKind::ALL {
-            let total: u64 = self
-                .shards
-                .iter()
-                .map(|s| s.requests[kind as usize].load())
-                .sum();
-            out.counter(
-                "rusty_mcrouter_requests_total",
-                &[("command", kind.meta_command())],
-                total,
-            );
-        }
     }
 }
 
@@ -239,6 +201,7 @@ mod tests {
     use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_config::{parse, ConfigDocument};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
+    use rusty_mcrouter_protocol::RequestKind;
 
     use super::*;
     use rusty_mcrouter_observability_primitives::prometheus::MetricsRegistry;
@@ -268,23 +231,6 @@ mod tests {
             })
             .collect::<serde_json::Map<_, _>>();
         parse(&serde_json::json!({ "pools": pools, "route": "NullRoute" }).to_string()).unwrap()
-    }
-
-    #[test]
-    fn frontend_sources_render() {
-        let shard = FrontendMetricsShard::new();
-        shard.requests[RequestKind::Get as usize].add(3);
-        shard.failed.inc();
-
-        let text = render(FrontendRequestsSource {
-            shards: vec![Arc::clone(&shard)],
-        });
-        assert!(text.contains("rusty_mcrouter_requests_total{command=\"mg\"} 3\n"));
-
-        let text = render(FrontendScalarsSource {
-            shards: vec![shard],
-        });
-        assert!(text.contains("rusty_mcrouter_requests_failed_total 1\n"));
     }
 
     #[test]
