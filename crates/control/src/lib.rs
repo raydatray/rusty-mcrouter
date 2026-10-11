@@ -2,13 +2,13 @@
 
 mod handle;
 mod message;
-mod metrics;
 mod reload;
 mod runtime;
 mod setup;
 
+pub use rusty_mcrouter_config::{ConfigMetrics, ReloadStage};
+
 pub use handle::{ControlHandle, ControlInbox};
-pub use metrics::{ConfigMetrics, ConfigSource, ReloadStage};
 pub use reload::{ConfigReloader, ReloaderSetup, RunningConfig};
 pub use runtime::ControlRuntime;
 pub use setup::ControlSetup;
