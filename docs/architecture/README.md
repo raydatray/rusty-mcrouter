@@ -12,7 +12,7 @@ composition and presentation (`A --> B` means B depends on A):
 
 - **[`rusty-mcrouter-protocol`](../../crates/protocol/)** - the meta protocol codec, request and reply types, the encoders and decoders for both requests and replies and key parsing
 - **[`rusty-mcrouter-config`](../../crates/config/)** - configuration documents, parsing into pools/routes/policies, and configuration-lifecycle metric state and encoding
-- **[`rusty-mcrouter-observability-primitives`](../../crates/observability-primitives/)** - std-only metric cells, event sinks, and generic Prometheus encoding/registry machinery shared by fact-owning crates
+- **[`rusty-mcrouter-observability-primitives`](../../crates/observability-primitives/)** - std-only metric cells, event sinks, and generic Prometheus encoding/rendering machinery shared by fact-owning crates
 - **[`rusty-mcrouter-backend`](../../crates/backend/)** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
 - **[`rusty-mcrouter-core`](../../crates/core/)** - the routing graph, where a config file is transformed into a tree of route handles
 - **[`rusty-mcrouter-frontend`](../../crates/frontend/)** - the client-facing leg: listener transport, complete protocol connections, request/reply mailbox transport and frontend metric data
@@ -46,6 +46,7 @@ flowchart LR
     F --> X
     B --> O
     C --> O
+    K --> O
     F --> O
     X --> O
     K --> R
@@ -65,6 +66,7 @@ flowchart LR
     Q --> X
     Q --> F
     Q --> O
+    Q --> R
 ```
 
 ## runtime ownership
@@ -210,11 +212,15 @@ drains and joins the control thread.
   `BackendMetrics`, `FrontendMetrics`, and `RoutingMetrics` aggregate worker
   shards; `TkoTrackerMap`, `DestinationMetricsRegistry`, `ConfigMetrics`,
   `ObservabilityMetrics`, and `ProcessMetadata` encode their state directly.
-- `MetricsRegistry` holds `Arc<dyn MetricsSource>` and renders into `MetricsText`.
-  observability's `ScrapeInputs` assembles the owner-provided metrics in scrape
-  order. the app supplies its shared `ConfigMetrics` through
-  `ScrapeInputs.additional_sources`, keeping observability independent of control
-  while control consumes its event and HTTP services.
+- observability's `ApplicationMetricsSetup` requires concrete worker, TKO,
+  destination, observability, process metadata, and `ConfigMetrics` inputs.
+  `ApplicationMetrics::new(setup)` creates the aggregate once at startup; its encoding
+  implementation calls each producer in scrape order. `MetricsSource::render()` writes
+  those samples into `MetricsText` with static dispatch.
+- the app supplies `Arc<ApplicationMetrics>` through `ControlSetup.source`.
+  `ControlSetup`, `ControlRuntime::build`, and `MetricsHttp` use that concrete
+  application-wide metric set. observability depends on config's metric data, while
+  control owns reload scheduling, worker application, and service lifecycle.
 
 shared resources use `Arc`; route graphs, destinations and their connection
 callbacks remain worker-local with `Rc`. the existing `Backend` and

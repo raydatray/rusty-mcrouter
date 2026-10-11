@@ -8,7 +8,8 @@ use rusty_mcrouter_control::{
     ConfigReloader, ControlHandle, ControlSetup, ReloaderSetup, RunningConfig,
 };
 use rusty_mcrouter_observability::{
-    channel, logging, ObservabilityMetrics, ProcessMetadata, ScrapeInputs,
+    channel, logging, ApplicationMetrics, ApplicationMetricsSetup, ObservabilityMetrics,
+    ProcessMetadata,
 };
 use rusty_mcrouter_worker::{ThreadMode, WorkerHandle, WorkerShards, WorkerShared};
 
@@ -83,15 +84,14 @@ pub(crate) fn run() -> anyhow::Result<()> {
     };
     let supervisor = Supervisor::new();
 
-    let registry = ScrapeInputs {
+    let application_metrics = ApplicationMetrics::new(ApplicationMetricsSetup {
         metadata,
         workers: worker_shards,
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
         observability: Arc::clone(&observability_metrics),
-        additional_sources: vec![config_metrics.clone()],
-    }
-    .into_registry();
+        config: Arc::clone(&config_metrics),
+    });
 
     let reloader = (!args.disable_reload_configs).then(|| {
         ConfigReloader::new(ReloaderSetup {
@@ -114,7 +114,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         ControlSetup {
             inbox: control_inbox,
             events: event_consumer,
-            source: Arc::new(registry),
+            source: Arc::new(application_metrics),
             metrics_addr,
             metrics: observability_metrics,
             reloader,

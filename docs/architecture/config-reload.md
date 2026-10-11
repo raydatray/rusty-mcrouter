@@ -29,8 +29,10 @@ timestamp of a successful apply. the binary only supplies its setup and marks
 the initial config applied once worker startup completes.
 
 the implementation lives in [`crates/control/src/reload.rs`](../../crates/control/src/reload.rs).
-its metric data and source projection also belong to control; the app registers
-that source through observability's generic metric-source interface.
+configuration metric data and encoding live in
+[`crates/config/src/metrics.rs`](../../crates/config/src/metrics.rs). the app
+supplies that shared state when constructing observability's `ApplicationMetrics`;
+control and the metrics HTTP server hold the concrete aggregate through `Arc`.
 
 only pools and routes reload. every CLI option, including `--route-prefix`
 and the timeouts, is fixed at startup. to deploy a config, write it to a

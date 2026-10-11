@@ -1,5 +1,4 @@
 use std::fmt::Write;
-use std::sync::Arc;
 
 pub trait MetricsSource: Send + Sync {
     fn encode(&self, out: &mut MetricsText);
@@ -9,10 +8,6 @@ pub trait MetricsSource: Send + Sync {
         self.encode(&mut out);
         out.buf
     }
-}
-
-pub fn render(source: &impl MetricsSource) -> String {
-    source.render()
 }
 
 pub struct MetricsText {
@@ -62,33 +57,8 @@ fn escape_label_value(out: &mut String, val: &str) {
     }
 }
 
-#[derive(Default)]
-pub struct MetricsRegistry {
-    sources: Vec<Arc<dyn MetricsSource>>,
-}
-
-impl MetricsRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register(&mut self, source: Arc<dyn MetricsSource>) {
-        self.sources.push(source);
-    }
-}
-
-impl MetricsSource for MetricsRegistry {
-    fn encode(&self, out: &mut MetricsText) {
-        for source in &self.sources {
-            source.encode(out);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
 
     #[test]
@@ -126,27 +96,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_registry_renders_empty() {
-        assert_eq!(MetricsRegistry::new().render(), "");
-    }
-
-    #[test]
-    fn sources_render_in_registration_order() {
-        struct A;
-        struct B;
-        impl MetricsSource for A {
-            fn encode(&self, out: &mut MetricsText) {
-                out.counter("a", &[], 1);
-            }
+    fn empty_source_renders_empty() {
+        struct Empty;
+        impl MetricsSource for Empty {
+            fn encode(&self, _out: &mut MetricsText) {}
         }
-        impl MetricsSource for B {
-            fn encode(&self, out: &mut MetricsText) {
-                out.counter("b", &[], 2);
-            }
-        }
-        let mut registry = MetricsRegistry::new();
-        registry.register(Arc::new(A));
-        registry.register(Arc::new(B));
-        assert_eq!(registry.render(), "a 1\nb 2\n");
+        assert_eq!(Empty.render(), "");
     }
 }

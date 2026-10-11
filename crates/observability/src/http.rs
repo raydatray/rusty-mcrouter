@@ -11,12 +11,13 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use rusty_mcrouter_observability_primitives::prometheus::{MetricsRegistry, MetricsSource};
+use rusty_mcrouter_observability_primitives::prometheus::MetricsSource;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
 use crate::metrics::ObservabilityMetrics;
+use crate::ApplicationMetrics;
 
 const CONTENT_TYPE_VALUE: &str = "text/plain; version=0.0.4";
 
@@ -37,7 +38,7 @@ impl Default for MetricsHttpOptions {
 
 pub struct MetricsHttpSetup {
     pub listener: TcpListener,
-    pub source: Arc<MetricsRegistry>,
+    pub source: Arc<ApplicationMetrics>,
     pub metrics: Arc<ObservabilityMetrics>,
     pub options: MetricsHttpOptions,
     pub shutdown: oneshot::Receiver<()>,
@@ -45,7 +46,7 @@ pub struct MetricsHttpSetup {
 
 pub struct MetricsHttp {
     listener: TcpListener,
-    source: Arc<MetricsRegistry>,
+    source: Arc<ApplicationMetrics>,
     tasks: JoinSet<anyhow::Result<()>>,
     metrics: Arc<ObservabilityMetrics>,
     options: MetricsHttpOptions,
@@ -106,7 +107,7 @@ impl MetricsHttp {
 
 pub async fn serve_connection(
     stream: TcpStream,
-    source: Arc<MetricsRegistry>,
+    source: Arc<ApplicationMetrics>,
     request_timeout: Duration,
 ) -> anyhow::Result<()> {
     let io = TokioIo::new(stream);
@@ -127,7 +128,7 @@ pub async fn serve_connection(
 
 async fn respond(
     request: Request<Incoming>,
-    source: Arc<MetricsRegistry>,
+    source: Arc<ApplicationMetrics>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if request.method() == Method::GET && request.uri().path() == "/metrics" {
         let response = Response::builder()
@@ -149,33 +150,39 @@ async fn respond(
 mod tests {
     use std::net::SocketAddr;
 
+    use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
+    use rusty_mcrouter_backend::tko::TkoTrackerMap;
+    use rusty_mcrouter_config::ConfigMetrics;
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use rusty_mcrouter_observability_primitives::prometheus::{MetricsSource, MetricsText};
-
-    struct Static;
-
-    impl MetricsSource for Static {
-        fn encode(&self, out: &mut MetricsText) {
-            out.counter("test_total", &[], 7);
-        }
-    }
+    use crate::{ApplicationMetricsSetup, ProcessMetadata};
 
     async fn start() -> (SocketAddr, oneshot::Sender<()>) {
         start_with_options(MetricsHttpOptions::default()).await
     }
 
     async fn start_with_options(options: MetricsHttpOptions) -> (SocketAddr, oneshot::Sender<()>) {
-        let mut source = MetricsRegistry::new();
-        source.register(Arc::new(Static));
+        let metrics = Arc::new(ObservabilityMetrics::default());
+        let source = ApplicationMetrics::new(ApplicationMetricsSetup {
+            metadata: ProcessMetadata {
+                start_unix_secs: 1_700_000_000,
+                num_proxies: 0,
+            },
+            workers: Vec::new(),
+            tko_map: TkoTrackerMap::new(noop_sink()),
+            destinations: DestinationMetricsRegistry::new(),
+            observability: Arc::clone(&metrics),
+            config: ConfigMetrics::started(1_700_000_000),
+        });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = MetricsHttp::new(MetricsHttpSetup {
             listener,
             source: Arc::new(source),
-            metrics: Arc::default(),
+            metrics,
             options,
             shutdown: shutdown_rx,
         });
@@ -197,7 +204,22 @@ mod tests {
         let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
         assert!(response.contains("content-type: text/plain; version=0.0.4\r\n"));
-        assert!(response.ends_with("\r\n\r\ntest_total 7\n"), "{response}");
+        assert!(
+            response.contains("\r\n\r\nrusty_mcrouter_backend_latency_us_sum_total 0\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains("rusty_mcrouter_proxies 0\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains("rusty_mcrouter_config_generation 1\n"),
+            "{response}"
+        );
+        assert!(
+            response.ends_with("rusty_mcrouter_config_last_success_timestamp_seconds 1700000000\n"),
+            "{response}"
+        );
     }
 
     #[tokio::test]
