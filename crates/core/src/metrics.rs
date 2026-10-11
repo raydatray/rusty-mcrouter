@@ -3,6 +3,7 @@ use std::ops::Index;
 use std::sync::{Arc, Mutex, Weak};
 
 use rusty_mcrouter_config::{ConfigDocument, PoolId};
+use rusty_mcrouter_observability_primitives::prometheus::{MetricsSource, MetricsText};
 use rusty_mcrouter_observability_primitives::Counter;
 
 pub const FAILOVER_POLICY_COUNT: usize = 2;
@@ -121,6 +122,104 @@ impl RoutingMetricsShard {
     }
 }
 
+pub struct RoutingMetrics {
+    pub shards: Vec<Arc<RoutingMetricsShard>>,
+}
+
+impl RoutingMetrics {
+    fn sum(&self, load: impl Fn(&RoutingMetricsShard) -> u64) -> u64 {
+        self.shards.iter().map(|shard| load(shard)).sum()
+    }
+}
+
+impl MetricsSource for RoutingMetrics {
+    fn encode(&self, out: &mut MetricsText) {
+        out.counter(
+            "rusty_mcrouter_dev_null_requests_total",
+            &[],
+            self.sum(|shard| shard.dev_null_requests.load()),
+        );
+
+        for policy in FailoverPolicyKind::ALL {
+            let labels = &[("policy", policy.prometheus_label())];
+            out.counter(
+                "rusty_mcrouter_failover_total",
+                labels,
+                self.sum(|shard| shard.failover[policy as usize].load()),
+            );
+            out.counter(
+                "rusty_mcrouter_failover_exhausted_total",
+                labels,
+                self.sum(|shard| shard.failover_exhausted[policy as usize].load()),
+            );
+        }
+
+        for class in FailoverErrorClass::ALL {
+            out.counter(
+                "rusty_mcrouter_failover_policy_errors_total",
+                &[("class", class.prometheus_label())],
+                self.sum(|shard| shard.failover_policy_errors[class as usize].load()),
+            );
+        }
+
+        let mut pools = BTreeMap::<Arc<str>, PoolTotals>::new();
+        for shard in &self.shards {
+            for (name, block) in shard.pool_blocks() {
+                pools.entry(name).or_default().add(&block);
+            }
+        }
+
+        for (name, totals) in &pools {
+            let labels = &[("pool", &**name)];
+
+            out.counter(
+                "rusty_mcrouter_pool_requests_total",
+                labels,
+                totals.requests,
+            );
+            out.counter(
+                "rusty_mcrouter_pool_duration_us_sum_total",
+                labels,
+                totals.duration_us_sum,
+            );
+            out.counter(
+                "rusty_mcrouter_pool_completed_requests_total",
+                labels,
+                totals.completed_requests,
+            );
+            out.counter(
+                "rusty_mcrouter_pool_requests_failed_total",
+                labels,
+                totals.final_errors,
+            );
+            out.counter(
+                "rusty_mcrouter_pool_total_duration_us_sum_total",
+                labels,
+                totals.total_duration_us_sum,
+            );
+        }
+    }
+}
+
+#[derive(Default)]
+struct PoolTotals {
+    requests: u64,
+    duration_us_sum: u64,
+    completed_requests: u64,
+    final_errors: u64,
+    total_duration_us_sum: u64,
+}
+
+impl PoolTotals {
+    fn add(&mut self, block: &PoolMetrics) {
+        self.requests += block.requests.load();
+        self.duration_us_sum += block.duration_us_sum.load();
+        self.completed_requests += block.completed_requests.load();
+        self.final_errors += block.final_errors.load();
+        self.total_duration_us_sum += block.total_duration_us_sum.load();
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn test_config(names: &[&str]) -> ConfigDocument {
     let pools = names
@@ -141,6 +240,72 @@ pub(crate) fn test_config(names: &[&str]) -> ConfigDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_metrics_sum_shards_and_pool_metrics() {
+        let config = test_config(&["primary", "backup"]);
+        let primary = config.pool_id("primary").unwrap();
+        let s1 = RoutingMetricsShard::new();
+        let s2 = RoutingMetricsShard::new();
+        let (t1, t2) = (s1.table_for(&config), s2.table_for(&config));
+
+        s1.dev_null_requests.add(2);
+        s2.dev_null_requests.inc();
+        s1.failover[FailoverPolicyKind::InOrder as usize].inc();
+        s2.failover_exhausted[FailoverPolicyKind::InOrder as usize].inc();
+        s2.failover_policy_errors[FailoverErrorClass::Tko as usize].add(3);
+        t1[primary].requests.add(4);
+        t2[primary].requests.add(5);
+        t2[primary].final_errors.inc();
+
+        let text = RoutingMetrics {
+            shards: vec![s1, s2],
+        }
+        .render();
+
+        assert!(text.contains("rusty_mcrouter_dev_null_requests_total 3\n"));
+        assert!(text.contains("rusty_mcrouter_failover_total{policy=\"inorder\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_failover_exhausted_total{policy=\"inorder\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_failover_policy_errors_total{class=\"tko\"} 3\n"));
+        assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"primary\"} 9\n"));
+        assert!(text.contains("rusty_mcrouter_pool_requests_failed_total{pool=\"primary\"} 1\n"));
+        assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"backup\"} 0\n"));
+    }
+
+    #[test]
+    fn routing_metrics_escape_configured_pool_names() {
+        let shard = RoutingMetricsShard::new();
+        let _table = shard.table_for(&test_config(&["quoted\"pool\\line\nnext"]));
+
+        let text = RoutingMetrics {
+            shards: vec![shard],
+        }
+        .render();
+
+        assert!(text.contains(
+            "rusty_mcrouter_pool_requests_total{pool=\"quoted\\\"pool\\\\line\\nnext\"} 0\n"
+        ));
+    }
+
+    #[test]
+    fn routing_metrics_join_shards_on_different_generations_by_name() {
+        let old = test_config(&["users"]);
+        let new = test_config(&["aaa", "users"]);
+        let s0 = RoutingMetricsShard::new();
+        let s1 = RoutingMetricsShard::new();
+        let t0 = s0.table_for(&new);
+        let t1 = s1.table_for(&old);
+        t0[new.pool_id("users").unwrap()].requests.add(2);
+        t1[old.pool_id("users").unwrap()].requests.add(3);
+
+        let text = RoutingMetrics {
+            shards: vec![s0, s1],
+        }
+        .render();
+
+        assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"users\"} 5\n"));
+        assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"aaa\"} 0\n"));
+    }
 
     #[test]
     fn table_resolves_this_configs_pool_ids() {
