@@ -1,76 +1,88 @@
-//! Scrape assembly.
-
 use std::sync::Arc;
 
 use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_backend::BackendMetrics;
+use rusty_mcrouter_config::ConfigMetrics;
 use rusty_mcrouter_core::RoutingMetrics;
 use rusty_mcrouter_frontend::FrontendMetrics;
-use rusty_mcrouter_observability_primitives::prometheus::{MetricsRegistry, MetricsSource};
+use rusty_mcrouter_observability_primitives::prometheus::{MetricsSource, MetricsText};
 use rusty_mcrouter_worker::WorkerShards;
 
-use crate::metrics::{ObservabilityMetrics, ProcessMetadata};
+use crate::{ObservabilityMetrics, ProcessMetadata};
 
-pub struct ScrapeInputs {
+pub struct ApplicationMetricsSetup {
     pub metadata: ProcessMetadata,
     pub workers: Vec<WorkerShards>,
     pub tko_map: Arc<TkoTrackerMap>,
     pub destinations: Arc<DestinationMetricsRegistry>,
     pub observability: Arc<ObservabilityMetrics>,
-    pub additional_sources: Vec<Arc<dyn MetricsSource>>,
+    pub config: Arc<ConfigMetrics>,
 }
 
-impl ScrapeInputs {
-    pub fn into_registry(self) -> MetricsRegistry {
-        let backend: Vec<_> = self
+pub struct ApplicationMetrics {
+    backend: BackendMetrics,
+    frontend: FrontendMetrics,
+    routing: RoutingMetrics,
+    tko_map: Arc<TkoTrackerMap>,
+    destinations: Arc<DestinationMetricsRegistry>,
+    observability: Arc<ObservabilityMetrics>,
+    metadata: ProcessMetadata,
+    config: Arc<ConfigMetrics>,
+}
+
+impl ApplicationMetrics {
+    pub fn new(setup: ApplicationMetricsSetup) -> Self {
+        let backend: Vec<_> = setup
             .workers
             .iter()
-            .map(|p| Arc::clone(&p.backend))
+            .map(|worker| Arc::clone(&worker.backend))
             .collect();
-        let frontend: Vec<_> = self
+        let frontend: Vec<_> = setup
             .workers
             .iter()
-            .map(|p| Arc::clone(&p.frontend))
+            .map(|worker| Arc::clone(&worker.frontend))
             .collect();
-        let routing: Vec<_> = self
+        let routing: Vec<_> = setup
             .workers
             .iter()
-            .map(|p| Arc::clone(&p.routing))
+            .map(|worker| Arc::clone(&worker.routing))
             .collect();
 
-        let mut registry = MetricsRegistry::new();
-        registry.register(Arc::new(BackendMetrics { shards: backend }));
-        registry.register(Arc::new(FrontendMetrics { shards: frontend }));
-        registry.register(Arc::new(RoutingMetrics { shards: routing }));
-        registry.register(self.tko_map);
-        registry.register(self.destinations);
-        registry.register(self.observability);
-        registry.register(Arc::new(self.metadata));
-        for source in self.additional_sources {
-            registry.register(source);
+        Self {
+            backend: BackendMetrics { shards: backend },
+            frontend: FrontendMetrics { shards: frontend },
+            routing: RoutingMetrics { shards: routing },
+            tko_map: setup.tko_map,
+            destinations: setup.destinations,
+            observability: setup.observability,
+            metadata: setup.metadata,
+            config: setup.config,
         }
-        registry
+    }
+}
+
+impl MetricsSource for ApplicationMetrics {
+    fn encode(&self, out: &mut MetricsText) {
+        self.backend.encode(out);
+        self.frontend.encode(out);
+        self.routing.encode(out);
+        self.tko_map.encode(out);
+        self.destinations.encode(out);
+        self.observability.encode(out);
+        self.metadata.encode(out);
+        self.config.encode(out);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use rusty_mcrouter_backend::classify::ResultCode;
-    use rusty_mcrouter_config::{parse, ConfigDocument};
+    use rusty_mcrouter_config::{parse, ConfigDocument, ReloadStage};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_protocol::RequestKind;
 
     use super::*;
-    use rusty_mcrouter_observability_primitives::prometheus::MetricsText;
-
-    struct InjectedSource;
-
-    impl MetricsSource for InjectedSource {
-        fn encode(&self, out: &mut MetricsText) {
-            out.gauge("injected_metric", &[], 1);
-        }
-    }
 
     fn pools_config(names: &[&str]) -> ConfigDocument {
         let pools = names
@@ -86,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn scrape_inputs_assemble_every_source_in_order() {
+    fn application_metrics_assemble_every_required_metric_in_order() {
         let workers = vec![WorkerShards::new(), WorkerShards::new()];
         // a live generation on worker 0 is what makes its pools scrapeable
         let _generation = workers[0].routing.table_for(&pools_config(&["pool_a"]));
@@ -102,8 +114,12 @@ mod tests {
         let destinations = DestinationMetricsRegistry::new();
         let tracker = tko_map.tracker_for("10.0.0.1:11211", 3);
         let _destination = destinations.metrics_for(&tracker);
+        let config = Arc::new(ConfigMetrics::default());
+        config.applied(7, 1_700_000_000);
+        config.reload_attempts.add(2);
+        config.rejected(ReloadStage::Read);
 
-        let text = ScrapeInputs {
+        let metrics = ApplicationMetrics::new(ApplicationMetricsSetup {
             metadata: ProcessMetadata {
                 start_unix_secs: 1_700_000_000,
                 num_proxies: 2,
@@ -112,10 +128,9 @@ mod tests {
             tko_map,
             destinations,
             observability,
-            additional_sources: vec![Arc::new(InjectedSource)],
-        }
-        .into_registry()
-        .render();
+            config: Arc::clone(&config),
+        });
+        let text = metrics.render();
 
         let position = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle}"));
         let order = [
@@ -134,10 +149,20 @@ mod tests {
             position("rusty_mcrouter_metrics_http_rejected_total 3\n"),
             position("rusty_mcrouter_proxies 2\n"),
             position("rusty_mcrouter_start_time_seconds 1700000000\n"),
-            position("injected_metric 1\n"),
+            position("rusty_mcrouter_config_generation 7\n"),
+            position("rusty_mcrouter_config_reload_attempts_total 2\n"),
+            position("rusty_mcrouter_config_reload_failures_total{stage=\"read\"} 1\n"),
+            position("rusty_mcrouter_config_last_reload_successful 0\n"),
+            position("rusty_mcrouter_config_last_success_timestamp_seconds 1700000000\n"),
         ];
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{text}");
         assert!(text.contains("rusty_mcrouter_requests_failed_total 1\n"));
         assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"pool_a\"} 0\n"));
+
+        config.applied(8, 1_700_000_001);
+        let text = metrics.render();
+        assert!(text.contains("rusty_mcrouter_config_generation 8\n"));
+        assert!(text.contains("rusty_mcrouter_config_last_reload_successful 1\n"));
+        assert!(text.contains("rusty_mcrouter_config_last_success_timestamp_seconds 1700000001\n"));
     }
 }

@@ -108,11 +108,14 @@ async fn tick(reloader: &mut Option<ConfigReloader>) {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
+    use rusty_mcrouter_backend::tko::TkoTrackerMap;
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
-    use rusty_mcrouter_observability::{channel, EventSender, ObservabilityMetrics};
-    use rusty_mcrouter_observability_primitives::prometheus::{
-        MetricsRegistry, MetricsSource, MetricsText,
+    use rusty_mcrouter_observability::{
+        channel, ApplicationMetrics, ApplicationMetricsSetup, EventSender, ObservabilityMetrics,
+        ProcessMetadata,
     };
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use rusty_mcrouter_worker::{WorkerCommand, WorkerHandle};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -135,10 +138,33 @@ mod tests {
         .expect("metrics scrape timed out")
     }
 
+    fn application_metrics(
+        tko_map: Arc<TkoTrackerMap>,
+        observability: Arc<ObservabilityMetrics>,
+        config: Arc<ConfigMetrics>,
+    ) -> ApplicationMetrics {
+        ApplicationMetrics::new(ApplicationMetricsSetup {
+            metadata: ProcessMetadata {
+                start_unix_secs: 1_700_000_000,
+                num_proxies: 0,
+            },
+            workers: Vec::new(),
+            tko_map,
+            destinations: DestinationMetricsRegistry::new(),
+            observability,
+            config,
+        })
+    }
+
     async fn build_runtime(
-        source: MetricsRegistry,
+        tko_map: Arc<TkoTrackerMap>,
     ) -> (ControlHandle, ControlRuntime, EventSender) {
         let metrics = Arc::new(ObservabilityMetrics::default());
+        let source = application_metrics(
+            tko_map,
+            Arc::clone(&metrics),
+            ConfigMetrics::started(1_700_000_000),
+        );
         let (events, consumer) = channel(8, Arc::clone(&metrics));
         let (handle, inbox) = ControlHandle::allocate();
         let runtime = ControlRuntime::build(ControlSetup {
@@ -180,6 +206,11 @@ mod tests {
         std::fs::write(&path, br#"{ "route": "ErrorRoute|changed" }"#).unwrap();
         let metrics = Arc::new(ObservabilityMetrics::default());
         let config_metrics = Arc::new(ConfigMetrics::default());
+        let source = application_metrics(
+            TkoTrackerMap::new(noop_sink()),
+            Arc::clone(&metrics),
+            Arc::clone(&config_metrics),
+        );
         let (_events, consumer) = channel(8, Arc::clone(&metrics));
         let (worker, mut worker_inbox) = WorkerHandle::allocate(0);
         let reloader = ConfigReloader::new(ReloaderSetup {
@@ -200,7 +231,7 @@ mod tests {
         let runtime = ControlRuntime::build(ControlSetup {
             inbox,
             events: consumer,
-            source: Arc::new(MetricsRegistry::new()),
+            source: Arc::new(source),
             metrics_addr: "127.0.0.1:0".parse().unwrap(),
             metrics,
             reloader: Some(reloader),
@@ -216,6 +247,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let response = scrape(bound).await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(
+            response.contains("rusty_mcrouter_config_generation 0\n"),
+            "{response}"
+        );
         assert_eq!(config_metrics.reload_attempts.load(), 0);
         config_metrics.applied(1, 1);
         handle.workers_ready().await.unwrap();
@@ -235,6 +270,10 @@ mod tests {
         let idle = TcpStream::connect(bound).await.unwrap();
         let response = scrape(bound).await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(
+            response.contains("rusty_mcrouter_config_generation 1\n"),
+            "{response}"
+        );
         assert_eq!(config_metrics.generation.load(), 1);
         applied.send(Ok(())).unwrap();
         handle.shutdown().await.unwrap();
@@ -247,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn aborting_control_stops_metrics_and_its_connections() {
-        let (_handle, runtime, _events) = build_runtime(MetricsRegistry::new()).await;
+        let (_handle, runtime, _events) = build_runtime(TkoTrackerMap::new(noop_sink())).await;
         let bound = runtime.bound_addr();
         let task = tokio::spawn(runtime.run());
         let idle = TcpStream::connect(bound).await.unwrap();
@@ -261,17 +300,14 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_failure_stops_control() {
-        struct Panicking;
-
-        impl MetricsSource for Panicking {
-            fn encode(&self, _out: &mut MetricsText) {
-                panic!("metrics encoding failed");
-            }
-        }
-
-        let mut source = MetricsRegistry::new();
-        source.register(Arc::new(Panicking));
-        let (handle, runtime, _events) = build_runtime(source).await;
+        let tko_map = TkoTrackerMap::new(noop_sink());
+        // Invalid tracker construction panics while holding the map lock.
+        // Rendering this real metric state then exercises the supervised panic path.
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tko_map.tracker_for("invalid:1", 0);
+        }))
+        .is_err());
+        let (handle, runtime, _events) = build_runtime(tko_map).await;
         let bound = runtime.bound_addr();
         let task = tokio::spawn(runtime.run());
         let idle = TcpStream::connect(bound).await.unwrap();

@@ -85,9 +85,15 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
 
+    use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
+    use rusty_mcrouter_backend::tko::TkoTrackerMap;
+    use rusty_mcrouter_config::ConfigMetrics;
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
-    use rusty_mcrouter_observability::{channel, EventSender, ObservabilityMetrics};
-    use rusty_mcrouter_observability_primitives::prometheus::MetricsRegistry;
+    use rusty_mcrouter_observability::{
+        channel, ApplicationMetrics, ApplicationMetricsSetup, EventSender, ObservabilityMetrics,
+        ProcessMetadata,
+    };
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
     use super::*;
 
@@ -100,13 +106,24 @@ mod tests {
         metrics_addr: SocketAddr,
     ) -> anyhow::Result<(ControlThreadOwner, SocketAddr, EventSender)> {
         let metrics = Arc::new(ObservabilityMetrics::default());
+        let source = ApplicationMetrics::new(ApplicationMetricsSetup {
+            metadata: ProcessMetadata {
+                start_unix_secs: 1_700_000_000,
+                num_proxies: 0,
+            },
+            workers: Vec::new(),
+            tko_map: TkoTrackerMap::new(noop_sink()),
+            destinations: DestinationMetricsRegistry::new(),
+            observability: Arc::clone(&metrics),
+            config: ConfigMetrics::started(1_700_000_000),
+        });
         let (events, consumer) = channel(8, Arc::clone(&metrics));
         let supervisor = Supervisor::new();
         let (handle, inbox) = ControlHandle::allocate();
         let cfg = ControlSetup {
             inbox,
             events: consumer,
-            source: Arc::new(MetricsRegistry::new()),
+            source: Arc::new(source),
             metrics_addr,
             metrics,
             reloader: None,
