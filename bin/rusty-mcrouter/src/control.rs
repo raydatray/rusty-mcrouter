@@ -106,7 +106,7 @@ mod tests {
         let cfg = ControlSetup {
             inbox,
             events: consumer,
-            registry: Arc::new(MetricsRegistry::new()),
+            source: Arc::new(MetricsRegistry::new()),
             metrics_addr,
             metrics,
             reloader: None,

@@ -1,4 +1,5 @@
 use std::fmt::Write;
+use std::sync::Arc;
 
 pub trait MetricsSource: Send + Sync {
     fn encode(&self, out: &mut MetricsText);
@@ -63,7 +64,7 @@ fn escape_label_value(out: &mut String, val: &str) {
 
 #[derive(Default)]
 pub struct MetricsRegistry {
-    sources: Vec<Box<dyn MetricsSource>>,
+    sources: Vec<Arc<dyn MetricsSource>>,
 }
 
 impl MetricsRegistry {
@@ -71,7 +72,7 @@ impl MetricsRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, source: Box<dyn MetricsSource>) {
+    pub fn register(&mut self, source: Arc<dyn MetricsSource>) {
         self.sources.push(source);
     }
 }
@@ -183,8 +184,8 @@ mod tests {
             }
         }
         let mut registry = MetricsRegistry::new();
-        registry.register(Box::new(A));
-        registry.register(Box::new(B));
+        registry.register(Arc::new(A));
+        registry.register(Arc::new(B));
         assert_eq!(registry.render(), "a 1\nb 2\n");
     }
 
@@ -211,7 +212,7 @@ mod tests {
         s2.depth.add(-2);
 
         let mut registry = MetricsRegistry::new();
-        registry.register(Box::new(FakeSource {
+        registry.register(Arc::new(FakeSource {
             shards: vec![s1, s2],
         }));
         assert_eq!(registry.render(), "fake_hits_total 7\nfake_depth 3\n");

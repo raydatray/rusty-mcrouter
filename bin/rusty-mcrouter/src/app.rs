@@ -89,7 +89,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
         observability: Arc::clone(&observability_metrics),
-        additional_sources: vec![Box::new(ConfigSource {
+        additional_sources: vec![Arc::new(ConfigSource {
             metrics: Arc::clone(&config_metrics),
         })],
     }
@@ -116,7 +116,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         ControlSetup {
             inbox: control_inbox,
             events: event_consumer,
-            registry: Arc::new(registry),
+            source: Arc::new(registry),
             metrics_addr,
             metrics: observability_metrics,
             reloader,

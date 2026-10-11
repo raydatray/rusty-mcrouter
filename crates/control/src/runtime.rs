@@ -28,7 +28,7 @@ impl ControlRuntime {
         let (metrics_shutdown, shutdown_rx) = oneshot::channel();
         let metrics = MetricsHttp::new(MetricsHttpSetup {
             listener,
-            registry: setup.registry,
+            source: setup.source,
             metrics: setup.metrics,
             options: setup.http_options,
             shutdown: shutdown_rx,
@@ -136,7 +136,7 @@ mod tests {
     }
 
     async fn build_runtime(
-        registry: MetricsRegistry,
+        source: MetricsRegistry,
     ) -> (ControlHandle, ControlRuntime, EventSender) {
         let metrics = Arc::new(ObservabilityMetrics::default());
         let (events, consumer) = channel(8, Arc::clone(&metrics));
@@ -144,7 +144,7 @@ mod tests {
         let runtime = ControlRuntime::build(ControlSetup {
             inbox,
             events: consumer,
-            registry: Arc::new(registry),
+            source: Arc::new(source),
             metrics_addr: "127.0.0.1:0".parse().unwrap(),
             metrics,
             reloader: None,
@@ -200,7 +200,7 @@ mod tests {
         let runtime = ControlRuntime::build(ControlSetup {
             inbox,
             events: consumer,
-            registry: Arc::new(MetricsRegistry::new()),
+            source: Arc::new(MetricsRegistry::new()),
             metrics_addr: "127.0.0.1:0".parse().unwrap(),
             metrics,
             reloader: Some(reloader),
@@ -269,9 +269,9 @@ mod tests {
             }
         }
 
-        let mut registry = MetricsRegistry::new();
-        registry.register(Box::new(Panicking));
-        let (handle, runtime, _events) = build_runtime(registry).await;
+        let mut source = MetricsRegistry::new();
+        source.register(Arc::new(Panicking));
+        let (handle, runtime, _events) = build_runtime(source).await;
         let bound = runtime.bound_addr();
         let task = tokio::spawn(runtime.run());
         let idle = TcpStream::connect(bound).await.unwrap();

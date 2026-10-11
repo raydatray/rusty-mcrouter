@@ -34,7 +34,7 @@ pub struct ScrapeInputs {
     pub tko_map: Arc<TkoTrackerMap>,
     pub destinations: Arc<DestinationMetricsRegistry>,
     pub observability: Arc<ObservabilityMetrics>,
-    pub additional_sources: Vec<Box<dyn MetricsSource>>,
+    pub additional_sources: Vec<Arc<dyn MetricsSource>>,
 }
 
 impl ScrapeInputs {
@@ -56,20 +56,20 @@ impl ScrapeInputs {
             .collect();
 
         let mut registry = MetricsRegistry::new();
-        registry.register(Box::new(BackendScalarsSource {
+        registry.register(Arc::new(BackendScalarsSource {
             shards: backend.clone(),
         }));
-        registry.register(Box::new(BackendRequestsSource { shards: backend }));
-        registry.register(Box::new(FrontendScalarsSource {
+        registry.register(Arc::new(BackendRequestsSource { shards: backend }));
+        registry.register(Arc::new(FrontendScalarsSource {
             shards: frontend.clone(),
         }));
-        registry.register(Box::new(FrontendRequestsSource { shards: frontend }));
-        registry.register(Box::new(RoutingSource { shards: routing }));
-        registry.register(Box::new(TkoSource { map: self.tko_map }));
-        registry.register(Box::new(DestinationSource {
+        registry.register(Arc::new(FrontendRequestsSource { shards: frontend }));
+        registry.register(Arc::new(RoutingSource { shards: routing }));
+        registry.register(Arc::new(TkoSource { map: self.tko_map }));
+        registry.register(Arc::new(DestinationSource {
             registry: self.destinations,
         }));
-        registry.register(Box::new(SelfSource {
+        registry.register(Arc::new(SelfSource {
             metrics: self.observability,
             num_proxies: self.metadata.num_proxies,
             start_unix_secs: self.metadata.start_unix_secs,
@@ -399,7 +399,7 @@ mod tests {
 
     fn render(source: impl MetricsSource + 'static) -> String {
         let mut registry = MetricsRegistry::new();
-        registry.register(Box::new(source));
+        registry.register(Arc::new(source));
         registry.render()
     }
 
@@ -603,7 +603,7 @@ mod tests {
             tko_map: TkoTrackerMap::new(noop_sink()),
             destinations: DestinationMetricsRegistry::new(),
             observability,
-            additional_sources: vec![Box::new(InjectedSource)],
+            additional_sources: vec![Arc::new(InjectedSource)],
         }
         .into_registry()
         .render();
