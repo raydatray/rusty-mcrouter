@@ -1,4 +1,5 @@
 mod document;
+mod metrics;
 mod pool;
 mod route;
 mod routing_prefix;
@@ -8,6 +9,7 @@ pub use crate::document::{
     parse, parse_file, ConfigDocument, ConfigError, PoolId, PrefixSelectorConfig, RootRouteConfig,
     RouteDefinition, RouteSelectorConfig,
 };
+pub use crate::metrics::{ConfigMetrics, ReloadStage};
 pub use crate::pool::{PoolConfig, PoolTkoTrackerConfig};
 pub use crate::route::{
     FailoverErrorKind, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc,

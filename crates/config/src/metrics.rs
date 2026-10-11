@@ -59,60 +59,50 @@ impl ConfigMetrics {
     }
 }
 
-/// Projection registered through observability's generic metric-source interface.
-pub struct ConfigSource {
-    pub metrics: Arc<ConfigMetrics>,
-}
-
-impl MetricsSource for ConfigSource {
+impl MetricsSource for ConfigMetrics {
     fn encode(&self, out: &mut MetricsText) {
-        let metrics = &self.metrics;
         out.gauge(
             "rusty_mcrouter_config_generation",
             &[],
-            metrics.generation.load(),
+            self.generation.load(),
         );
         out.counter(
             "rusty_mcrouter_config_reload_attempts_total",
             &[],
-            metrics.reload_attempts.load(),
+            self.reload_attempts.load(),
         );
         for stage in ReloadStage::ALL {
             out.counter(
                 "rusty_mcrouter_config_reload_failures_total",
                 &[("stage", stage.label())],
-                metrics.reload_failures[stage as usize].load(),
+                self.reload_failures[stage as usize].load(),
             );
         }
         out.gauge(
             "rusty_mcrouter_config_last_reload_successful",
             &[],
-            metrics.last_reload_successful.load(),
+            self.last_reload_successful.load(),
         );
         out.gauge(
             "rusty_mcrouter_config_last_success_timestamp_seconds",
             &[],
-            metrics.last_success_unix_secs.load(),
+            self.last_success_unix_secs.load(),
         );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_observability_primitives::prometheus::MetricsRegistry;
-
     use super::*;
 
     #[test]
-    fn config_source_golden() {
+    fn config_metrics_golden() {
         let metrics = Arc::new(ConfigMetrics::default());
         metrics.applied(3, 1_700_000_000);
         metrics.reload_attempts.add(3);
         metrics.rejected(ReloadStage::Parse);
-        let mut registry = MetricsRegistry::new();
-        registry.register(Arc::new(ConfigSource { metrics }));
         assert_eq!(
-            registry.render(),
+            metrics.render(),
             "rusty_mcrouter_config_generation 3\n\
              rusty_mcrouter_config_reload_attempts_total 3\n\
              rusty_mcrouter_config_reload_failures_total{stage=\"read\"} 0\n\

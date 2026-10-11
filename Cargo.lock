@@ -454,6 +454,7 @@ name = "rusty-mcrouter-config"
 version = "0.1.0"
 dependencies = [
  "json_comments",
+ "rusty-mcrouter-observability-primitives",
  "serde",
  "serde_json",
  "serde_path_to_error",

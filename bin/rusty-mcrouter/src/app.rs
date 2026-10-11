@@ -3,9 +3,9 @@ use rusty_mcrouter_backend::{
     destination::DestinationMetricsRegistry,
     tko::{DestTokenAllocator, TkoTrackerMap},
 };
+use rusty_mcrouter_config::ConfigMetrics;
 use rusty_mcrouter_control::{
-    ConfigMetrics, ConfigReloader, ConfigSource, ControlHandle, ControlSetup, ReloaderSetup,
-    RunningConfig,
+    ConfigReloader, ControlHandle, ControlSetup, ReloaderSetup, RunningConfig,
 };
 use rusty_mcrouter_observability::{
     channel, logging, ObservabilityMetrics, ProcessMetadata, ScrapeInputs,
@@ -89,9 +89,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
         observability: Arc::clone(&observability_metrics),
-        additional_sources: vec![Arc::new(ConfigSource {
-            metrics: Arc::clone(&config_metrics),
-        })],
+        additional_sources: vec![config_metrics.clone()],
     }
     .into_registry();
 
