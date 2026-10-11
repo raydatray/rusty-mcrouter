@@ -5,10 +5,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rusty_mcrouter_backend::classify::ResultCode;
 use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
-use rusty_mcrouter_backend::metrics::BackendMetricsShard;
 use rusty_mcrouter_backend::tko::TkoTrackerMap;
+use rusty_mcrouter_backend::BackendMetrics;
 use rusty_mcrouter_core::{
     FailoverErrorClass, FailoverPolicyKind, PoolMetrics, RoutingMetricsShard,
 };
@@ -56,19 +55,14 @@ impl ScrapeInputs {
             .collect();
 
         let mut registry = MetricsRegistry::new();
-        registry.register(Arc::new(BackendScalarsSource {
-            shards: backend.clone(),
-        }));
-        registry.register(Arc::new(BackendRequestsSource { shards: backend }));
+        registry.register(Arc::new(BackendMetrics { shards: backend }));
         registry.register(Arc::new(FrontendScalarsSource {
             shards: frontend.clone(),
         }));
         registry.register(Arc::new(FrontendRequestsSource { shards: frontend }));
         registry.register(Arc::new(RoutingSource { shards: routing }));
-        registry.register(Arc::new(TkoSource { map: self.tko_map }));
-        registry.register(Arc::new(DestinationSource {
-            registry: self.destinations,
-        }));
+        registry.register(self.tko_map);
+        registry.register(self.destinations);
         registry.register(Arc::new(SelfSource {
             metrics: self.observability,
             num_proxies: self.metadata.num_proxies,
@@ -82,25 +76,6 @@ impl ScrapeInputs {
 }
 
 shard_source! {
-    /// Backend metric shards -> the rusty_mcrouter_backend_* scalar families.
-    /// the {command, result} matrix is BackendRequestsSource.
-    pub struct BackendScalarsSource(BackendMetricsShard) {
-        counter latency_us_sum              => "rusty_mcrouter_backend_latency_us_sum_total";
-        counter connections_opened          => "rusty_mcrouter_backend_connections_opened_total";
-        counter connections_closed          => "rusty_mcrouter_backend_connections_closed_total";
-        counter connect_retries             => "rusty_mcrouter_backend_connect_retries_total";
-        counter connect_success_after_retry => "rusty_mcrouter_backend_connect_retry_successes_total";
-        counter write_batches               => "rusty_mcrouter_backend_write_batches_total";
-        counter batched_requests            => "rusty_mcrouter_backend_batched_requests_total";
-        counter queue_full                  => "rusty_mcrouter_backend_queue_full_total";
-        counter bytes_read                  => "rusty_mcrouter_backend_bytes_read_total";
-        counter bytes_written               => "rusty_mcrouter_backend_bytes_written_total";
-        gauge   pending_reqs                => "rusty_mcrouter_backend_pending_reqs";
-        gauge   inflight_reqs               => "rusty_mcrouter_backend_inflight_reqs";
-    }
-}
-
-shard_source! {
     /// Frontend metric shards -> the client-facing families. the
     /// per-command matrix is FrontendRequestsSource.
     pub struct FrontendScalarsSource(FrontendMetricsShard) {
@@ -109,32 +84,6 @@ shard_source! {
         counter failed             => "rusty_mcrouter_requests_failed_total";
         gauge   client_connections => "rusty_mcrouter_client_connections";
         gauge   processing         => "rusty_mcrouter_requests_processing";
-    }
-}
-
-pub struct BackendRequestsSource {
-    pub shards: Vec<Arc<BackendMetricsShard>>,
-}
-
-impl MetricsSource for BackendRequestsSource {
-    fn encode(&self, out: &mut MetricsText) {
-        for kind in RequestKind::ALL {
-            for code in ResultCode::ALL {
-                let total: u64 = self
-                    .shards
-                    .iter()
-                    .map(|s| s.requests[kind as usize][code as usize].load())
-                    .sum();
-                out.counter(
-                    "rusty_mcrouter_backend_requests_total",
-                    &[
-                        ("command", kind.meta_command()),
-                        ("result", code.prometheus_label()),
-                    ],
-                    total,
-                );
-            }
-        }
     }
 }
 
@@ -257,109 +206,6 @@ impl PoolTotals {
     }
 }
 
-pub struct TkoSource {
-    pub map: Arc<TkoTrackerMap>,
-}
-
-impl MetricsSource for TkoSource {
-    fn encode(&self, out: &mut MetricsText) {
-        let global = self.map.global_metrics();
-        out.gauge(
-            "rusty_mcrouter_tko",
-            &[("kind", "soft")],
-            global.soft_tkos.load(),
-        );
-        out.gauge(
-            "rusty_mcrouter_tko",
-            &[("kind", "hard")],
-            global.hard_tkos.load(),
-        );
-        out.gauge(
-            "rusty_mcrouter_suspect_servers",
-            &[],
-            self.map.sus_servers().len() as i64,
-        );
-
-        for gate in self.map.pool_snapshot() {
-            let pool = &[("pool", &**gate.name())];
-            out.gauge(
-                "rusty_mcrouter_pool_fail_open",
-                pool,
-                gate.fail_open() as i64,
-            );
-            out.gauge(
-                "rusty_mcrouter_pool_destinations_tko",
-                pool,
-                gate.num_destinations_tko() as i64,
-            );
-            out.counter(
-                "rusty_mcrouter_fail_open_entered_total",
-                pool,
-                gate.fail_open_entered_total(),
-            );
-            out.counter(
-                "rusty_mcrouter_fail_open_exited_total",
-                pool,
-                gate.fail_open_exited_total(),
-            );
-        }
-    }
-}
-
-pub struct DestinationSource {
-    pub registry: Arc<DestinationMetricsRegistry>,
-}
-
-impl MetricsSource for DestinationSource {
-    fn encode(&self, out: &mut MetricsText) {
-        for block in self.registry.snapshot() {
-            let destination = block.destination();
-            let dest = &[("destination", destination)];
-            out.gauge(
-                "rusty_mcrouter_destination_up",
-                dest,
-                !block.tracker.is_tko() as i64,
-            );
-            for code in ResultCode::ALL {
-                out.counter(
-                    "rusty_mcrouter_destination_requests_total",
-                    &[
-                        ("destination", destination),
-                        ("result", code.prometheus_label()),
-                    ],
-                    block.requests[code as usize].load(),
-                );
-            }
-            out.counter(
-                "rusty_mcrouter_destination_latency_us_sum_total",
-                dest,
-                block.latency_us_sum.load(),
-            );
-            out.counter(
-                "rusty_mcrouter_destination_connects_total",
-                dest,
-                block.connects.load(),
-            );
-            out.counter(
-                "rusty_mcrouter_destination_idle_closes_total",
-                dest,
-                block.idle_closes.load(),
-            );
-            // per tko episode, reset on unmark - a gauge
-            out.gauge(
-                "rusty_mcrouter_destination_probes_sent",
-                dest,
-                block.probes_sent.load(),
-            );
-            out.gauge(
-                "rusty_mcrouter_destination_inflight_reqs",
-                dest,
-                block.inflight_reqs.load(),
-            );
-        }
-    }
-}
-
 pub struct SelfSource {
     pub metrics: Arc<ObservabilityMetrics>,
     pub num_proxies: usize,
@@ -390,7 +236,7 @@ impl MetricsSource for SelfSource {
 
 #[cfg(test)]
 mod tests {
-    use rusty_mcrouter_backend::tko::{DestTokenAllocator, FailOpenThresholds};
+    use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_config::{parse, ConfigDocument};
     use rusty_mcrouter_observability_primitives::test_support::noop_sink;
 
@@ -422,29 +268,6 @@ mod tests {
             })
             .collect::<serde_json::Map<_, _>>();
         parse(&serde_json::json!({ "pools": pools, "route": "NullRoute" }).to_string()).unwrap()
-    }
-
-    #[test]
-    fn backend_sources_sum_real_shards() {
-        let s1 = BackendMetricsShard::new();
-        let s2 = BackendMetricsShard::new();
-        s1.record_send(RequestKind::Get, ResultCode::Success, 100);
-        s2.record_send(RequestKind::Get, ResultCode::Success, 250);
-        s2.record_result(RequestKind::Store, ResultCode::Tko);
-
-        let text = render(BackendRequestsSource {
-            shards: vec![Arc::clone(&s1), Arc::clone(&s2)],
-        });
-        assert!(text.contains(
-            "rusty_mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 2\n"
-        ));
-        assert!(text
-            .contains("rusty_mcrouter_backend_requests_total{command=\"ms\",result=\"tko\"} 1\n"));
-
-        let text = render(BackendScalarsSource {
-            shards: vec![s1, s2],
-        });
-        assert!(text.contains("rusty_mcrouter_backend_latency_us_sum_total 350\n"));
     }
 
     #[test]
@@ -525,60 +348,6 @@ mod tests {
 
         assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"users\"} 5\n"));
         assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"aaa\"} 0\n"));
-    }
-
-    #[test]
-    fn tko_source_reflects_marks_and_gates() {
-        let allocator = DestTokenAllocator::new();
-        let map = TkoTrackerMap::new(noop_sink());
-        let tracker = map.tracker_for("10.0.0.1:11211", 3);
-        assert!(tracker.record_hard_failure(allocator.allocate(), ResultCode::ConnectError));
-
-        // soft mark on a second server for the kind="soft" gauge
-        let soft = map.tracker_for("10.0.0.2:11211", 1);
-        assert!(soft.record_soft_failure(allocator.allocate(), ResultCode::Timeout));
-
-        // drive the gate directly into fail-open (enter=1: one slot
-        // admitted, the next reservation flips the gate)
-        let gate = map.pool_tracker_for("pool_a", FailOpenThresholds { enter: 1, exit: 1 });
-        gate.inc_num_destinations_tko();
-        gate.inc_num_destinations_tko();
-
-        let text = render(TkoSource {
-            map: Arc::clone(&map),
-        });
-        assert!(text.contains("rusty_mcrouter_tko{kind=\"hard\"} 1\n"));
-        assert!(text.contains("rusty_mcrouter_tko{kind=\"soft\"} 1\n"));
-        assert!(text.contains("rusty_mcrouter_pool_fail_open{pool=\"pool_a\"} 1\n"));
-        assert!(text.contains("rusty_mcrouter_fail_open_entered_total{pool=\"pool_a\"} 1\n"));
-    }
-
-    #[test]
-    fn destination_source_walks_and_labels() {
-        let map = TkoTrackerMap::new(noop_sink());
-        let registry = DestinationMetricsRegistry::new();
-        let addr: Arc<str> = Arc::from("10.0.0.1:11211");
-        let tracker = map.tracker_for(&addr, 3);
-        let block = registry.metrics_for(&tracker);
-        block.record_send(ResultCode::Success, 500);
-
-        let text = render(DestinationSource {
-            registry: Arc::clone(&registry),
-        });
-        assert!(text.contains("rusty_mcrouter_destination_up{destination=\"10.0.0.1:11211\"} 1\n"));
-        assert!(text.contains(
-            "rusty_mcrouter_destination_requests_total{destination=\"10.0.0.1:11211\",result=\"success\"} 1\n"
-        ));
-        assert!(text.contains(
-            "rusty_mcrouter_destination_latency_us_sum_total{destination=\"10.0.0.1:11211\"} 500\n"
-        ));
-
-        drop(block);
-        let text = render(DestinationSource { registry });
-        assert!(
-            !text.contains("10.0.0.1:11211"),
-            "dead destinations must leave the scrape"
-        );
     }
 
     #[test]
