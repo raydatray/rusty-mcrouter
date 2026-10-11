@@ -1,6 +1,4 @@
-// the metric sources: one per fact-owner. shard-sum scalars go through
-// the shard_source! macro; matrices, walks and direct reads are hand
-// written (unique shapes, one instance each).
+//! Scrape assembly.
 
 use std::sync::Arc;
 
@@ -9,18 +7,10 @@ use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_backend::BackendMetrics;
 use rusty_mcrouter_core::RoutingMetrics;
 use rusty_mcrouter_frontend::FrontendMetrics;
-use rusty_mcrouter_observability_primitives::prometheus::{
-    MetricsRegistry, MetricsSource, MetricsText,
-};
+use rusty_mcrouter_observability_primitives::prometheus::{MetricsRegistry, MetricsSource};
 use rusty_mcrouter_worker::WorkerShards;
 
-use crate::metrics::ObservabilityMetrics;
-
-#[derive(Clone, Copy, Debug)]
-pub struct ProcessMetadata {
-    pub start_unix_secs: u64,
-    pub num_proxies: usize,
-}
+use crate::metrics::{ObservabilityMetrics, ProcessMetadata};
 
 pub struct ScrapeInputs {
     pub metadata: ProcessMetadata,
@@ -55,43 +45,12 @@ impl ScrapeInputs {
         registry.register(Arc::new(RoutingMetrics { shards: routing }));
         registry.register(self.tko_map);
         registry.register(self.destinations);
-        registry.register(Arc::new(SelfSource {
-            metrics: self.observability,
-            num_proxies: self.metadata.num_proxies,
-            start_unix_secs: self.metadata.start_unix_secs,
-        }));
+        registry.register(self.observability);
+        registry.register(Arc::new(self.metadata));
         for source in self.additional_sources {
             registry.register(source);
         }
         registry
-    }
-}
-
-pub struct SelfSource {
-    pub metrics: Arc<ObservabilityMetrics>,
-    pub num_proxies: usize,
-    /// computed once at startup - no clock reads at scrape time
-    pub start_unix_secs: u64,
-}
-
-impl MetricsSource for SelfSource {
-    fn encode(&self, out: &mut MetricsText) {
-        out.counter(
-            "rusty_mcrouter_events_dropped_total",
-            &[],
-            self.metrics.events_dropped.load(),
-        );
-        out.counter(
-            "rusty_mcrouter_metrics_http_rejected_total",
-            &[],
-            self.metrics.http_rejected.load(),
-        );
-        out.gauge("rusty_mcrouter_proxies", &[], self.num_proxies as i64);
-        out.gauge(
-            "rusty_mcrouter_start_time_seconds",
-            &[],
-            self.start_unix_secs as i64,
-        );
     }
 }
 
@@ -103,13 +62,7 @@ mod tests {
     use rusty_mcrouter_protocol::RequestKind;
 
     use super::*;
-    use rusty_mcrouter_observability_primitives::prometheus::MetricsRegistry;
-
-    fn render(source: impl MetricsSource + 'static) -> String {
-        let mut registry = MetricsRegistry::new();
-        registry.register(Arc::new(source));
-        registry.render()
-    }
+    use rusty_mcrouter_observability_primitives::prometheus::MetricsText;
 
     struct InjectedSource;
 
@@ -144,6 +97,11 @@ mod tests {
         workers[1].routing.dev_null_requests.inc();
         let observability = Arc::new(ObservabilityMetrics::default());
         observability.events_dropped.inc();
+        observability.http_rejected.add(3);
+        let tko_map = TkoTrackerMap::new(noop_sink());
+        let destinations = DestinationMetricsRegistry::new();
+        let tracker = tko_map.tracker_for("10.0.0.1:11211", 3);
+        let _destination = destinations.metrics_for(&tracker);
 
         let text = ScrapeInputs {
             metadata: ProcessMetadata {
@@ -151,8 +109,8 @@ mod tests {
                 num_proxies: 2,
             },
             workers,
-            tko_map: TkoTrackerMap::new(noop_sink()),
-            destinations: DestinationMetricsRegistry::new(),
+            tko_map,
+            destinations,
             observability,
             additional_sources: vec![Arc::new(InjectedSource)],
         }
@@ -162,37 +120,24 @@ mod tests {
         let position = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle}"));
         let order = [
             position("rusty_mcrouter_backend_latency_us_sum_total 0\n"),
+            position("rusty_mcrouter_backend_inflight_reqs 0\n"),
             position(
                 "rusty_mcrouter_backend_requests_total{command=\"mg\",result=\"success\"} 1\n",
             ),
             position("rusty_mcrouter_noops_total 0\n"),
+            position("rusty_mcrouter_requests_processing 0\n"),
             position("rusty_mcrouter_requests_total{command=\"mg\"} 0\n"),
             position("rusty_mcrouter_dev_null_requests_total 1\n"),
             position("rusty_mcrouter_tko{kind=\"soft\"} 0\n"),
+            position("rusty_mcrouter_destination_up{destination=\"10.0.0.1:11211\"} 1\n"),
             position("rusty_mcrouter_events_dropped_total 1\n"),
+            position("rusty_mcrouter_metrics_http_rejected_total 3\n"),
             position("rusty_mcrouter_proxies 2\n"),
+            position("rusty_mcrouter_start_time_seconds 1700000000\n"),
             position("injected_metric 1\n"),
         ];
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{text}");
         assert!(text.contains("rusty_mcrouter_requests_failed_total 1\n"));
         assert!(text.contains("rusty_mcrouter_pool_requests_total{pool=\"pool_a\"} 0\n"));
-    }
-
-    #[test]
-    fn self_source_golden() {
-        let metrics = Arc::new(ObservabilityMetrics::default());
-        metrics.events_dropped.add(2);
-        let text = render(SelfSource {
-            metrics,
-            num_proxies: 4,
-            start_unix_secs: 1_700_000_000,
-        });
-        assert_eq!(
-            text,
-            "rusty_mcrouter_events_dropped_total 2\n\
-             rusty_mcrouter_metrics_http_rejected_total 0\n\
-             rusty_mcrouter_proxies 4\n\
-             rusty_mcrouter_start_time_seconds 1700000000\n"
-        );
     }
 }

@@ -85,48 +85,9 @@ impl MetricsSource for MetricsRegistry {
     }
 }
 
-#[macro_export]
-macro_rules! shard_source {
-    (
-        $(#[$meta:meta])*
-        pub struct $source:ident($shard:ty) {
-            $( $kind:ident $field:ident => $name:literal; )*
-        }
-    ) => {
-        $(#[$meta])*
-        pub struct $source {
-            pub shards: Vec<std::sync::Arc<$shard>>,
-        }
-
-        impl $crate::prometheus::MetricsSource for $source {
-            fn encode(&self, out: &mut $crate::prometheus::MetricsText) {
-                $( $crate::shard_source!(@emit $kind, self, out, $field, $name); )*
-            }
-        }
-    };
-
-    (@emit counter, $self:ident, $out:ident, $field:ident, $name:literal) => {
-        $out.counter(
-            $name,
-            &[],
-            $self.shards.iter().map(|s| s.$field.load()).sum::<u64>(),
-        );
-    };
-
-    (@emit gauge, $self:ident, $out:ident, $field:ident, $name:literal) => {
-        $out.gauge(
-            $name,
-            &[],
-            $self.shards.iter().map(|s| s.$field.load()).sum::<i64>(),
-        );
-    };
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-
-    use crate::{Counter, Gauge};
 
     use super::*;
 
@@ -187,34 +148,5 @@ mod tests {
         registry.register(Arc::new(A));
         registry.register(Arc::new(B));
         assert_eq!(registry.render(), "a 1\nb 2\n");
-    }
-
-    #[test]
-    fn shard_source_macro_sums_across_shards() {
-        #[derive(Default)]
-        struct FakeShard {
-            hits: Counter,
-            depth: Gauge,
-        }
-
-        shard_source! {
-            pub struct FakeSource(FakeShard) {
-                counter hits  => "fake_hits_total";
-                gauge   depth => "fake_depth";
-            }
-        }
-
-        let s1 = Arc::new(FakeShard::default());
-        let s2 = Arc::new(FakeShard::default());
-        s1.hits.add(3);
-        s2.hits.add(4);
-        s1.depth.add(5);
-        s2.depth.add(-2);
-
-        let mut registry = MetricsRegistry::new();
-        registry.register(Arc::new(FakeSource {
-            shards: vec![s1, s2],
-        }));
-        assert_eq!(registry.render(), "fake_hits_total 7\nfake_depth 3\n");
     }
 }

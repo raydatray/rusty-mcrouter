@@ -200,7 +200,7 @@ the integration crate, `rusty-mcrouter-observability`:
 flowchart TB
     P[rusty-mcrouter-protocol]
     K[rusty-mcrouter-config]
-    Q["rusty-mcrouter-observability-primitives<br/>Counter, Gauge, EventSink"]
+    Q["rusty-mcrouter-observability-primitives<br/>Counter, Gauge, EventSink,<br/>MetricsSource, MetricsText, MetricsRegistry"]
     N["rusty-mcrouter-backend<br/>TkoEventRecord, BackendMetricsShard,<br/>DestinationMetrics + sinks"]
     C["rusty-mcrouter-core<br/>RoutingEventRecord + counters/sink"]
     X["rusty-mcrouter-proxy<br/>WorkerEventRecord, FrontendMetricsShard,<br/>frontend server + orchestration"]
@@ -211,6 +211,7 @@ flowchart TB
     K --> X
     N --> O
     Q --> N
+    Q --> K
     Q --> C
     Q --> X
     Q --> O
@@ -221,8 +222,8 @@ flowchart TB
 observability imports and composes leaf types:
 
 ```text
-leaf crates define facts.
-observability composes and presents facts.
+leaf crates define facts and their Prometheus projections.
+observability composes the projections and serves scrapes.
 the binary wires the system together.
 ```
 
@@ -640,28 +641,41 @@ catalog: `0001-observability-catalog.md`.
 ## public api and wiring
 
 ```rust
-impl Observability {
-    pub fn new(bus_capacity: usize) -> Self;
-    pub fn events(&self) -> &EventSender;
-    pub fn register(&mut self, source: Box<dyn MetricsSource>);
-    pub fn into_parts(self, metrics_addr: Option<SocketAddr>)
-        -> io::Result<(Option<SocketAddr>, ObservabilityParts)>;
+pub trait MetricsSource: Send + Sync {
+    fn encode(&self, out: &mut MetricsText);
+}
+
+impl MetricsRegistry {
+    pub fn new() -> Self;
+    pub fn register(&mut self, source: Arc<dyn MetricsSource>);
+    pub fn render(&self) -> String;
 }
 ```
+
+the shared trait, text encoder, and registry live in
+`observability-primitives::prometheus`. each owner imports that module directly
+and implements the trait on its existing
+metric state or on a collection of worker shards. the registry shares those
+objects through `Arc`; it reads their current values on each scrape.
 
 binary wiring:
 
 ```rust
-let mut obs = Observability::new(event_bus_capacity);
-let tko_map = TkoTrackerMap::with_sink(obs.events().sink());
-let layout = RoutingMetricsLayout::new(config.pools.keys().cloned());
-let metrics = RoutingMetricsShard::new(Arc::clone(&layout));
-let state = RoutingState::with_event_sink(metrics, obs.events().sink());
-let route = build_route(&config, &factory, &defaults, state.layout())?;
-obs.register(Box::new(RoutingSource { shards }));
-let (metrics_addr, parts) = obs.into_parts(metrics_addr)?;
-let control = ControlThread::spawn(parts, process_events)?;
+let observability = Arc::new(ObservabilityMetrics::default());
+let (events, event_consumer) = channel(event_bus_capacity, Arc::clone(&observability));
+let config_metrics = Arc::new(ConfigMetrics::default());
+let registry = ScrapeInputs {
+    metadata,
+    workers: worker_shards,
+    tko_map: Arc::clone(&shared.tko_map),
+    destinations: Arc::clone(&shared.destinations),
+    observability,
+    additional_sources: vec![config_metrics.clone()],
+}
+.into_registry();
 ```
+
+the app supplies the registry and event consumer to `ControlSetup`.
 
 the control thread owns event consumption and a Hyper HTTP/1 metrics service.
 the service disables keep-alive, applies a five-second connection timeout and
@@ -674,10 +688,9 @@ the shipped slices are: owned TKO, routing, and worker event records;
 the bounded shedding bus; per-proxy frontend/backend/routing shards;
 shared per-destination blocks; live TKO/fail-open sources; the Hyper
 HTTP endpoint; and supervised binary construction/wiring. route instrumentation is
-guarded by `bin/rusty-mcrouter/tests/route_graph_observability.rs`, which
-parses real config, builds a graph with mock backends, executes through
-the proxy boundary, renders the real `RoutingSource`, and asserts
-healthy and failover metrics.
+guarded by owner-local aggregation tests in `crates/core/src/metrics.rs` and
+process-level scrape tests in `bin/rusty-mcrouter/tests/system_e2e.rs`, which
+exercise healthy and failover metrics through the full stack.
 
 ## test matrix
 
