@@ -70,7 +70,7 @@ structures are keyed by `PoolId`:
 |---|---|---|
 | pool TKO gates: `TkoTrackerMap::pool_tracker_for(id, ...)` (`crates/backend/src/backend.rs:111-112`, `tko/map.rs:52-70`) | `PoolId` | the new pool N dedups to the old pool N's gate. that is someone else's fail-open state; in debug builds it trips `debug_assert_eq!(existing.name(), pool_name)` (`tko/map.rs:60`) |
 | per-thread gate cache: `DestinationFactory.pool_gates` (`backend.rs:92`, `:105-115`), one factory per thread (`thread.rs:85`) | `PoolId` | same mix-up as the gates, and it holds every gate it has ever seen alive for the life of the thread, so a removed pool's gate never dies |
-| pool metrics: `RoutingMetricsShard::pool(id)` (`crates/core/src/metrics.rs:122-160`), built once from one layout (`bin/rusty-mcrouter/src/proxy_fleet.rs:82-89`) | `PoolId` index into a fixed `Vec` | a new layout means new shards. counters reset (breaking 0001's "never zeroed by us") and `RoutingSource` assumes all shards share one layout (`crates/observability/src/sources.rs:188-197`) |
+| pool metrics: `RoutingMetricsShard::pool(id)` (`crates/core/src/metrics.rs:122-160`), built once from one layout (`bin/rusty-mcrouter/src/proxy_fleet.rs:82-89`) | `PoolId` index into a fixed `Vec` | a new layout means new shards. counters reset (breaking 0001's "never zeroed by us") and the original routing projection assumes all shards share one layout |
 | request attribution: `RouteContext.selected_pool: Cell<Option<PoolId>>` (`crates/core/src/context.rs:18-20`, `:55-59`) | `PoolId` | only safe if the index is resolved against the table of the context's own generation |
 
 the rule this design adopts: **`PoolId` never outlives the generation that
@@ -228,7 +228,7 @@ sequenceDiagram
     layout does today
 - **request path:** unchanged cost (an index plus one pointer), no lock, no
   allocation. every `shard.pool(id)` becomes `state.pools[id]`.
-- **`RoutingSource`** sums by name across shards. the shared-layout
+- **`RoutingMetrics`** sums by name across shards. the shared-layout
   `debug_assert` goes away.
 - **series lifecycle,** consistent with per-destination blocks (0001):
   - a surviving pool continues its series monotonically. an in-flight
@@ -276,8 +276,9 @@ sequenceDiagram
 
 ## observability
 
-owned by a `ConfigMetrics` block (next to `ObservabilityMetrics`), rendered by a
-new `ConfigSource`:
+owned by a `ConfigMetrics` block in the configuration library, which implements
+`MetricsSource` in `crates/config/src/metrics.rs`. the control reloader records
+reload outcomes in that shared block:
 
 | metric | type | upstream |
 |---|---|---|
@@ -329,12 +330,12 @@ each slice leaves the tree green; reload is not reachable until slice 6.
 
 1. `[backend]` key pool gates by name; comment the re-attachment limitation
 2. `[core][observability]` name-keyed pool metric blocks, generation-scoped
-   `PoolMetricsTable`, `RoutingSource` sums by name
+   `PoolMetricsTable`, `RoutingMetrics` sums by name
 3. `[core]` `validate()` via a dry-run build with an inert factory
 4. `[proxy]` `RouteGeneration` + `RouteSlot`; connections read per request;
    `ProxyCommand::Reconfigure`; shared `GenerationBuilder` with a
    per-generation `DestinationFactory`
-5. `[observability]` `ConfigMetrics` + `ConfigSource`; catalog rows
+5. `[config]` `ConfigMetrics` + its Prometheus projection; catalog rows
 6. `[bin]` `ConfigReloader` in the control runtime; the two CLI flags;
    `ProxyFleet::handles()`
 7. `[test]` end-to-end reload tests
@@ -349,7 +350,7 @@ each slice leaves the tree green; reload is not reachable until slice 6.
 | pool blocks and generation tables | `crates/core/src/metrics.rs`, `context.rs` |
 | dry-run validation | `crates/core/src/route_builder/validate.rs` |
 | generations, slot, builder | `crates/proxy/src/generation.rs`, `runtime.rs`, `connection.rs` |
-| config metrics | `crates/observability/src/metrics.rs`, `sources.rs` |
+| config metrics | `crates/config/src/metrics.rs` |
 | reloader | `bin/rusty-mcrouter/src/reload.rs`, wired in `control.rs` and `app.rs` |
 
 the end-to-end contract is guarded by

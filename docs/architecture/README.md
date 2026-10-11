@@ -11,14 +11,14 @@ dependencies point from lower-level primitives and fact owners toward
 composition and presentation (`A --> B` means B depends on A):
 
 - **[`rusty-mcrouter-protocol`](../../crates/protocol/)** - the meta protocol codec, request and reply types, the encoders and decoders for both requests and replies and key parsing
-- **[`rusty-mcrouter-config`](../../crates/config/)** - config file parsing into pools, routes and policies
-- **[`rusty-mcrouter-observability-primitives`](../../crates/observability-primitives/)** - std-only metric cells and event sink mechanics shared by fact-owning crates; no domain records or presentation logic
+- **[`rusty-mcrouter-config`](../../crates/config/)** - configuration documents, parsing into pools/routes/policies, and configuration-lifecycle metric state and encoding
+- **[`rusty-mcrouter-observability-primitives`](../../crates/observability-primitives/)** - std-only metric cells, event sinks, and generic Prometheus encoding/registry machinery shared by fact-owning crates
 - **[`rusty-mcrouter-backend`](../../crates/backend/)** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
 - **[`rusty-mcrouter-core`](../../crates/core/)** - the routing graph, where a config file is transformed into a tree of route handles
 - **[`rusty-mcrouter-frontend`](../../crates/frontend/)** - the client-facing leg: listener transport, complete protocol connections, request/reply mailbox transport and frontend metric data
 - **[`rusty-mcrouter-worker`](../../crates/worker/)** - worker mailboxes, socket distribution, routing generations, request execution and worker orchestration
 - **[`rusty-mcrouter-observability`](../../crates/observability/)** - event and metric components, Hyper-based `/metrics` handling and presentation
-- **[`rusty-mcrouter-control`](../../crates/control/)** - control runtime, commands, configuration reload coordination and its fact-owned metric data and projection
+- **[`rusty-mcrouter-control`](../../crates/control/)** - control runtime, commands, configuration reload coordination, and metrics service lifecycle
 - **[`rusty-mcrouter`](../../bin/rusty-mcrouter/)** - the binary composition layer: cli, executor/thread ownership, process signals and supervision
 
 ```mermaid
@@ -61,6 +61,7 @@ flowchart LR
     Q --> T
     T --> R
     Q --> B
+    Q --> K
     Q --> X
     Q --> F
     Q --> O
@@ -202,12 +203,18 @@ drains and joins the control thread.
   shutdown still reports errors, and stops workers before control.
 - the binary captures process metadata and the initial config timestamp;
   the control reloader captures successful reload timestamps alongside its own
-  logging and counters. metric data and projections do not read the wall clock.
+  logging and configuration counters. metric data and projections do not read the wall clock.
   control inboxes are app-allocated, just like worker inboxes.
-- control owns `ConfigMetrics`, `ReloadStage` and `ConfigSource`; the app registers
-  its projection through observability's `MetricsSource` interface using
-  `ScrapeInputs.additional_sources`. observability stays independent of control,
-  allowing the control runtime to consume its event and HTTP services.
+- fact owners colocate metric state, recording methods, and implementations of
+  `observability-primitives::prometheus::MetricsSource` in `metrics.rs`.
+  `BackendMetrics`, `FrontendMetrics`, and `RoutingMetrics` aggregate worker
+  shards; `TkoTrackerMap`, `DestinationMetricsRegistry`, `ConfigMetrics`,
+  `ObservabilityMetrics`, and `ProcessMetadata` encode their state directly.
+- `MetricsRegistry` holds `Arc<dyn MetricsSource>` and renders into `MetricsText`.
+  observability's `ScrapeInputs` assembles the owner-provided metrics in scrape
+  order. the app supplies its shared `ConfigMetrics` through
+  `ScrapeInputs.additional_sources`, keeping observability independent of control
+  while control consumes its event and HTTP services.
 
 shared resources use `Arc`; route graphs, destinations and their connection
 callbacks remain worker-local with `Rc`. the existing `Backend` and
