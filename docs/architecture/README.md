@@ -179,16 +179,16 @@ drains and joins the control thread.
 - `new` assembles supplied dependencies and component-owned working state.
   mailbox allocation and task activation are explicit `allocate` and `spawn`
   operations; actors execute through `run`.
-- backend `Connection` receives a `ConnectionSetup`. `DestinationAssembler`
+- backend `Connection` receives a `ConnectionSetup`. `DestinationRegistry`
   wires its weak event callback, spawns the connection, and supplies a
   `DestinationSetup`. the destination owns and aborts the connection and probe
   tasks when its last reference drops.
-- each worker's destination map receives its assembler. the app owns one shared
-  destination-token allocator, and supplies the event bus and metric registries.
-  probe seeds are reproducibly mixed from allocated tokens.
+- each worker's `DestinationRegistry` receives shared TKO trackers, the
+  destination-token allocator and destination metrics registry, plus its own
+  backend metric shard. probe seeds are reproducibly mixed from allocated tokens.
 - `GenerationBuilder` receives `GenerationSetup` and creates a fresh
   `DestinationFactory` for each graph, preserving generation-local gate caches
-  while the map reuses live destinations across reloads.
+  while the registry reuses live destinations across reloads.
 - frontend connections receive their socket, worker request sender, frontend
   metric shard and connection options. they own their reply-waiting tasks,
   buffers, codecs and pipeline bookkeeping. `RoutedRequest` and the shared

@@ -30,7 +30,9 @@ pub struct DestinationRegistrySetup {
 /// worker-local registry of destinations keyed by address and reply timeout
 pub struct DestinationRegistry {
     tko_map: Arc<TkoTrackerMap>,
-    assembler: DestinationAssembler,
+    tokens: Arc<DestTokenAllocator>,
+    metrics: Arc<DestinationMetricsRegistry>,
+    shard_metrics: Arc<BackendMetricsShard>,
     destinations: RefCell<HashMap<DestinationKey, Weak<Destination>>>,
 }
 
@@ -38,11 +40,9 @@ impl DestinationRegistry {
     pub fn new(setup: DestinationRegistrySetup) -> Rc<Self> {
         Rc::new(Self {
             tko_map: setup.tko_map,
-            assembler: DestinationAssembler::new(DestinationAssemblerSetup {
-                tokens: setup.tokens,
-                metrics: setup.metrics,
-                shard_metrics: setup.shard_metrics,
-            }),
+            tokens: setup.tokens,
+            metrics: setup.metrics,
+            shard_metrics: setup.shard_metrics,
             destinations: RefCell::new(HashMap::new()),
         })
     }
@@ -72,9 +72,7 @@ impl DestinationRegistry {
             tracker.set_pool_tracker(gate);
         }
 
-        let dest = self
-            .assembler
-            .spawn_destination(key.clone(), cfg.clone(), tracker);
+        let dest = self.spawn_destination(key.clone(), cfg.clone(), tracker);
 
         self.destinations
             .borrow_mut()
@@ -117,30 +115,8 @@ impl DestinationRegistry {
             true
         });
     }
-}
 
-pub struct DestinationAssemblerSetup {
-    pub tokens: Arc<DestTokenAllocator>,
-    pub metrics: Arc<DestinationMetricsRegistry>,
-    pub shard_metrics: Arc<BackendMetricsShard>,
-}
-
-pub struct DestinationAssembler {
-    tokens: Arc<DestTokenAllocator>,
-    metrics: Arc<DestinationMetricsRegistry>,
-    shard_metrics: Arc<BackendMetricsShard>,
-}
-
-impl DestinationAssembler {
-    pub fn new(setup: DestinationAssemblerSetup) -> Self {
-        Self {
-            tokens: setup.tokens,
-            metrics: setup.metrics,
-            shard_metrics: setup.shard_metrics,
-        }
-    }
-
-    pub fn spawn_destination(
+    fn spawn_destination(
         &self,
         key: DestinationKey,
         options: DestinationConfig,
