@@ -1,4 +1,3 @@
-mod assembler;
 mod config;
 // destination::destination is deliberate: the module owns key/config/
 // counters/probe siblings and the struct keeps the domain name
@@ -9,9 +8,10 @@ mod metrics;
 mod probe;
 mod registry;
 
-pub use assembler::{DestinationAssembler, DestinationAssemblerSetup};
 pub use config::DestinationConfig;
 pub use destination::{Destination, DestinationSetup};
 pub use key::DestinationKey;
 pub use metrics::{DestinationMetrics, DestinationMetricsRegistry};
-pub use registry::{DestinationRegistry, DestinationRegistrySetup};
+pub use registry::{
+    DestinationAssembler, DestinationAssemblerSetup, DestinationRegistry, DestinationRegistrySetup,
+};
