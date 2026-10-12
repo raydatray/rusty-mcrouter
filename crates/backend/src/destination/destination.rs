@@ -258,6 +258,7 @@ mod tests {
     use super::*;
     use crate::destination::{
         DestinationAssembler, DestinationAssemblerSetup, DestinationMetricsRegistry,
+        DestinationRegistry, DestinationRegistrySetup,
     };
     use crate::test_support::{run_local, scripted_backend_serial, ScriptedServer, Step};
     use crate::tko::{DestTokenAllocator, TkoEventRecord, TkoTrackerMap};
@@ -285,6 +286,22 @@ mod tests {
         }
     }
 
+    fn registry_for(
+        tko_map: Arc<TkoTrackerMap>,
+        tokens: Arc<DestTokenAllocator>,
+        metrics: Arc<DestinationMetricsRegistry>,
+        shard_metrics: Arc<BackendMetricsShard>,
+    ) -> Rc<DestinationRegistry> {
+        DestinationRegistry::new(DestinationRegistrySetup {
+            tko_map,
+            assembler: DestinationAssembler::new(DestinationAssemblerSetup {
+                tokens,
+                metrics,
+                shard_metrics,
+            }),
+        })
+    }
+
     /// Tracker + destination wired through DestinationRegistry, plus the event log.
     /// The TkoTrackerMap must stay alive (the tracker emits events through a
     /// Weak to it), so it is returned for the test to hold.
@@ -297,7 +314,7 @@ mod tests {
         Arc<TkoTracker>,
         Rc<Destination>,
         EventLog<TkoEvent>,
-        DestinationAssembler,
+        Rc<DestinationRegistry>,
     ) {
         let (sink, events) = recording_sink_with(|record: TkoEventRecord| record.event);
         let map = TkoTrackerMap::new(sink);
@@ -307,13 +324,14 @@ mod tests {
             addr,
             reply_timeout: cfg.reply_timeout,
         };
-        let assembler = DestinationAssembler::new(DestinationAssemblerSetup {
-            tokens: Arc::new(DestTokenAllocator::new()),
-            metrics: DestinationMetricsRegistry::new(),
-            shard_metrics: BackendMetricsShard::new(),
-        });
-        let dest = assembler.spawn_destination(key, cfg, Arc::clone(&tracker));
-        (map, tracker, dest, events, assembler)
+        let destinations = registry_for(
+            Arc::clone(&map),
+            Arc::new(DestTokenAllocator::new()),
+            DestinationMetricsRegistry::new(),
+            BackendMetricsShard::new(),
+        );
+        let dest = destinations.destination(key, &cfg, None);
+        (map, tracker, dest, events, destinations)
     }
 
     async fn wait_until(mut cond: impl FnMut() -> bool) {
@@ -330,7 +348,7 @@ mod tests {
     async fn dropping_destination_stops_its_actor_even_with_a_retained_handle() {
         run_local(async {
             let server = scripted_backend_serial(vec![]).await;
-            let (_map, _tracker, destination, _events, _assembler) =
+            let (_map, _tracker, destination, _events, _destinations) =
                 dest_for(&server, cfg(3, 1000, 10_000));
             let handle = destination.conn.clone();
             let task = destination.connection_task.abort_handle();
@@ -352,7 +370,7 @@ mod tests {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
             // probe delay far beyond test duration: probes stay out of frame
-            let (_map, tracker, dest, _events, _assembler) =
+            let (_map, tracker, dest, _events, _destinations) =
                 dest_for(&server, cfg(3, 1000, 10_000));
 
             // mid-use close: request fails Dropped (non-TKO), the Down(Eof)
@@ -386,7 +404,7 @@ mod tests {
                 vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")], // conn3: recovered traffic
             ])
             .await;
-            let (_map, tracker, dest, events, _assembler) = dest_for(&server, cfg(3, 1000, 20));
+            let (_map, tracker, dest, events, _destinations) = dest_for(&server, cfg(3, 1000, 20));
 
             let _ = send(&dest, get(b"a")).await;
             wait_until(|| tracker.is_tko()).await;
@@ -417,7 +435,8 @@ mod tests {
         run_local(async {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(2), Step::Hang]]).await;
-            let (_map, tracker, dest, events, _assembler) = dest_for(&server, cfg(2, 50, 10_000));
+            let (_map, tracker, dest, events, _destinations) =
+                dest_for(&server, cfg(2, 50, 10_000));
 
             let r = send(&dest, get(b"a")).await;
             assert!(matches!(
@@ -445,7 +464,7 @@ mod tests {
         run_local(async {
             // Accept but never read, forcing a large batch to remain in write_all.
             let server = scripted_backend_serial(vec![vec![Step::Hang]]).await;
-            let (_map, _tracker, dest, _events, _assembler) =
+            let (_map, _tracker, dest, _events, _destinations) =
                 dest_for(&server, cfg(100, 50, 10_000));
             let request = store(b"key", &vec![b'x'; 1024 * 1024]);
             let start = Instant::now();
@@ -478,7 +497,8 @@ mod tests {
         run_local(async {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
-            let (_map, tracker, dest, events, _assembler) = dest_for(&server, cfg(3, 1000, 10_000));
+            let (_map, tracker, dest, events, _destinations) =
+                dest_for(&server, cfg(3, 1000, 10_000));
 
             let _ = send(&dest, get(b"a")).await;
             wait_until(|| tracker.is_tko()).await;
@@ -501,16 +521,31 @@ mod tests {
         run_local(async {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Close]]).await;
-            let (_map, tracker, dest_a, _events, assembler) =
-                dest_for(&server, cfg(3, 1000, 10_000));
-
-            let addr_b: Arc<str> = Arc::from(server.addr.to_string());
-            let key_b = DestinationKey {
-                addr: addr_b,
+            let (sink, _events) = recording_sink_with(|record: TkoEventRecord| record.event);
+            let map = TkoTrackerMap::new(sink);
+            let tokens = Arc::new(DestTokenAllocator::new());
+            let metrics = DestinationMetricsRegistry::new();
+            let make_registry = || {
+                registry_for(
+                    Arc::clone(&map),
+                    Arc::clone(&tokens),
+                    Arc::clone(&metrics),
+                    BackendMetricsShard::new(),
+                )
+            };
+            let first_worker = make_registry();
+            let second_worker = make_registry();
+            let config = cfg(3, 1000, 10_000);
+            let key = DestinationKey {
+                addr: Arc::from(server.addr.to_string()),
                 reply_timeout: Duration::from_millis(1000),
             };
-            let dest_b =
-                assembler.spawn_destination(key_b, cfg(3, 1000, 10_000), Arc::clone(&tracker));
+            let dest_a = first_worker.destination(key.clone(), &config, None);
+            let dest_b = second_worker.destination(key, &config, None);
+            let tracker = Arc::clone(dest_a.tracker());
+            assert!(!Rc::ptr_eq(&dest_a, &dest_b));
+            assert!(Arc::ptr_eq(&tracker, dest_b.tracker()));
+            assert!(Arc::ptr_eq(dest_a.metrics(), dest_b.metrics()));
 
             let _ = send(&dest_a, get(b"a")).await;
             wait_until(|| tracker.is_tko()).await;
@@ -547,12 +582,13 @@ mod tests {
                 addr,
                 reply_timeout: Duration::from_millis(1000),
             };
-            let dest = DestinationAssembler::new(DestinationAssemblerSetup {
-                tokens: Arc::new(DestTokenAllocator::new()),
-                metrics: DestinationMetricsRegistry::new(),
-                shard_metrics: Arc::clone(&shard),
-            })
-            .spawn_destination(key, cfg(3, 1000, 10_000), Arc::clone(&tracker));
+            let destinations = registry_for(
+                Arc::clone(&map),
+                Arc::new(DestTokenAllocator::new()),
+                DestinationMetricsRegistry::new(),
+                Arc::clone(&shard),
+            );
+            let dest = destinations.destination(key, &cfg(3, 1000, 10_000), None);
 
             let get_cell = |code: ResultCode| {
                 shard.requests[rusty_mcrouter_protocol::RequestKind::Get as usize][code as usize]
@@ -590,7 +626,7 @@ mod tests {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Hang]]).await;
             // huge reply timeout: the future can only end by abort
-            let (_map, _tracker, dest, _events, _assembler) =
+            let (_map, _tracker, dest, _events, _destinations) =
                 dest_for(&server, cfg(100, 10_000, 10_000));
             let metrics = Arc::clone(dest.metrics());
 
@@ -616,7 +652,7 @@ mod tests {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]])
                     .await;
-            let (_map, _tracker, dest, _events, _assembler) =
+            let (_map, _tracker, dest, _events, _destinations) =
                 dest_for(&server, cfg(100, 1000, 10_000));
 
             send(&dest, get(b"a")).await.unwrap();
@@ -633,7 +669,7 @@ mod tests {
                 Step::Write(b"VERSION 1.6.39\r\n"),
             ]])
             .await;
-            let (_map, _tracker, dest, _events, _assembler) =
+            let (_map, _tracker, dest, _events, _destinations) =
                 dest_for(&server, cfg(3, 1000, 10_000));
 
             dest.send_probe().await;
