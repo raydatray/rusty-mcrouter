@@ -19,7 +19,7 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-pub use crate::connection::{ConnectionEvent, DownReason};
+pub use crate::connection::{ConnectionEvent, ConnectionEventHandler, DownReason};
 
 use crate::error::SendError;
 use crate::{Backend, BackendFactory, PoolHealth, PreparedSend, TkoRejection};
@@ -41,13 +41,13 @@ pub type ConnectionEventLog = Rc<RefCell<Vec<ConnectionEvent>>>;
 /// Collector for [`ConnectionEvent`]s: asserting on the exact sequence is
 /// how tests distinguish a benign close (`[Up, Closed]`) from health
 /// evidence (`[Up, Down(..)]`).
-pub fn event_log() -> (Box<dyn Fn(ConnectionEvent)>, ConnectionEventLog) {
+pub fn event_log() -> (ConnectionEventHandler, ConnectionEventLog) {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let sink = {
+    let handler = {
         let log = Rc::clone(&log);
-        Box::new(move |ev| log.borrow_mut().push(ev)) as Box<dyn Fn(ConnectionEvent)>
+        ConnectionEventHandler::new(move |event| log.borrow_mut().push(event))
     };
-    (sink, log)
+    (handler, log)
 }
 
 /// Recording in-process `Backend` double: records every request, answers with
@@ -265,10 +265,10 @@ mod tests {
 
     #[tokio::test]
     async fn event_log_records_in_order() {
-        let (sink, log) = event_log();
-        sink(ConnectionEvent::Up);
-        sink(ConnectionEvent::Down(DownReason::Eof));
-        sink(ConnectionEvent::Closed);
+        let (handler, log) = event_log();
+        handler.handle(ConnectionEvent::Up);
+        handler.handle(ConnectionEvent::Down(DownReason::Eof));
+        handler.handle(ConnectionEvent::Closed);
         assert_eq!(
             *log.borrow(),
             vec![

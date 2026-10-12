@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use tokio::sync::mpsc::Receiver;
 
-use crate::connection::{types::ConnectionCommand, ConnectionEvent};
+use crate::connection::{types::ConnectionCommand, ConnectionEventHandler};
 use crate::metrics::BackendMetricsShard;
 
 pub struct ConnectionResources {
@@ -18,7 +18,7 @@ pub struct ConnectionSetup {
     pub addr: Arc<str>,
     pub options: BackendConnectionConfig,
     pub inbox: ConnectionInbox,
-    pub events: Box<dyn Fn(ConnectionEvent)>,
+    pub events: ConnectionEventHandler,
     pub metrics: Arc<BackendMetricsShard>,
 }
 
