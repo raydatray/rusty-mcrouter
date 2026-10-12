@@ -22,7 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub use crate::connection::{ConnectionEvent, ConnectionEventHandler, DownReason};
 
 use crate::error::SendError;
-use crate::{Backend, BackendFactory, PoolHealth, TkoRejection};
+use crate::{Backend, BackendFactory, PoolFailOpen, TkoRejection};
 
 /// Runs a future inside a fresh `LocalSet`. The backend connection actor is
 /// spawned via
@@ -149,7 +149,7 @@ impl BackendFactory for MockBackendFactory {
         &self,
         server: &ServerConfig,
         _cfg: &crate::destination::DestinationConfig,
-        _pool: &PoolHealth<'_>,
+        _fail_open: Option<PoolFailOpen<'_>>,
     ) -> MockBackend {
         self.made
             .lock()

@@ -5,7 +5,7 @@ use std::{
 };
 
 use rusty_mcrouter_backend::tko::FailOpenThresholds;
-use rusty_mcrouter_backend::{destination, Backend, BackendFactory, PoolFailOpen, PoolHealth};
+use rusty_mcrouter_backend::{destination, Backend, BackendFactory, PoolFailOpen};
 use rusty_mcrouter_config::{
     ConfigDocument, FailoverErrorsConfig, FailoverPolicyConfig, HashConfig, HashFunc, PoolConfig,
     PoolId, PrefixSelectorConfig, RootRouteConfig, RouteConfig, RouteDefinition,
@@ -247,20 +247,18 @@ where
         let pool_name = pool_config.name();
 
         let dest_cfg = pool_destination_config(self.defaults, pool_config);
-        let pool_health = PoolHealth {
-            fail_open: pool_config.tko_tracker().map(|config| PoolFailOpen {
-                name: pool_name,
-                thresholds: FailOpenThresholds {
-                    enter: config.enter(),
-                    exit: config.exit(),
-                },
-            }),
-        };
+        let fail_open = pool_config.tko_tracker().map(|config| PoolFailOpen {
+            name: pool_name,
+            thresholds: FailOpenThresholds {
+                enter: config.enter(),
+                exit: config.exit(),
+            },
+        });
 
         let mut destinations = Vec::with_capacity(pool_config.servers().len());
 
         for server in pool_config.servers() {
-            let backend = self.factory.make(server, &dest_cfg, &pool_health);
+            let backend = self.factory.make(server, &dest_cfg, fail_open);
             destinations.push(Rc::new(DestinationRoute::<F::Backend>::for_pool(
                 backend, pool_id,
             )));

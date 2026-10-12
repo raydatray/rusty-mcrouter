@@ -11,7 +11,5 @@ pub mod mock_memcached;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 
-pub use crate::backend::{
-    Backend, BackendFactory, DestinationFactory, PoolFailOpen, PoolHealth, TkoRejection,
-};
+pub use crate::backend::{Backend, BackendFactory, DestinationFactory, PoolFailOpen, TkoRejection};
 pub use crate::metrics::BackendMetrics;
