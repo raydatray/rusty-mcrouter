@@ -2,7 +2,7 @@ use std::future::{pending, Future};
 
 use rusty_mcrouter_backend::destination::DestinationConfig;
 use rusty_mcrouter_backend::error::SendError;
-use rusty_mcrouter_backend::{Backend, BackendFactory, PoolHealth, TkoRejection};
+use rusty_mcrouter_backend::{Backend, BackendFactory, PoolFailOpen, TkoRejection};
 use rusty_mcrouter_config::{ConfigDocument, ServerConfig};
 use rusty_mcrouter_protocol::{Reply, Request};
 
@@ -25,7 +25,12 @@ struct InertBackend;
 impl BackendFactory for InertFactory {
     type Backend = InertBackend;
 
-    fn make(&self, _: &ServerConfig, _: &DestinationConfig, _: &PoolHealth<'_>) -> InertBackend {
+    fn make(
+        &self,
+        _: &ServerConfig,
+        _: &DestinationConfig,
+        _: Option<PoolFailOpen<'_>>,
+    ) -> InertBackend {
         InertBackend
     }
 }

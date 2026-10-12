@@ -38,17 +38,6 @@ pub struct PoolFailOpen<'a> {
     pub thresholds: FailOpenThresholds,
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct PoolHealth<'a> {
-    pub fail_open: Option<PoolFailOpen<'a>>,
-}
-
-impl PoolHealth<'_> {
-    pub fn ungated() -> Self {
-        Self::default()
-    }
-}
-
 /// Constructs a [`Backend`] for a server address — the seam that lets the
 /// route builder run over mock backends without opening sockets.
 ///
@@ -62,7 +51,7 @@ pub trait BackendFactory {
         &self,
         server: &ServerConfig,
         cfg: &destination::DestinationConfig,
-        pool: &PoolHealth<'_>,
+        fail_open: Option<PoolFailOpen<'_>>,
     ) -> Self::Backend;
 }
 
@@ -83,8 +72,8 @@ impl<'a> DestinationFactory<'a> {
         }
     }
 
-    fn pool_gate(&self, pool: &PoolHealth<'_>) -> Option<Arc<PoolTkoTracker>> {
-        let config = pool.fail_open?;
+    fn pool_gate(&self, fail_open: Option<PoolFailOpen<'_>>) -> Option<Arc<PoolTkoTracker>> {
+        let config = fail_open?;
         if let Some(gate) = self.pool_gates.borrow().get(config.name) {
             return Some(Arc::clone(gate));
         }
@@ -106,14 +95,14 @@ impl BackendFactory for DestinationFactory<'_> {
         &self,
         server: &ServerConfig,
         cfg: &destination::DestinationConfig,
-        pool: &PoolHealth<'_>,
+        fail_open: Option<PoolFailOpen<'_>>,
     ) -> Rc<Destination> {
         let key = DestinationKey {
             addr: Arc::from(server.access_point()),
             reply_timeout: cfg.reply_timeout,
         };
         self.destinations
-            .get_or_create_destination(key, cfg, self.pool_gate(pool))
+            .get_or_create_destination(key, cfg, self.pool_gate(fail_open))
     }
 }
 
@@ -167,12 +156,11 @@ mod tests {
             let (tko, destinations) = registry();
             let factory = DestinationFactory::new(&destinations, tko);
             let cfg = destination::DestinationConfig::default();
-            let pool = PoolHealth::ungated();
 
             // no listener at this addr: make still succeeds (lazy)
             let server = server("127.0.0.1:9");
-            let a = factory.make(&server, &cfg, &pool);
-            let b = factory.make(&server, &cfg, &pool);
+            let a = factory.make(&server, &cfg, None);
+            let b = factory.make(&server, &cfg, None);
             assert!(Rc::ptr_eq(&a, &b), "factory must dedup through the map");
         })
         .await;
@@ -188,15 +176,13 @@ mod tests {
             let (tko, destinations) = registry();
             let factory = DestinationFactory::new(&destinations, tko);
             let cfg = destination::DestinationConfig::default();
-            let pool = PoolHealth {
-                fail_open: Some(PoolFailOpen {
-                    name: "gated",
-                    thresholds: FailOpenThresholds { enter: 1, exit: 1 },
-                }),
-            };
+            let fail_open = Some(PoolFailOpen {
+                name: "gated",
+                thresholds: FailOpenThresholds { enter: 1, exit: 1 },
+            });
 
-            let a = factory.make(&server("127.0.0.1:9"), &cfg, &pool);
-            let b = factory.make(&server("127.0.0.1:10"), &cfg, &pool);
+            let a = factory.make(&server("127.0.0.1:9"), &cfg, fail_open);
+            let b = factory.make(&server("127.0.0.1:10"), &cfg, fail_open);
             assert_eq!(factory.pool_gates.borrow().len(), 1);
 
             assert!(a
@@ -222,7 +208,7 @@ mod tests {
             let backend = factory.make(
                 &self::server(&server.addr.to_string()),
                 &destination::DestinationConfig::default(),
-                &PoolHealth::ungated(),
+                None,
             );
 
             let reply = through_trait(&backend, get(b"key")).await.unwrap();
