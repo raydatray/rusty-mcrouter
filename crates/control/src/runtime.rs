@@ -134,6 +134,7 @@ mod tests {
     use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
     use rusty_mcrouter_backend::tko::{TkoEvent, TkoEventRecord, TkoTrackerMap};
+    use rusty_mcrouter_config::ConfigMetrics;
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
     use rusty_mcrouter_observability::{
         channel, ApplicationMetrics, ApplicationMetricsSetup, EventSender, ObservabilityMetrics,
@@ -145,7 +146,7 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
-    use crate::{ConfigMetrics, ControlHandle, ReloaderSetup, RunningConfig};
+    use crate::{ControlHandle, ReloaderSetup, RunningConfig};
 
     async fn scrape(addr: SocketAddr) -> String {
         tokio::time::timeout(Duration::from_secs(5), async {
