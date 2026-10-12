@@ -16,7 +16,6 @@ pub(crate) struct RouteGeneration {
 }
 
 pub(crate) struct GenerationSetup {
-    pub(crate) destinations: Rc<DestinationRegistry>,
     pub tko_map: Arc<TkoTrackerMap>,
     pub(crate) defaults: DestinationConfig,
     pub(crate) root_options: RootRouteOptions,
@@ -25,7 +24,6 @@ pub(crate) struct GenerationSetup {
 }
 
 pub(crate) struct GenerationBuilder {
-    destinations: Rc<DestinationRegistry>,
     tko_map: Arc<TkoTrackerMap>,
     defaults: DestinationConfig,
     root_options: RootRouteOptions,
@@ -36,7 +34,6 @@ pub(crate) struct GenerationBuilder {
 impl GenerationBuilder {
     pub(crate) fn new(setup: GenerationSetup) -> Self {
         Self {
-            destinations: setup.destinations,
             tko_map: setup.tko_map,
             defaults: setup.defaults,
             root_options: setup.root_options,
@@ -52,9 +49,10 @@ impl GenerationBuilder {
         &self,
         generation: u64,
         config: &ConfigDocument,
+        destinations: &DestinationRegistry,
     ) -> Result<Rc<RouteGeneration>, BuildError> {
         // per generation, so its gate cache can't keep removed pools' gates alive
-        let factory = DestinationFactory::new(&self.destinations, Arc::clone(&self.tko_map));
+        let factory = DestinationFactory::new(destinations, Arc::clone(&self.tko_map));
         let route = build_route_with_options(config, &factory, &self.defaults, &self.root_options)?;
         let state = RoutingState::new(
             Arc::clone(&self.routing_metrics),

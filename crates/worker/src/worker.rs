@@ -41,7 +41,6 @@ impl Worker {
             shard_metrics: setup.shards.backend,
         });
         let builder = GenerationBuilder::new(GenerationSetup {
-            destinations: Rc::clone(&destinations),
             tko_map: Arc::clone(&setup.shared.tko_map),
             defaults: setup.shared.defaults.clone(),
             root_options: setup.shared.root_route_options.clone(),
@@ -49,7 +48,7 @@ impl Worker {
             events: setup.routing_events,
         });
         let routes = builder
-            .build(1, &setup.shared.config)
+            .build(1, &setup.shared.config, &destinations)
             .context("build_route failed")?;
         let context = WorkerContext {
             worker_id: setup.worker_id,
@@ -88,7 +87,13 @@ impl Worker {
             }),
             sweep: self.destinations.spawn_idle_sweep(self.sweep_interval),
         };
-        let runtime = WorkerRuntime::new(self.context, self.builder, self.inbox, tasks);
+        let runtime = WorkerRuntime::new(
+            self.context,
+            self.builder,
+            self.destinations,
+            self.inbox,
+            tasks,
+        );
         let outcome = runtime.run().await;
         self.events.emit(WorkerEventRecord {
             worker_id,
