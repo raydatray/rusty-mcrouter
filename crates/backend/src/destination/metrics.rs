@@ -51,6 +51,23 @@ impl DestinationMetrics {
     }
 }
 
+// we need to decrement on drop so an aborted send (probe task abort) can't
+// leak the inflight gauge
+pub struct InflightGuard<'a>(&'a DestinationMetrics);
+
+impl<'a> InflightGuard<'a> {
+    pub fn new(metrics: &'a DestinationMetrics) -> Self {
+        metrics.inflight_reqs.inc();
+        Self(metrics)
+    }
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.inflight_reqs.dec();
+    }
+}
+
 /// shared registry of per-address metrics across workers and timeout variants
 #[derive(Default)]
 pub struct DestinationMetricsRegistry {

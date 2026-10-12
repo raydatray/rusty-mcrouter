@@ -28,6 +28,7 @@ pub use key::DestinationKey;
 pub use metrics::{DestinationMetrics, DestinationMetricsRegistry};
 pub use registry::{DestinationRegistry, DestinationRegistrySetup};
 
+use metrics::InflightGuard;
 use probe::probe_loop;
 
 pub struct DestinationSetup {
@@ -232,23 +233,6 @@ impl Drop for Destination {
             task.abort();
         }
         self.connection_task.abort();
-    }
-}
-
-// we need to decrement on drop so an aborted send (probe task abort) can't
-// leak the inflight gauge
-struct InflightGuard<'a>(&'a DestinationMetrics);
-
-impl<'a> InflightGuard<'a> {
-    fn new(metrics: &'a DestinationMetrics) -> Self {
-        metrics.inflight_reqs.inc();
-        Self(metrics)
-    }
-}
-
-impl Drop for InflightGuard<'_> {
-    fn drop(&mut self) {
-        self.0.inflight_reqs.dec();
     }
 }
 
