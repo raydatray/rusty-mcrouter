@@ -51,6 +51,7 @@ impl DestinationMetrics {
     }
 }
 
+/// Shared registry of per-address metrics across workers and timeout variants.
 #[derive(Default)]
 pub struct DestinationMetricsRegistry {
     inner: Mutex<HashMap<Arc<str>, Weak<DestinationMetrics>>>,

@@ -8,7 +8,7 @@ use rusty_mcrouter_config::ServerConfig;
 use rusty_mcrouter_protocol::{Reply, Request};
 
 use crate::classify::ResultCode;
-use crate::destination::{self, Destination, DestinationKey, Map};
+use crate::destination::{self, Destination, DestinationKey, DestinationRegistry};
 use crate::error::SendError;
 use crate::tko::{FailOpenThresholds, PoolTkoTracker};
 
@@ -84,17 +84,17 @@ pub trait BackendFactory {
     ) -> Self::Backend;
 }
 
-/// Production factory: one per proxy thread, deduping through the thread's
-/// destination map (and, transitively, sharing TKO trackers across threads).
+/// Production route-generation factory, deduplicating destinations through
+/// the worker's registry and sharing TKO trackers across workers.
 pub struct DestinationFactory {
-    map: Rc<Map>,
+    destinations: Rc<DestinationRegistry>,
     pool_gates: RefCell<HashMap<Arc<str>, Arc<PoolTkoTracker>>>,
 }
 
 impl DestinationFactory {
-    pub fn new(map: Rc<Map>) -> DestinationFactory {
+    pub fn new(destinations: Rc<DestinationRegistry>) -> DestinationFactory {
         DestinationFactory {
-            map,
+            destinations,
             pool_gates: RefCell::new(HashMap::new()),
         }
     }
@@ -106,7 +106,7 @@ impl DestinationFactory {
         }
 
         let gate = self
-            .map
+            .destinations
             .tko_map()
             .pool_tracker_for(config.name, config.thresholds);
         self.pool_gates
@@ -129,7 +129,8 @@ impl BackendFactory for DestinationFactory {
             addr: Arc::from(server.access_point()),
             reply_timeout: cfg.reply_timeout,
         };
-        self.map.destination(key, cfg, self.pool_gate(pool))
+        self.destinations
+            .destination(key, cfg, self.pool_gate(pool))
     }
 }
 
@@ -142,8 +143,8 @@ mod tests {
     use super::*;
     use crate::classify::ResultCode;
     use crate::destination::{
-        DestinationAssembler, DestinationAssemblerSetup, DestinationMapSetup,
-        DestinationMetricsRegistry,
+        DestinationAssembler, DestinationAssemblerSetup, DestinationMetricsRegistry,
+        DestinationRegistrySetup,
     };
     use crate::metrics::BackendMetricsShard;
     use crate::test_support::{run_local, scripted_backend_serial, Step};
@@ -151,7 +152,7 @@ mod tests {
 
     fn factory() -> (Arc<TkoTrackerMap>, DestinationFactory) {
         let tko = TkoTrackerMap::new(noop_sink());
-        let factory = DestinationFactory::new(Map::new(DestinationMapSetup {
+        let factory = DestinationFactory::new(DestinationRegistry::new(DestinationRegistrySetup {
             tko_map: Arc::clone(&tko),
             assembler: DestinationAssembler::new(DestinationAssemblerSetup {
                 tokens: Arc::new(DestTokenAllocator::new()),

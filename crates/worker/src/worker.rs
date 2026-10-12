@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, rc::Rc, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use rusty_mcrouter_backend::destination;
+use rusty_mcrouter_backend::destination::{self, DestinationRegistry, DestinationRegistrySetup};
 use rusty_mcrouter_frontend::{bind_listener, Server};
 
 use crate::context::WorkerContext;
@@ -16,7 +16,7 @@ pub struct Worker {
     builder: GenerationBuilder,
     inbox: WorkerInbox,
     server: Option<Server>,
-    destinations: Rc<destination::Map>,
+    destinations: Rc<DestinationRegistry>,
     sweep_interval: Duration,
     events: WorkerEventSink,
 }
@@ -34,7 +34,7 @@ impl Worker {
             None => None,
         };
         let bound_addr = server.as_ref().map(Server::local_addr).transpose()?;
-        let destinations = destination::Map::new(destination::DestinationMapSetup {
+        let destinations = DestinationRegistry::new(DestinationRegistrySetup {
             tko_map: Arc::clone(&setup.shared.tko_map),
             assembler: destination::DestinationAssembler::new(
                 destination::DestinationAssemblerSetup {

@@ -172,7 +172,8 @@ mod tests {
     use std::time::Duration;
 
     use rusty_mcrouter_backend::destination::{
-        self, DestinationConfig, DestinationMetricsRegistry,
+        self, DestinationConfig, DestinationMetricsRegistry, DestinationRegistry,
+        DestinationRegistrySetup,
     };
     use rusty_mcrouter_backend::metrics::BackendMetricsShard;
     use rusty_mcrouter_backend::test_support::{
@@ -194,7 +195,7 @@ mod tests {
 
     fn test_runtime(config: &str) -> (WorkerRuntime, WorkerHandle) {
         let (handle, inbox) = WorkerHandle::allocate(0);
-        let map = destination::Map::new(destination::DestinationMapSetup {
+        let map = DestinationRegistry::new(DestinationRegistrySetup {
             tko_map: TkoTrackerMap::new(noop_sink()),
             assembler: destination::DestinationAssembler::new(
                 destination::DestinationAssemblerSetup {
