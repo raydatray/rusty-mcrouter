@@ -260,7 +260,7 @@ sequenceDiagram
 | TKO tracker (soft/hard marks) | `host:port` | preserved; threshold fixed at creation |
 | pool fail-open gate | pool name (after §5) | preserved; thresholds fixed at creation |
 | pool metric series | pool name (after §4) | continuous |
-| removed server | — | dropped when the last generation using it drops; emits `RemoveFromConfig` if it was responsible for a TKO (`destination/destination.rs:233-245`) |
+| removed server | — | dropped when the last generation using it drops; emits `RemoveFromConfig` if it was responsible for a TKO (`destination/mod.rs`) |
 | `LeastFailuresPolicy` counters (`crates/core/src/failover/policy.rs:32`) | the route | reset, as upstream; skipped for no-op reloads |
 | frontend/backend shards, `/metrics` registry | the proxy | untouched: nothing in them is config-shaped after §4 |
 

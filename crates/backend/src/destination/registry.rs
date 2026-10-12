@@ -143,7 +143,6 @@ impl DestinationRegistry {
             });
 
             Destination::new(DestinationSetup {
-                key,
                 options,
                 token,
                 probe_seed: token.probe_seed(),
