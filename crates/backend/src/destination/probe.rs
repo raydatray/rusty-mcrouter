@@ -1,5 +1,7 @@
 use std::{rc::Weak, time::Duration};
 
+use tokio::time::sleep;
+
 use crate::destination::Destination;
 
 const PROBE_EXPONENTIAL_FACTOR: f64 = 1.5;
@@ -23,10 +25,11 @@ pub(crate) async fn probe_loop(
 ) {
     let mut rng = seed;
     let mut delay_ms = initial.as_millis() as u64;
+
     loop {
         let delay = Duration::from_millis((delay_ms as f64 * (1.0 + jitter(&mut rng))) as u64);
 
-        tokio::time::sleep(delay).await;
+        sleep(delay).await;
 
         let Some(dest) = dest.upgrade() else { return };
         dest.send_probe().await;

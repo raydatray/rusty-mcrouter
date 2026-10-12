@@ -120,7 +120,7 @@ impl DestinationRegistry {
         options: DestinationConfig,
         tracker: Arc<TkoTracker>,
     ) -> Rc<Destination> {
-        let metrics = self.metrics.metrics_for(&tracker);
+        let metrics = self.metrics.get_or_create_metrics(&tracker);
         let token = self.tokens.allocate();
 
         Rc::new_cyclic(|weak: &Weak<Destination>| {

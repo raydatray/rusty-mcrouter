@@ -51,7 +51,7 @@ impl DestinationMetrics {
     }
 }
 
-/// Shared registry of per-address metrics across workers and timeout variants.
+/// shared registry of per-address metrics across workers and timeout variants
 #[derive(Default)]
 pub struct DestinationMetricsRegistry {
     inner: Mutex<HashMap<Arc<str>, Weak<DestinationMetrics>>>,
@@ -62,7 +62,7 @@ impl DestinationMetricsRegistry {
         Arc::new(Self::default())
     }
 
-    pub fn metrics_for(&self, tracker: &Arc<TkoTracker>) -> Arc<DestinationMetrics> {
+    pub fn get_or_create_metrics(&self, tracker: &Arc<TkoTracker>) -> Arc<DestinationMetrics> {
         let mut inner = self
             .inner
             .lock()
@@ -121,8 +121,8 @@ mod tests {
         let a = addr("10.0.0.1:11211");
         let tracker = tracker_for(&tko_map, &a);
 
-        let m1 = registry.metrics_for(&tracker);
-        let m2 = registry.metrics_for(&tracker);
+        let m1 = registry.get_or_create_metrics(&tracker);
+        let m2 = registry.get_or_create_metrics(&tracker);
         assert!(Arc::ptr_eq(&m1, &m2));
 
         m1.record_send(ResultCode::Success, 100);
@@ -137,8 +137,8 @@ mod tests {
         let tko_map = TkoTrackerMap::new(noop_sink());
         let a1 = addr("10.0.0.1:11211");
         let a2 = addr("10.0.0.2:11211");
-        let m1 = registry.metrics_for(&tracker_for(&tko_map, &a1));
-        let m2 = registry.metrics_for(&tracker_for(&tko_map, &a2));
+        let m1 = registry.get_or_create_metrics(&tracker_for(&tko_map, &a1));
+        let m2 = registry.get_or_create_metrics(&tracker_for(&tko_map, &a2));
         assert!(!Arc::ptr_eq(&m1, &m2));
     }
 
@@ -151,8 +151,8 @@ mod tests {
         let a1 = addr("10.0.0.1:11211");
         let a2 = addr("10.0.0.2:11211");
 
-        let m1 = registry.metrics_for(&tracker_for(&tko_map, &a1));
-        let m2 = registry.metrics_for(&tracker_for(&tko_map, &a2));
+        let m1 = registry.get_or_create_metrics(&tracker_for(&tko_map, &a1));
+        let m2 = registry.get_or_create_metrics(&tracker_for(&tko_map, &a2));
         assert_eq!(registry.snapshot().len(), 2);
 
         drop(m1);
@@ -173,11 +173,11 @@ mod tests {
         let a = addr("10.0.0.1:11211");
         let tracker = tracker_for(&tko_map, &a);
 
-        let m1 = registry.metrics_for(&tracker);
+        let m1 = registry.get_or_create_metrics(&tracker);
         m1.record_send(ResultCode::Success, 100);
         drop(m1);
 
-        let m2 = registry.metrics_for(&tracker);
+        let m2 = registry.get_or_create_metrics(&tracker);
         assert_eq!(m2.requests[ResultCode::Success as usize].load(), 0);
     }
 
@@ -192,10 +192,10 @@ mod tests {
 
         let handle = {
             let (registry, tracker) = (Arc::clone(&registry), Arc::clone(&tracker));
-            std::thread::spawn(move || registry.metrics_for(&tracker))
+            std::thread::spawn(move || registry.get_or_create_metrics(&tracker))
         };
         let theirs = handle.join().unwrap();
-        let ours = registry.metrics_for(&tracker);
+        let ours = registry.get_or_create_metrics(&tracker);
         assert!(Arc::ptr_eq(&ours, &theirs));
     }
 }
