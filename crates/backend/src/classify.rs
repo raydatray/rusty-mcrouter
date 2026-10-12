@@ -13,11 +13,7 @@ pub enum ResultCode {
     /// SERVER_ERROR - box answered that its broken
     RemoteError,
     /// mid-stream connection drop with this request in-flight - the request
-    /// was sent but MAY OR MAY NOT have executed (contrast RemoteError, where
-    /// the server definitively answered). mcrouter folds this into
-    /// REMOTE_ERROR (a carbon-vocabulary limitation); we keep it distinct so
-    /// failover config and stats can tell "server rejected" from "maybe
-    /// executed" - the policy predicates below still treat both like mcrouter
+    /// was sent but MAY OR MAY NOT have executed on the server
     ConnectionDropped,
     /// never reached the server or the reply stream is busted
     LocalError,

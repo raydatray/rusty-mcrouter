@@ -10,10 +10,9 @@ use crate::tko::TkoTrackerMap;
 
 #[derive(Default)]
 #[repr(align(64))]
-// this is one shard. we must align this to a cache line so that no two
-// thread's shards share one cache line
+// align per worker metric shards to 64-byte boundaries to reduce false
+// sharing between worker threads
 pub struct BackendMetricsShard {
-    // monotonic counters
     pub requests: [[Counter; RESULT_CODE_COUNT]; RequestKind::COUNT],
     pub latency_us_sum: Counter,
     pub connections_opened: Counter,
@@ -26,7 +25,6 @@ pub struct BackendMetricsShard {
     pub bytes_read: Counter,
     pub bytes_written: Counter,
 
-    // gauges
     pub pending_reqs: Gauge,
     pub inflight_reqs: Gauge,
 }
