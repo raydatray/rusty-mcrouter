@@ -313,7 +313,7 @@ mod tests {
             metrics: DestinationMetricsRegistry::new(),
             shard_metrics: BackendMetricsShard::new(),
         });
-        let dest = destinations.destination(key, &cfg, None);
+        let dest = destinations.get_or_create_destination(key, &cfg, None);
         (map, tracker, dest, events, destinations)
     }
 
@@ -523,8 +523,8 @@ mod tests {
                 addr: Arc::from(server.addr.to_string()),
                 reply_timeout: Duration::from_millis(1000),
             };
-            let dest_a = first_worker.destination(key.clone(), &config, None);
-            let dest_b = second_worker.destination(key, &config, None);
+            let dest_a = first_worker.get_or_create_destination(key.clone(), &config, None);
+            let dest_b = second_worker.get_or_create_destination(key, &config, None);
             let tracker = Arc::clone(dest_a.tracker());
             assert!(!Rc::ptr_eq(&dest_a, &dest_b));
             assert!(Arc::ptr_eq(&tracker, dest_b.tracker()));
@@ -571,7 +571,7 @@ mod tests {
                 metrics: DestinationMetricsRegistry::new(),
                 shard_metrics: Arc::clone(&shard),
             });
-            let dest = destinations.destination(key, &cfg(3, 1000, 10_000), None);
+            let dest = destinations.get_or_create_destination(key, &cfg(3, 1000, 10_000), None);
 
             let get_cell = |code: ResultCode| {
                 shard.requests[rusty_mcrouter_protocol::RequestKind::Get as usize][code as usize]
