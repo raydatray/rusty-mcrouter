@@ -5,12 +5,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context};
 use rusty_mcrouter_backend::destination::DestinationConfig;
-use rusty_mcrouter_config::ConfigDocument;
+use rusty_mcrouter_config::{ConfigDocument, ConfigMetrics, ReloadStage};
 use rusty_mcrouter_core::RootRouteOptions;
 use rusty_mcrouter_worker::WorkerHandle;
 use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
-
-use crate::{ConfigMetrics, ReloadStage};
 
 fn parse_config(bytes: &[u8]) -> anyhow::Result<ConfigDocument> {
     let text = std::str::from_utf8(bytes).context("config is not valid UTF-8")?;

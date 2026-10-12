@@ -3,13 +3,13 @@ use std::{net::TcpStream, rc::Rc, sync::Arc};
 use anyhow::Context;
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::BuildError;
-use rusty_mcrouter_frontend::{Connection, FrontendConnectionSetup};
+use rusty_mcrouter_frontend::{Connection, FrontendConnectionSetup, RoutedRequest};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::context::WorkerContext;
 use crate::generation::GenerationBuilder;
 use crate::routing::route_request;
-use crate::{RoutedRequest, WorkerCommand, WorkerInbox};
+use crate::{WorkerCommand, WorkerInbox};
 
 /// Long-lived tasks the runtime supervises; either one exiting stops the worker.
 pub(crate) struct BackgroundTasks {
