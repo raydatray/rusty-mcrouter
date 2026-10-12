@@ -13,7 +13,8 @@ use tokio::{
 
 use crate::{
     connection::{
-        BackendConnectionConfig, Connection, ConnectionHandle, ConnectionResources, ConnectionSetup,
+        BackendConnectionConfig, Connection, ConnectionEventHandler, ConnectionHandle,
+        ConnectionResources, ConnectionSetup,
     },
     destination::{
         Destination, DestinationConfig, DestinationKey, DestinationMetricsRegistry,
@@ -123,14 +124,6 @@ impl DestinationRegistry {
         let token = self.tokens.allocate();
 
         Rc::new_cyclic(|weak: &Weak<Destination>| {
-            let weak = weak.clone();
-
-            let events = Box::new(move |event| {
-                if let Some(destination) = weak.upgrade() {
-                    destination.on_conn_event(event);
-                }
-            });
-
             let connection_options = BackendConnectionConfig {
                 connect_timeout: Some(options.connect_timeout),
                 connect_timeout_retries: options.connect_timeout_retries,
@@ -145,7 +138,7 @@ impl DestinationRegistry {
                 addr: Arc::clone(&key.addr),
                 options: connection_options,
                 inbox,
-                events,
+                events: connection_event_handler(weak),
                 metrics: Arc::clone(&self.shard_metrics),
             });
 
@@ -164,6 +157,16 @@ impl DestinationRegistry {
             })
         })
     }
+}
+
+fn connection_event_handler(weak: &Weak<Destination>) -> ConnectionEventHandler {
+    let weak = weak.clone();
+
+    ConnectionEventHandler::new(move |event| {
+        if let Some(destination) = weak.upgrade() {
+            destination.on_conn_event(event);
+        }
+    })
 }
 
 #[cfg(test)]

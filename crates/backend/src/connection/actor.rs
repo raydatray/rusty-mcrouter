@@ -12,7 +12,8 @@ use tokio::{
 use crate::{
     connection::{
         types::{Command, ConnectionCommand, Inflight, Payload},
-        BackendConnectionConfig, ConnectionEvent, ConnectionSetup, DownReason,
+        BackendConnectionConfig, ConnectionEvent, ConnectionEventHandler, ConnectionSetup,
+        DownReason,
     },
     error::{ConnectError, LocalError, ProtocolError, RequestError, SendError},
     metrics::BackendMetricsShard,
@@ -22,7 +23,7 @@ pub struct Connection {
     addr: Arc<str>,
     cfg: BackendConnectionConfig,
     rx: Receiver<ConnectionCommand>,
-    events: Box<dyn Fn(ConnectionEvent)>,
+    events: ConnectionEventHandler,
     shard_metrics: Arc<BackendMetricsShard>,
     pending: VecDeque<Command>,   // accepted, not yet written
     inflight: VecDeque<Inflight>, // written, awaiting reply
@@ -86,12 +87,13 @@ impl Connection {
                         c.fail_pending(SendError::Connect(err.clone()));
                     });
 
-                    (self.events)(ConnectionEvent::Down(DownReason::ConnectFailed(err)));
+                    self.events
+                        .handle(ConnectionEvent::Down(DownReason::ConnectFailed(err)));
                     continue 'lifecycle;
                 }
             };
             self.shard_metrics.connections_opened.inc();
-            (self.events)(ConnectionEvent::Up);
+            self.events.handle(ConnectionEvent::Up);
 
             // up
             let exit = self.pipeline(stream).await;
@@ -106,9 +108,9 @@ impl Connection {
                     // is empty and this is a deliberate no-op
 
                     self.with_depth_gauges(|c| c.fail_inflight_dropped(&reason));
-                    (self.events)(ConnectionEvent::Down(reason));
+                    self.events.handle(ConnectionEvent::Down(reason));
                 }
-                PipelineExit::Closed => (self.events)(ConnectionEvent::Closed),
+                PipelineExit::Closed => self.events.handle(ConnectionEvent::Closed),
                 PipelineExit::HandlesDropped => return,
             }
         }
@@ -432,7 +434,7 @@ mod tests {
             addr: Arc::from("127.0.0.1:0"),
             options,
             inbox,
-            events: Box::new(|_| {}),
+            events: ConnectionEventHandler::new(|_| {}),
             metrics: BackendMetricsShard::new(),
         })
     }

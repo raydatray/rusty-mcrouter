@@ -80,7 +80,9 @@ mod tests {
     use rusty_mcrouter_protocol::test_support::{expect_get_value, expect_version, get, get_miss};
 
     use super::*;
-    use crate::connection::{Connection, ConnectionEvent, ConnectionSetup, DownReason};
+    use crate::connection::{
+        Connection, ConnectionEvent, ConnectionEventHandler, ConnectionSetup, DownReason,
+    };
     use crate::error::{ConnectError, RequestError};
     use crate::metrics::BackendMetricsShard;
     use crate::test_support::{
@@ -90,7 +92,7 @@ mod tests {
     fn spawn_connection(
         addr: Arc<str>,
         options: BackendConnectionConfig,
-        events: Box<dyn Fn(ConnectionEvent)>,
+        events: ConnectionEventHandler,
         metrics: Arc<BackendMetricsShard>,
     ) -> ConnectionHandle {
         let (handle, inbox) = ConnectionHandle::allocate(&options);

@@ -1,25 +1,7 @@
-use std::io;
-
 use rusty_mcrouter_protocol::{meta::MetaReplyExpectation, Reply, Request};
 use tokio::{sync::oneshot, time::Instant};
 
-use crate::error::{ConnectError, SendError};
-
-/// reported to the owning destination
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ConnectionEvent {
-    Up,
-    Down(DownReason), // hard TKO
-    Closed,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DownReason {
-    ConnectFailed(ConnectError),
-    Stream(io::ErrorKind),
-    Eof,
-    Protocol,
-}
+use crate::error::SendError;
 
 pub(crate) enum Payload {
     Request(Request),
