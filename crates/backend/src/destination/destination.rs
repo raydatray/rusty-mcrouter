@@ -285,7 +285,7 @@ mod tests {
         }
     }
 
-    /// Tracker + destination wired the way Map does it, plus the event log.
+    /// Tracker + destination wired through DestinationRegistry, plus the event log.
     /// The TkoTrackerMap must stay alive (the tracker emits events through a
     /// Weak to it), so it is returned for the test to hold.
     #[allow(clippy::type_complexity)]

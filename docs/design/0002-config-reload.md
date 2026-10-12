@@ -143,7 +143,7 @@ aliases (`document.rs:18-106`). the builder adds one real failure mode
 and never touch shared state. so validation equals the build, by
 construction, with no second rulebook to keep in sync. it has none of a real
 build's side effects: no destinations, no TKO trackers, no gate attachment
-(`destination/map.rs:50-55` attaches gates to live trackers). a failed
+(`destination/registry.rs` attaches gates to live trackers). a failed
 validation leaves nothing behind.
 
 ### 3. apply: generations on each proxy
@@ -184,8 +184,8 @@ sequenceDiagram
   - the per-proxy routing event sink is a `Box<dyn EventSink>`, so it is
     shared across generations through an `Rc`.
 - **build before drop.** the new generation is built while the slot still
-  holds the old one, so `destination::Map`'s `Weak` dedup
-  (`destination/map.rs:44-77`) hands the new graph the live destinations. that
+  holds the old one, so `destination::DestinationRegistry`'s `Weak` dedup
+  (`destination/registry.rs`) hands the new graph the live destinations. that
   is the entire connection-continuity mechanism, as upstream.
 - **connections read the slot per request.**
   - today, a connection captures the graph once, at accept, and uses it
@@ -307,7 +307,7 @@ reload outcomes in that shared block:
 
 - a reused destination keeps the non-key parameters it was created with:
   `connect_timeout`, probe delays, `failures_until_tko`
-  (`destination/map.rs:50-55`). upstream behaves the same. changing
+  (`destination/registry.rs`). upstream behaves the same. changing
   `server_timeout` changes the key, so it does get fresh destinations.
 - a pool's `tko_tracker` threshold change applies only once its gate is
   recreated: the pool is removed and re-added, or the process restarts.

@@ -13,19 +13,20 @@ use crate::{
     tko::{PoolTkoTracker, TkoTrackerMap},
 };
 
-pub struct DestinationMapSetup {
+pub struct DestinationRegistrySetup {
     pub tko_map: Arc<TkoTrackerMap>,
     pub assembler: DestinationAssembler,
 }
 
-pub struct Map {
+/// worker-local registry of destinations keyed by address and reply timeout
+pub struct DestinationRegistry {
     tko_map: Arc<TkoTrackerMap>,
     assembler: DestinationAssembler,
     destinations: RefCell<HashMap<DestinationKey, Weak<Destination>>>,
 }
 
-impl Map {
-    pub fn new(setup: DestinationMapSetup) -> Rc<Self> {
+impl DestinationRegistry {
+    pub fn new(setup: DestinationRegistrySetup) -> Rc<Self> {
         Rc::new(Self {
             tko_map: setup.tko_map,
             assembler: setup.assembler,
@@ -131,8 +132,8 @@ mod tests {
         TkoTrackerMap::new(noop_sink())
     }
 
-    fn test_map() -> Rc<Map> {
-        Map::new(DestinationMapSetup {
+    fn test_registry() -> Rc<DestinationRegistry> {
+        DestinationRegistry::new(DestinationRegistrySetup {
             tko_map: tko_map(),
             assembler: DestinationAssembler::new(DestinationAssemblerSetup {
                 tokens: Arc::new(DestTokenAllocator::new()),
@@ -167,7 +168,7 @@ mod tests {
     #[tokio::test]
     async fn destination_dedups_to_same_rc_without_gate() {
         run_local(async {
-            let map = test_map();
+            let map = test_registry();
             let a = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             let b = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             assert!(Rc::ptr_eq(&a, &b), "same key must share one destination");
@@ -178,7 +179,7 @@ mod tests {
     #[tokio::test]
     async fn different_reply_timeout_gets_distinct_destination() {
         run_local(async {
-            let map = test_map();
+            let map = test_registry();
             let a = map.destination(key_for("127.0.0.1:9", 100), &test_cfg(), None);
             let b = map.destination(key_for("127.0.0.1:9", 200), &test_cfg(), None);
             assert!(
@@ -195,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_variants_share_one_metric_block() {
         run_local(async {
-            let map = test_map();
+            let map = test_registry();
             let a = map.destination(key_for("127.0.0.1:9", 100), &test_cfg(), None);
             let b = map.destination(key_for("127.0.0.1:9", 200), &test_cfg(), None);
             assert!(!Rc::ptr_eq(&a, &b));
@@ -216,7 +217,7 @@ mod tests {
         run_local(async {
             let allocator = Arc::new(DestTokenAllocator::new());
             let tko = tko_map();
-            let map = Map::new(DestinationMapSetup {
+            let map = DestinationRegistry::new(DestinationRegistrySetup {
                 tko_map: Arc::clone(&tko),
                 assembler: DestinationAssembler::new(DestinationAssemblerSetup {
                     tokens: Arc::clone(&allocator),
@@ -265,7 +266,7 @@ mod tests {
                 vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")],
             ])
             .await;
-            let map = test_map();
+            let map = test_registry();
             let dest = map.destination(key_for(&server.addr.to_string(), 1000), &test_cfg(), None);
 
             send(&dest, get(b"a")).await.unwrap();
@@ -302,7 +303,7 @@ mod tests {
             cfg.probe_delay_initial = Duration::from_millis(5);
             cfg.probe_delay_max = Duration::from_millis(100);
 
-            let map = test_map();
+            let map = test_registry();
             let dest = map.destination(key_for(&server.addr.to_string(), 20), &cfg, None);
             let tracker = Arc::clone(dest.tracker());
 
@@ -349,7 +350,7 @@ mod tests {
                 Step::ReadRequests(2), // parks
             ]])
             .await;
-            let map = test_map();
+            let map = test_registry();
             let dest = map.destination(key_for(&server.addr.to_string(), 1000), &test_cfg(), None);
 
             send(&dest, get(b"a")).await.unwrap(); // last_active = now
@@ -365,7 +366,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_prunes_dead_entries() {
         run_local(async {
-            let map = test_map();
+            let map = test_registry();
             let dest = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             assert_eq!(map.destinations.borrow().len(), 1);
 
@@ -377,9 +378,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_task_exits_when_map_drops() {
+    async fn sweep_task_exits_when_registry_drops() {
         run_local(async {
-            let map = test_map();
+            let map = test_registry();
             let handle = map.spawn_idle_sweep(Duration::from_millis(10)).unwrap();
             assert!(map.spawn_idle_sweep(Duration::ZERO).is_none());
 

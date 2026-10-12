@@ -1,6 +1,6 @@
 use std::{rc::Rc, sync::Arc};
 
-use rusty_mcrouter_backend::destination::{self, DestinationConfig};
+use rusty_mcrouter_backend::destination::{DestinationConfig, DestinationRegistry};
 use rusty_mcrouter_backend::DestinationFactory;
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::{
@@ -15,7 +15,7 @@ pub(crate) struct RouteGeneration {
 }
 
 pub(crate) struct GenerationSetup {
-    pub(crate) destinations: Rc<destination::Map>,
+    pub(crate) destinations: Rc<DestinationRegistry>,
     pub(crate) defaults: DestinationConfig,
     pub(crate) root_options: RootRouteOptions,
     pub(crate) metrics: Arc<RoutingMetricsShard>,
@@ -23,7 +23,7 @@ pub(crate) struct GenerationSetup {
 }
 
 pub(crate) struct GenerationBuilder {
-    destinations: Rc<destination::Map>,
+    destinations: Rc<DestinationRegistry>,
     defaults: DestinationConfig,
     root_options: RootRouteOptions,
     routing_metrics: Arc<RoutingMetricsShard>,
