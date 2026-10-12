@@ -61,6 +61,7 @@ impl ControlRuntime {
                         Some(ControlCommand::Shutdown { acknowledged }) => {
                             self.shutdown().await?;
                             let _ = acknowledged.send(());
+
                             return Ok(());
                         }
                         None => anyhow::bail!("control command channel closed"),
@@ -68,7 +69,9 @@ impl ControlRuntime {
                 }
 
                 event = self.events.recv() => {
-                    let event = event.context("event channel closed unexpectedly")?;
+                    let event = event
+                        .context("event channel closed unexpectedly")?;
+
                     logging::write(&event);
                 }
 
@@ -77,10 +80,30 @@ impl ControlRuntime {
                     anyhow::bail!("metrics server exited unexpectedly");
                 }
 
-                // Only the cancel-safe tick races; an apply runs to completion.
-                _ = tick(&mut self.reloader),
-                    if self.workers_ready && self.reloader.is_some() => {
-                    self.reloader.as_mut().expect("guarded by is_some").poll().await;
+                // wait for the reload timer, once a reload starts keep it running while processing events below
+                _ = tick(&mut self.reloader), if self.workers_ready && self.reloader.is_some() => {
+                    let reload = self
+                        .reloader
+                        .as_mut()
+                        .expect("guarded by is_some")
+                        .poll();
+
+                    tokio::pin!(reload);
+
+                    loop {
+                        tokio::select! {
+                            // resume the same reload until it finishes
+                            _ = &mut reload => break,
+
+                            // drain events while the reload waits for workers
+                            event = self.events.recv() => {
+                                let event =
+                                    event.context("event channel closed unexpectedly")?;
+
+                                logging::write(&event);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -108,8 +131,9 @@ async fn tick(reloader: &mut Option<ConfigReloader>) {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use rusty_mcrouter_backend::classify::ResultCode;
     use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
-    use rusty_mcrouter_backend::tko::TkoTrackerMap;
+    use rusty_mcrouter_backend::tko::{TkoEvent, TkoEventRecord, TkoTrackerMap};
     use rusty_mcrouter_observability::http::MetricsHttpOptions;
     use rusty_mcrouter_observability::{
         channel, ApplicationMetrics, ApplicationMetricsSetup, EventSender, ObservabilityMetrics,
@@ -197,7 +221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_work_before_readiness_and_while_reload_waits_for_workers() {
+    async fn metrics_and_events_work_while_reload_waits_for_workers() {
         let initial = br#"{ "route": "NullRoute" }"#;
         let path = std::env::temp_dir().join(format!(
             "rusty-mcrouter-control-readiness-{}.json",
@@ -211,7 +235,7 @@ mod tests {
             Arc::clone(&metrics),
             Arc::clone(&config_metrics),
         );
-        let (_events, consumer) = channel(8, Arc::clone(&metrics));
+        let (events, consumer) = channel(8, Arc::clone(&metrics));
         let (worker, mut worker_inbox) = WorkerHandle::allocate(0);
         let reloader = ConfigReloader::new(ReloaderSetup {
             path: path.clone(),
@@ -274,6 +298,31 @@ mod tests {
             response.contains("rusty_mcrouter_config_generation 1\n"),
             "{response}"
         );
+
+        let server: Arc<str> = Arc::from("reload-test:11211");
+        events.emit(
+            TkoEventRecord {
+                event: TkoEvent::MarkSoftTko,
+                server: Arc::clone(&server),
+                pool: None,
+                reason: ResultCode::Timeout,
+                consecutive_failures: 3,
+                global_soft_tkos: 1,
+                global_hard_tkos: 0,
+            }
+            .into(),
+        );
+        assert_eq!(Arc::strong_count(&server), 2, "event must enter the queue");
+        // Consuming the event releases its server label. The worker's reload
+        // acknowledgement stays pending until after this check.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&server) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("events were not consumed while reload waited for a worker");
+
         assert_eq!(config_metrics.generation.load(), 1);
         applied.send(Ok(())).unwrap();
         handle.shutdown().await.unwrap();
