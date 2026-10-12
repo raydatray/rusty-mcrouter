@@ -54,8 +54,7 @@ impl GenerationBuilder {
         config: &ConfigDocument,
     ) -> Result<Rc<RouteGeneration>, BuildError> {
         // per generation, so its gate cache can't keep removed pools' gates alive
-        let factory =
-            DestinationFactory::new(Rc::clone(&self.destinations), Arc::clone(&self.tko_map));
+        let factory = DestinationFactory::new(&self.destinations, Arc::clone(&self.tko_map));
         let route = build_route_with_options(config, &factory, &self.defaults, &self.root_options)?;
         let state = RoutingState::new(
             Arc::clone(&self.routing_metrics),

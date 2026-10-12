@@ -86,18 +86,15 @@ pub trait BackendFactory {
 
 /// Production route-generation factory, deduplicating destinations through
 /// the worker's registry and sharing TKO trackers across workers.
-pub struct DestinationFactory {
-    destinations: Rc<DestinationRegistry>,
+pub struct DestinationFactory<'a> {
+    destinations: &'a DestinationRegistry,
     tko_map: Arc<TkoTrackerMap>,
     pool_gates: RefCell<HashMap<Arc<str>, Arc<PoolTkoTracker>>>,
 }
 
-impl DestinationFactory {
-    pub fn new(
-        destinations: Rc<DestinationRegistry>,
-        tko_map: Arc<TkoTrackerMap>,
-    ) -> DestinationFactory {
-        DestinationFactory {
+impl<'a> DestinationFactory<'a> {
+    pub fn new(destinations: &'a DestinationRegistry, tko_map: Arc<TkoTrackerMap>) -> Self {
+        Self {
             destinations,
             tko_map,
             pool_gates: RefCell::new(HashMap::new()),
@@ -120,7 +117,7 @@ impl DestinationFactory {
     }
 }
 
-impl BackendFactory for DestinationFactory {
+impl BackendFactory for DestinationFactory<'_> {
     type Backend = Rc<Destination>;
 
     fn make(
@@ -151,7 +148,7 @@ mod tests {
     use crate::test_support::{run_local, scripted_backend_serial, Step};
     use crate::tko::{DestTokenAllocator, TkoTrackerMap};
 
-    fn factory() -> (Arc<TkoTrackerMap>, DestinationFactory) {
+    fn registry() -> (Arc<TkoTrackerMap>, Rc<DestinationRegistry>) {
         let tko = TkoTrackerMap::new(noop_sink());
         let destinations = DestinationRegistry::new(DestinationRegistrySetup {
             tko_map: Arc::clone(&tko),
@@ -159,8 +156,7 @@ mod tests {
             metrics: DestinationMetricsRegistry::new(),
             shard_metrics: BackendMetricsShard::new(),
         });
-        let factory = DestinationFactory::new(destinations, Arc::clone(&tko));
-        (tko, factory)
+        (tko, destinations)
     }
 
     fn server(access_point: &str) -> ServerConfig {
@@ -186,7 +182,8 @@ mod tests {
     #[tokio::test]
     async fn factory_makes_lazy_destinations_and_dedups() {
         run_local(async {
-            let (_tko, factory) = factory();
+            let (tko, destinations) = registry();
+            let factory = DestinationFactory::new(&destinations, tko);
             let cfg = destination::DestinationConfig::default();
             let pool = PoolHealth::ungated();
 
@@ -206,7 +203,8 @@ mod tests {
     async fn gated_pool_attaches_fail_open_gate() {
         run_local(async {
             let allocator = DestTokenAllocator::new();
-            let (_tko, factory) = factory();
+            let (tko, destinations) = registry();
+            let factory = DestinationFactory::new(&destinations, tko);
             let cfg = destination::DestinationConfig::default();
             let pool = PoolHealth {
                 fail_open: Some(PoolFailOpen {
@@ -237,7 +235,8 @@ mod tests {
             let server =
                 scripted_backend_serial(vec![vec![Step::ReadRequests(1), Step::Write(b"EN\r\n")]])
                     .await;
-            let (_tko, factory) = factory();
+            let (tko, destinations) = registry();
+            let factory = DestinationFactory::new(&destinations, tko);
             let backend = factory.make(
                 &self::server(&server.addr.to_string()),
                 &destination::DestinationConfig::default(),
