@@ -12,7 +12,6 @@ pub mod mock_memcached;
 pub mod test_support;
 
 pub use crate::backend::{
-    Backend, BackendFactory, DestinationFactory, PoolFailOpen, PoolHealth, PreparedSend,
-    TkoRejection,
+    Backend, BackendFactory, DestinationFactory, PoolFailOpen, PoolHealth, TkoRejection,
 };
 pub use crate::metrics::BackendMetrics;

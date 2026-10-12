@@ -22,7 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub use crate::connection::{ConnectionEvent, ConnectionEventHandler, DownReason};
 
 use crate::error::SendError;
-use crate::{Backend, BackendFactory, PoolHealth, PreparedSend, TkoRejection};
+use crate::{Backend, BackendFactory, PoolHealth, TkoRejection};
 
 /// Runs a future inside a fresh `LocalSet`. The backend connection actor is
 /// spawned via
@@ -101,8 +101,7 @@ impl Backend for MockBackend {
     fn prepare_send(
         &self,
         req: Request,
-    ) -> Result<PreparedSend<impl Future<Output = Result<Reply, SendError>> + '_>, TkoRejection>
-    {
+    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, TkoRejection> {
         self.inner.received.lock().unwrap().push(req);
         let result = match &self.inner.response {
             MockResponse::Reply(reply) => Ok(reply.clone()),
@@ -111,7 +110,7 @@ impl Backend for MockBackend {
             }
             MockResponse::Error(err) => Err(err.clone()),
         };
-        Ok(PreparedSend::new(async move { result }))
+        Ok(async move { result })
     }
 }
 

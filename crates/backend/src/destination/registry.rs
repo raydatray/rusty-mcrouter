@@ -185,7 +185,7 @@ mod tests {
 
     async fn send(dest: &Rc<Destination>, request: Request) -> Result<Reply, SendError> {
         match dest.prepare_send(request) {
-            Ok(prepared) => prepared.send().await,
+            Ok(prepared) => prepared.await,
             Err(rejection) => Err(rejection.into()),
         }
     }

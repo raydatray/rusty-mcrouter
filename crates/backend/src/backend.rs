@@ -16,7 +16,7 @@ pub trait Backend: 'static {
     fn prepare_send(
         &self,
         request: Request,
-    ) -> Result<PreparedSend<impl Future<Output = Result<Reply, SendError>> + '_>, TkoRejection>;
+    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, TkoRejection>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,24 +29,6 @@ impl From<TkoRejection> for SendError {
         Self::Tko {
             reason: rejection.reason,
         }
-    }
-}
-
-#[must_use = "a prepared send must be sent. it should never be discarded"]
-pub struct PreparedSend<F> {
-    future: F,
-}
-
-impl<F> PreparedSend<F>
-where
-    F: Future<Output = Result<Reply, SendError>>,
-{
-    pub fn new(future: F) -> Self {
-        Self { future }
-    }
-
-    pub async fn send(self) -> Result<Reply, SendError> {
-        self.future.await
     }
 }
 
@@ -174,7 +156,7 @@ mod tests {
         B: Backend,
     {
         match backend.prepare_send(req) {
-            Ok(prepared) => prepared.send().await,
+            Ok(prepared) => prepared.await,
             Err(rejection) => Err(rejection.into()),
         }
     }
