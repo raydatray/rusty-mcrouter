@@ -19,14 +19,11 @@ pub enum SendError {
     #[error("request error: {0}")]
     Request(#[from] RequestError),
 
-    /// the reply stream is not trustworthy - kill it
+    /// invalid reply stream, fail all affected requests and close connection
     ///
-    /// NOTE: classifies as ResultCode::LocalError, NOT RemoteError, even
-    /// though the server sent the garbage. The request surface says "no
-    /// trustworthy verdict on YOUR request" (still failover-eligible); the
-    /// server-is-broken verdict travels separately via the connection
-    /// teardown -> ConnEvent::Down -> hard TKO. Reclassifying to RemoteError
-    /// would double-count the failure. Do not "fix" this.
+    /// classified as LocalError because no valid reply was decoded
+    /// ConnectionEvent::Down(DownReason::Protocol) seperately drives hard TKO
+    /// RemoteError is meant for a vali SERVER_ERROR reply
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
 
@@ -38,16 +35,13 @@ pub enum SendError {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum LocalError {
-    /// request is unrepresentable on wire. Fail only this request, the encoder
+    /// request is unrepresentable on wire. fail only this request, the encoder
     /// will truncate its buffer back to the checkpoint
     #[error("encode: {0}")]
     Encode(#[from] MetaRequestEncodeError),
 
     /// bounded pending queue is full - fail fast and direct request to another
-    /// backend if eligible. DELIBERATE: classifies as LocalError, which is in
-    /// the default failover set - a saturated-but-healthy primary sheds
-    /// overflow to failover children (faithful to mcrouter). If this fires in
-    /// production, look at capacity, not this enum.
+    /// backend if eligible
     #[error("pending queue full")]
     QueueFull,
 
@@ -73,7 +67,7 @@ pub enum RequestError {
     #[error("timed out (sent: {sent})")]
     Timeout { sent: bool },
 
-    /// the connection died with this request outstanding. Only inflight slots
+    /// the connection died with this request outstanding, only inflight slots
     /// are failed as dropped
     #[error("connection dropped: {kind:?}")]
     Dropped { kind: io::ErrorKind },
