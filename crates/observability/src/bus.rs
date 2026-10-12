@@ -84,6 +84,7 @@ impl EventConsumer {
         if event.is_some() {
             self.warn_if_shedding_events();
         }
+
         event
     }
 
@@ -92,6 +93,7 @@ impl EventConsumer {
         if event.is_some() {
             self.warn_if_shedding_events();
         }
+
         event
     }
 
@@ -110,6 +112,7 @@ impl EventConsumer {
                 new = dropped - self.last_seen,
                 "event bus shed events; log stream incomplete"
             );
+
             self.last_seen = dropped;
             self.last_warned = Instant::now();
         }

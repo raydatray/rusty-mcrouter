@@ -9,8 +9,7 @@ pub struct ObservabilityMetrics {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ProcessMetadata {
-    /// Computed once at startup; encoding does not read the clock.
-    pub start_unix_secs: u64,
+    pub start_unix_secs: u64, // computed at startup once
     pub num_proxies: usize,
 }
 

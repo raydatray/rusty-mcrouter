@@ -31,8 +31,7 @@ pub struct ConfigMetrics {
     pub generation: Gauge,
     pub reload_attempts: Counter,
     pub reload_failures: [Counter; ReloadStage::COUNT],
-    /// 1 when the config file on disk is the one running.
-    pub last_reload_successful: Gauge,
+    pub last_reload_successful: Gauge, // 1 when config file on disk is running
     pub last_success_unix_secs: Gauge,
 }
 

@@ -70,6 +70,7 @@ impl MetricsHttp {
             tokio::select! {
                 _ = &mut self.shutdown => {
                     self.tasks.shutdown().await;
+
                     return Ok(());
                 }
 
@@ -105,7 +106,7 @@ impl MetricsHttp {
     }
 }
 
-pub async fn serve_connection(
+async fn serve_connection(
     stream: TcpStream,
     source: Arc<ApplicationMetrics>,
     request_timeout: Duration,

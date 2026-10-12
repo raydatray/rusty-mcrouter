@@ -38,11 +38,13 @@ impl ApplicationMetrics {
             .iter()
             .map(|worker| Arc::clone(&worker.backend))
             .collect();
+
         let frontend: Vec<_> = setup
             .workers
             .iter()
             .map(|worker| Arc::clone(&worker.frontend))
             .collect();
+
         let routing: Vec<_> = setup
             .workers
             .iter()
