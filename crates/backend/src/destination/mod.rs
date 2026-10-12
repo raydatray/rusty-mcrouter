@@ -5,13 +5,13 @@ mod config;
 #[allow(clippy::module_inception)]
 mod destination;
 mod key;
-mod map;
 mod metrics;
 mod probe;
+mod registry;
 
 pub use assembler::{DestinationAssembler, DestinationAssemblerSetup};
 pub use config::DestinationConfig;
 pub use destination::{Destination, DestinationSetup};
 pub use key::DestinationKey;
-pub use map::{DestinationMapSetup, Map};
 pub use metrics::{DestinationMetrics, DestinationMetricsRegistry};
+pub use registry::{DestinationMapSetup, Map};
