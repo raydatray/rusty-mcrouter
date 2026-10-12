@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, rc::Rc, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use rusty_mcrouter_backend::destination::{self, DestinationRegistry, DestinationRegistrySetup};
+use rusty_mcrouter_backend::destination::{DestinationRegistry, DestinationRegistrySetup};
 use rusty_mcrouter_frontend::{bind_listener, Server};
 
 use crate::context::WorkerContext;
@@ -36,13 +36,9 @@ impl Worker {
         let bound_addr = server.as_ref().map(Server::local_addr).transpose()?;
         let destinations = DestinationRegistry::new(DestinationRegistrySetup {
             tko_map: Arc::clone(&setup.shared.tko_map),
-            assembler: destination::DestinationAssembler::new(
-                destination::DestinationAssemblerSetup {
-                    tokens: Arc::clone(&setup.shared.tokens),
-                    metrics: Arc::clone(&setup.shared.destinations),
-                    shard_metrics: setup.shards.backend,
-                },
-            ),
+            tokens: Arc::clone(&setup.shared.tokens),
+            metrics: Arc::clone(&setup.shared.destinations),
+            shard_metrics: setup.shards.backend,
         });
         let builder = GenerationBuilder::new(GenerationSetup {
             destinations: Rc::clone(&destinations),

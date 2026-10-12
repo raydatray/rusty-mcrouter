@@ -22,7 +22,9 @@ use crate::{
 
 pub struct DestinationRegistrySetup {
     pub tko_map: Arc<TkoTrackerMap>,
-    pub assembler: DestinationAssembler,
+    pub tokens: Arc<DestTokenAllocator>,
+    pub metrics: Arc<DestinationMetricsRegistry>,
+    pub shard_metrics: Arc<BackendMetricsShard>,
 }
 
 /// worker-local registry of destinations keyed by address and reply timeout
@@ -36,7 +38,11 @@ impl DestinationRegistry {
     pub fn new(setup: DestinationRegistrySetup) -> Rc<Self> {
         Rc::new(Self {
             tko_map: setup.tko_map,
-            assembler: setup.assembler,
+            assembler: DestinationAssembler::new(DestinationAssemblerSetup {
+                tokens: setup.tokens,
+                metrics: setup.metrics,
+                shard_metrics: setup.shard_metrics,
+            }),
             destinations: RefCell::new(HashMap::new()),
         })
     }
@@ -189,7 +195,7 @@ mod tests {
 
     use super::*;
     use crate::classify::ResultCode;
-    use crate::destination::{DestinationAssemblerSetup, DestinationMetricsRegistry};
+    use crate::destination::DestinationMetricsRegistry;
     use crate::error::{RequestError, SendError};
     use crate::metrics::BackendMetricsShard;
     use crate::test_support::{run_local, scripted_backend_serial, Step};
@@ -210,11 +216,9 @@ mod tests {
     fn test_registry() -> Rc<DestinationRegistry> {
         DestinationRegistry::new(DestinationRegistrySetup {
             tko_map: tko_map(),
-            assembler: DestinationAssembler::new(DestinationAssemblerSetup {
-                tokens: Arc::new(DestTokenAllocator::new()),
-                metrics: DestinationMetricsRegistry::new(),
-                shard_metrics: BackendMetricsShard::new(),
-            }),
+            tokens: Arc::new(DestTokenAllocator::new()),
+            metrics: DestinationMetricsRegistry::new(),
+            shard_metrics: BackendMetricsShard::new(),
         })
     }
 
@@ -294,11 +298,9 @@ mod tests {
             let tko = tko_map();
             let map = DestinationRegistry::new(DestinationRegistrySetup {
                 tko_map: Arc::clone(&tko),
-                assembler: DestinationAssembler::new(DestinationAssemblerSetup {
-                    tokens: Arc::clone(&allocator),
-                    metrics: DestinationMetricsRegistry::new(),
-                    shard_metrics: BackendMetricsShard::new(),
-                }),
+                tokens: Arc::clone(&allocator),
+                metrics: DestinationMetricsRegistry::new(),
+                shard_metrics: BackendMetricsShard::new(),
             });
             let gate = tko.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
 
