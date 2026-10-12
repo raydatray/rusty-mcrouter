@@ -115,7 +115,7 @@ mod tests {
         let tko_map = TkoTrackerMap::new(noop_sink());
         let destinations = DestinationMetricsRegistry::new();
         let tracker = tko_map.tracker_for("10.0.0.1:11211", 3);
-        let _destination = destinations.metrics_for(&tracker);
+        let _destination = destinations.get_or_create_metrics(&tracker);
         let config = Arc::new(ConfigMetrics::default());
         config.applied(7, 1_700_000_000);
         config.reload_attempts.add(2);

@@ -300,7 +300,7 @@ mod tests {
         let registry = DestinationMetricsRegistry::new();
         let addr: Arc<str> = Arc::from("10.0.0.1:11211");
         let tracker = map.tracker_for(&addr, 3);
-        let block = registry.metrics_for(&tracker);
+        let block = registry.get_or_create_metrics(&tracker);
         block.record_send(ResultCode::Success, 500);
 
         let text = registry.render();
