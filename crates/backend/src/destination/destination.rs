@@ -257,8 +257,7 @@ mod tests {
 
     use super::*;
     use crate::destination::{
-        DestinationAssembler, DestinationAssemblerSetup, DestinationMetricsRegistry,
-        DestinationRegistry, DestinationRegistrySetup,
+        DestinationMetricsRegistry, DestinationRegistry, DestinationRegistrySetup,
     };
     use crate::test_support::{run_local, scripted_backend_serial, ScriptedServer, Step};
     use crate::tko::{DestTokenAllocator, TkoEventRecord, TkoTrackerMap};
@@ -286,22 +285,6 @@ mod tests {
         }
     }
 
-    fn registry_for(
-        tko_map: Arc<TkoTrackerMap>,
-        tokens: Arc<DestTokenAllocator>,
-        metrics: Arc<DestinationMetricsRegistry>,
-        shard_metrics: Arc<BackendMetricsShard>,
-    ) -> Rc<DestinationRegistry> {
-        DestinationRegistry::new(DestinationRegistrySetup {
-            tko_map,
-            assembler: DestinationAssembler::new(DestinationAssemblerSetup {
-                tokens,
-                metrics,
-                shard_metrics,
-            }),
-        })
-    }
-
     /// Tracker + destination wired through DestinationRegistry, plus the event log.
     /// The TkoTrackerMap must stay alive (the tracker emits events through a
     /// Weak to it), so it is returned for the test to hold.
@@ -324,12 +307,12 @@ mod tests {
             addr,
             reply_timeout: cfg.reply_timeout,
         };
-        let destinations = registry_for(
-            Arc::clone(&map),
-            Arc::new(DestTokenAllocator::new()),
-            DestinationMetricsRegistry::new(),
-            BackendMetricsShard::new(),
-        );
+        let destinations = DestinationRegistry::new(DestinationRegistrySetup {
+            tko_map: Arc::clone(&map),
+            tokens: Arc::new(DestTokenAllocator::new()),
+            metrics: DestinationMetricsRegistry::new(),
+            shard_metrics: BackendMetricsShard::new(),
+        });
         let dest = destinations.destination(key, &cfg, None);
         (map, tracker, dest, events, destinations)
     }
@@ -526,12 +509,12 @@ mod tests {
             let tokens = Arc::new(DestTokenAllocator::new());
             let metrics = DestinationMetricsRegistry::new();
             let make_registry = || {
-                registry_for(
-                    Arc::clone(&map),
-                    Arc::clone(&tokens),
-                    Arc::clone(&metrics),
-                    BackendMetricsShard::new(),
-                )
+                DestinationRegistry::new(DestinationRegistrySetup {
+                    tko_map: Arc::clone(&map),
+                    tokens: Arc::clone(&tokens),
+                    metrics: Arc::clone(&metrics),
+                    shard_metrics: BackendMetricsShard::new(),
+                })
             };
             let first_worker = make_registry();
             let second_worker = make_registry();
@@ -582,12 +565,12 @@ mod tests {
                 addr,
                 reply_timeout: Duration::from_millis(1000),
             };
-            let destinations = registry_for(
-                Arc::clone(&map),
-                Arc::new(DestTokenAllocator::new()),
-                DestinationMetricsRegistry::new(),
-                Arc::clone(&shard),
-            );
+            let destinations = DestinationRegistry::new(DestinationRegistrySetup {
+                tko_map: Arc::clone(&map),
+                tokens: Arc::new(DestTokenAllocator::new()),
+                metrics: DestinationMetricsRegistry::new(),
+                shard_metrics: Arc::clone(&shard),
+            });
             let dest = destinations.destination(key, &cfg(3, 1000, 10_000), None);
 
             let get_cell = |code: ResultCode| {

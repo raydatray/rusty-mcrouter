@@ -142,10 +142,7 @@ mod tests {
 
     use super::*;
     use crate::classify::ResultCode;
-    use crate::destination::{
-        DestinationAssembler, DestinationAssemblerSetup, DestinationMetricsRegistry,
-        DestinationRegistrySetup,
-    };
+    use crate::destination::{DestinationMetricsRegistry, DestinationRegistrySetup};
     use crate::metrics::BackendMetricsShard;
     use crate::test_support::{run_local, scripted_backend_serial, Step};
     use crate::tko::{DestTokenAllocator, TkoTrackerMap};
@@ -154,11 +151,9 @@ mod tests {
         let tko = TkoTrackerMap::new(noop_sink());
         let factory = DestinationFactory::new(DestinationRegistry::new(DestinationRegistrySetup {
             tko_map: Arc::clone(&tko),
-            assembler: DestinationAssembler::new(DestinationAssemblerSetup {
-                tokens: Arc::new(DestTokenAllocator::new()),
-                metrics: DestinationMetricsRegistry::new(),
-                shard_metrics: BackendMetricsShard::new(),
-            }),
+            tokens: Arc::new(DestTokenAllocator::new()),
+            metrics: DestinationMetricsRegistry::new(),
+            shard_metrics: BackendMetricsShard::new(),
         }));
         (tko, factory)
     }
