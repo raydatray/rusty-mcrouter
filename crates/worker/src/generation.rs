@@ -1,6 +1,7 @@
 use std::{rc::Rc, sync::Arc};
 
 use rusty_mcrouter_backend::destination::{DestinationConfig, DestinationRegistry};
+use rusty_mcrouter_backend::tko::TkoTrackerMap;
 use rusty_mcrouter_backend::DestinationFactory;
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::{
@@ -16,6 +17,7 @@ pub(crate) struct RouteGeneration {
 
 pub(crate) struct GenerationSetup {
     pub(crate) destinations: Rc<DestinationRegistry>,
+    pub tko_map: Arc<TkoTrackerMap>,
     pub(crate) defaults: DestinationConfig,
     pub(crate) root_options: RootRouteOptions,
     pub(crate) metrics: Arc<RoutingMetricsShard>,
@@ -24,6 +26,7 @@ pub(crate) struct GenerationSetup {
 
 pub(crate) struct GenerationBuilder {
     destinations: Rc<DestinationRegistry>,
+    tko_map: Arc<TkoTrackerMap>,
     defaults: DestinationConfig,
     root_options: RootRouteOptions,
     routing_metrics: Arc<RoutingMetricsShard>,
@@ -34,6 +37,7 @@ impl GenerationBuilder {
     pub(crate) fn new(setup: GenerationSetup) -> Self {
         Self {
             destinations: setup.destinations,
+            tko_map: setup.tko_map,
             defaults: setup.defaults,
             root_options: setup.root_options,
             routing_metrics: setup.metrics,
@@ -50,7 +54,8 @@ impl GenerationBuilder {
         config: &ConfigDocument,
     ) -> Result<Rc<RouteGeneration>, BuildError> {
         // per generation, so its gate cache can't keep removed pools' gates alive
-        let factory = DestinationFactory::new(Rc::clone(&self.destinations));
+        let factory =
+            DestinationFactory::new(Rc::clone(&self.destinations), Arc::clone(&self.tko_map));
         let route = build_route_with_options(config, &factory, &self.defaults, &self.root_options)?;
         let state = RoutingState::new(
             Arc::clone(&self.routing_metrics),

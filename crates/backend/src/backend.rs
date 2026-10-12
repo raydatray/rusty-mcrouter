@@ -10,7 +10,7 @@ use rusty_mcrouter_protocol::{Reply, Request};
 use crate::classify::ResultCode;
 use crate::destination::{self, Destination, DestinationKey, DestinationRegistry};
 use crate::error::SendError;
-use crate::tko::{FailOpenThresholds, PoolTkoTracker};
+use crate::tko::{FailOpenThresholds, PoolTkoTracker, TkoTrackerMap};
 
 pub trait Backend: 'static {
     fn prepare_send(
@@ -88,13 +88,18 @@ pub trait BackendFactory {
 /// the worker's registry and sharing TKO trackers across workers.
 pub struct DestinationFactory {
     destinations: Rc<DestinationRegistry>,
+    tko_map: Arc<TkoTrackerMap>,
     pool_gates: RefCell<HashMap<Arc<str>, Arc<PoolTkoTracker>>>,
 }
 
 impl DestinationFactory {
-    pub fn new(destinations: Rc<DestinationRegistry>) -> DestinationFactory {
+    pub fn new(
+        destinations: Rc<DestinationRegistry>,
+        tko_map: Arc<TkoTrackerMap>,
+    ) -> DestinationFactory {
         DestinationFactory {
             destinations,
+            tko_map,
             pool_gates: RefCell::new(HashMap::new()),
         }
     }
@@ -106,8 +111,7 @@ impl DestinationFactory {
         }
 
         let gate = self
-            .destinations
-            .tko_map()
+            .tko_map
             .pool_tracker_for(config.name, config.thresholds);
         self.pool_gates
             .borrow_mut()
@@ -149,12 +153,13 @@ mod tests {
 
     fn factory() -> (Arc<TkoTrackerMap>, DestinationFactory) {
         let tko = TkoTrackerMap::new(noop_sink());
-        let factory = DestinationFactory::new(DestinationRegistry::new(DestinationRegistrySetup {
+        let destinations = DestinationRegistry::new(DestinationRegistrySetup {
             tko_map: Arc::clone(&tko),
             tokens: Arc::new(DestTokenAllocator::new()),
             metrics: DestinationMetricsRegistry::new(),
             shard_metrics: BackendMetricsShard::new(),
-        }));
+        });
+        let factory = DestinationFactory::new(destinations, Arc::clone(&tko));
         (tko, factory)
     }
 

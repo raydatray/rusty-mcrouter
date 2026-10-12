@@ -42,6 +42,7 @@ impl Worker {
         });
         let builder = GenerationBuilder::new(GenerationSetup {
             destinations: Rc::clone(&destinations),
+            tko_map: Arc::clone(&setup.shared.tko_map),
             defaults: setup.shared.defaults.clone(),
             root_options: setup.shared.root_route_options.clone(),
             metrics: setup.shards.routing,

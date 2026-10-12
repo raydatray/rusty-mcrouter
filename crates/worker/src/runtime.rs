@@ -195,8 +195,9 @@ mod tests {
 
     fn test_runtime(config: &str) -> (WorkerRuntime, WorkerHandle) {
         let (handle, inbox) = WorkerHandle::allocate(0);
+        let tko_map = TkoTrackerMap::new(noop_sink());
         let map = DestinationRegistry::new(DestinationRegistrySetup {
-            tko_map: TkoTrackerMap::new(noop_sink()),
+            tko_map: Arc::clone(&tko_map),
             tokens: Arc::new(DestTokenAllocator::new()),
             metrics: DestinationMetricsRegistry::new(),
             shard_metrics: BackendMetricsShard::new(),
@@ -207,6 +208,7 @@ mod tests {
         };
         let builder = GenerationBuilder::new(GenerationSetup {
             destinations: map,
+            tko_map,
             defaults,
             root_options: RootRouteOptions::default(),
             metrics: RoutingMetricsShard::new(),
