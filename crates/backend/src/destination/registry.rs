@@ -47,12 +47,6 @@ impl DestinationRegistry {
         })
     }
 
-    /// The factory resolves pool fail-open gates through here
-    /// (pool_tracker_for), keeping one registry handle per thread.
-    pub fn tko_map(&self) -> &Arc<TkoTrackerMap> {
-        &self.tko_map
-    }
-
     pub fn destination(
         &self,
         key: DestinationKey,
