@@ -7,9 +7,9 @@ mod options;
 mod request;
 mod server;
 
-pub use connection::{Connection, FrontendConnectionSetup};
-pub use error::FrontendError;
-pub use metrics::FrontendMetricsShard;
-pub use options::{FrontendConnectionOptions, ListenerConfig};
-pub use request::{send_request, RoutedRequest};
-pub use server::{bind_listener, Server};
+pub use crate::connection::{Connection, FrontendConnectionSetup};
+pub use crate::error::FrontendError;
+pub use crate::metrics::{FrontendMetrics, FrontendMetricsShard};
+pub use crate::options::{FrontendConnectionOptions, ListenerConfig};
+pub use crate::request::{send_request, RoutedRequest};
+pub use crate::server::{bind_listener, Server};

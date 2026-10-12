@@ -11,14 +11,14 @@ dependencies point from lower-level primitives and fact owners toward
 composition and presentation (`A --> B` means B depends on A):
 
 - **[`rusty-mcrouter-protocol`](../../crates/protocol/)** - the meta protocol codec, request and reply types, the encoders and decoders for both requests and replies and key parsing
-- **[`rusty-mcrouter-config`](../../crates/config/)** - config file parsing into pools, routes and policies
-- **[`rusty-mcrouter-observability-primitives`](../../crates/observability-primitives/)** - std-only metric cells and event sink mechanics shared by fact-owning crates; no domain records or presentation logic
+- **[`rusty-mcrouter-config`](../../crates/config/)** - configuration documents, parsing into pools/routes/policies, and configuration-lifecycle metric state and encoding
+- **[`rusty-mcrouter-observability-primitives`](../../crates/observability-primitives/)** - std-only metric cells, event sinks, and generic Prometheus encoding/rendering machinery shared by fact-owning crates
 - **[`rusty-mcrouter-backend`](../../crates/backend/)** - the memcached-facing leg. a connection actor that does pipelining and FIFO reply matching, destinations that own connections and probes, and TKO tracking per destination, pool and router
 - **[`rusty-mcrouter-core`](../../crates/core/)** - the routing graph, where a config file is transformed into a tree of route handles
 - **[`rusty-mcrouter-frontend`](../../crates/frontend/)** - the client-facing leg: listener transport, complete protocol connections, request/reply mailbox transport and frontend metric data
 - **[`rusty-mcrouter-worker`](../../crates/worker/)** - worker mailboxes, socket distribution, routing generations, request execution and worker orchestration
 - **[`rusty-mcrouter-observability`](../../crates/observability/)** - event and metric components, Hyper-based `/metrics` handling and presentation
-- **[`rusty-mcrouter-control`](../../crates/control/)** - control runtime, commands, configuration reload coordination and its fact-owned metric data and projection
+- **[`rusty-mcrouter-control`](../../crates/control/)** - control runtime, commands, configuration reload coordination, and metrics service lifecycle
 - **[`rusty-mcrouter`](../../bin/rusty-mcrouter/)** - the binary composition layer: cli, executor/thread ownership, process signals and supervision
 
 ```mermaid
@@ -46,6 +46,7 @@ flowchart LR
     F --> X
     B --> O
     C --> O
+    K --> O
     F --> O
     X --> O
     K --> R
@@ -61,9 +62,11 @@ flowchart LR
     Q --> T
     T --> R
     Q --> B
+    Q --> K
     Q --> X
     Q --> F
     Q --> O
+    Q --> R
 ```
 
 ## runtime ownership
@@ -145,9 +148,14 @@ receives the request and delivers the reply through the request's oneshot.
 fatal framing and session I/O failures end that connection; recoverable parse
 and reply-encoding errors stay in its ordered pipeline. unexpected worker
 mailbox closure and supervised runtime-task panics stop the worker.
-`ControlRuntime` owns event presentation, the metrics listener, at most 32
-concurrent metrics connection tasks, and the config reloader, which sends new
-configs to workers over their command channels. No OS thread or
+`ControlRuntime` owns event presentation, a supervised metrics server task, and
+the config reloader, which sends new configs to workers over their command
+channels. the metrics server owns its listener and at most 32 concurrent
+connection tasks. it runs on the same current-thread Tokio runtime, so scrapes
+continue while a reload awaits worker acknowledgements. control signals and
+joins the metrics server during shutdown. the metrics server aborts and joins
+connection tasks on requested shutdown; fatal exits and cancellation abort the
+tasks through their owner's drop behavior. No OS thread or
 long-lived runtime task is intentionally detached. Wildcard routing is the
 exception for short-lived work: non-primary fanout targets run in detached
 local tasks and may be cancelled when their worker thread stops.
@@ -197,12 +205,22 @@ drains and joins the control thread.
   shutdown still reports errors, and stops workers before control.
 - the binary captures process metadata and the initial config timestamp;
   the control reloader captures successful reload timestamps alongside its own
-  logging and counters. metric data and projections do not read the wall clock.
+  logging and configuration counters. metric data and projections do not read the wall clock.
   control inboxes are app-allocated, just like worker inboxes.
-- control owns `ConfigMetrics`, `ReloadStage` and `ConfigSource`; the app registers
-  its projection through observability's `MetricsSource` interface using
-  `ScrapeInputs.additional_sources`. observability stays independent of control,
-  allowing the control runtime to consume its event and HTTP services.
+- fact owners colocate metric state, recording methods, and implementations of
+  `observability-primitives::prometheus::MetricsSource` in `metrics.rs`.
+  `BackendMetrics`, `FrontendMetrics`, and `RoutingMetrics` aggregate worker
+  shards; `TkoTrackerMap`, `DestinationMetricsRegistry`, `ConfigMetrics`,
+  `ObservabilityMetrics`, and `ProcessMetadata` encode their state directly.
+- observability's `ApplicationMetricsSetup` requires concrete worker, TKO,
+  destination, observability, process metadata, and `ConfigMetrics` inputs.
+  `ApplicationMetrics::new(setup)` creates the aggregate once at startup; its encoding
+  implementation calls each producer in scrape order. `MetricsSource::render()` writes
+  those samples into `MetricsText` with static dispatch.
+- the app supplies `Arc<ApplicationMetrics>` through `ControlSetup.source`.
+  `ControlSetup`, `ControlRuntime::build`, and `MetricsHttp` use that concrete
+  application-wide metric set. observability depends on config's metric data, while
+  control owns reload scheduling, worker application, and service lifecycle.
 
 shared resources use `Arc`; route graphs, destinations and their connection
 callbacks remain worker-local with `Rc`. the existing `Backend` and

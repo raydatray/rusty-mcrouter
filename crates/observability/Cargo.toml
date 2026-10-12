@@ -18,16 +18,16 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 rusty-mcrouter-backend.workspace = true
+rusty-mcrouter-config.workspace = true
 rusty-mcrouter-core.workspace = true
 rusty-mcrouter-frontend.workspace = true
 rusty-mcrouter-observability-primitives.workspace = true
-rusty-mcrouter-protocol.workspace = true
 rusty-mcrouter-worker.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "macros", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-rusty-mcrouter-config.workspace = true
 rusty-mcrouter-observability-primitives = { workspace = true, features = ["testing"] }
+rusty-mcrouter-protocol.workspace = true
 serde_json.workspace = true

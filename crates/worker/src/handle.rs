@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::BuildError;
+use rusty_mcrouter_frontend::RoutedRequest;
 use rusty_mcrouter_protocol::{Reply, Request};
 use tokio::sync::{
     mpsc::{self, Receiver, Sender},
@@ -11,7 +12,7 @@ use tokio::sync::{
 };
 
 use crate::error::Result;
-use crate::{RoutedRequest, WorkerCommand, WorkerError};
+use crate::{WorkerCommand, WorkerError};
 
 const WORK_CAPACITY: usize = 1024;
 const REQUEST_CAPACITY: usize = 1024;

@@ -11,10 +11,13 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use rusty_mcrouter_observability_primitives::prometheus::MetricsSource;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
-use crate::metrics::{ControlMetrics, MetricsRegistry};
+use crate::metrics::ObservabilityMetrics;
+use crate::ApplicationMetrics;
 
 const CONTENT_TYPE_VALUE: &str = "text/plain; version=0.0.4";
 
@@ -35,74 +38,81 @@ impl Default for MetricsHttpOptions {
 
 pub struct MetricsHttpSetup {
     pub listener: TcpListener,
-    pub registry: Arc<MetricsRegistry>,
-    pub metrics: Arc<ControlMetrics>,
+    pub source: Arc<ApplicationMetrics>,
+    pub metrics: Arc<ObservabilityMetrics>,
     pub options: MetricsHttpOptions,
+    pub shutdown: oneshot::Receiver<()>,
 }
 
 pub struct MetricsHttp {
     listener: TcpListener,
-    registry: Arc<MetricsRegistry>,
+    source: Arc<ApplicationMetrics>,
     tasks: JoinSet<anyhow::Result<()>>,
-    metrics: Arc<ControlMetrics>,
+    metrics: Arc<ObservabilityMetrics>,
     options: MetricsHttpOptions,
+    shutdown: oneshot::Receiver<()>,
 }
 
 impl MetricsHttp {
     pub fn new(setup: MetricsHttpSetup) -> Self {
         Self {
             listener: setup.listener,
-            registry: setup.registry,
+            source: setup.source,
             tasks: JoinSet::new(),
             metrics: setup.metrics,
             options: setup.options,
+            shutdown: setup.shutdown,
         }
-    }
-
-    pub async fn step(&mut self) -> anyhow::Result<()> {
-        tokio::select! {
-            accepted = self.listener.accept() => {
-                let (stream, _) = accepted.context("accept metrics connection")?;
-                if self.tasks.len() >= self.options.max_connections {
-                    self.metrics.http_rejected.inc();
-                    drop(stream);
-                    return Ok(());
-                }
-
-                let registry = Arc::clone(&self.registry);
-                let timeout = self.options.request_timeout;
-                self.tasks.spawn(async move { serve_connection(stream, registry, timeout).await });
-            }
-
-            Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
-                match result {
-                    Err(error) => return Err(error).context("metrics connection task failed"),
-                    Ok(Err(error)) => tracing::debug!(%error, "metrics connection failed"),
-                    Ok(Ok(())) => {}
-                }
-            }
-        }
-        Ok(())
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
         loop {
-            self.step().await?;
-        }
-    }
+            tokio::select! {
+                _ = &mut self.shutdown => {
+                    self.tasks.shutdown().await;
 
-    pub async fn shutdown(&mut self) {
-        self.tasks.shutdown().await;
+                    return Ok(());
+                }
+
+                accepted = self.listener.accept() => {
+                    let (stream, _) = accepted.context("accept metrics connection")?;
+
+                    if self.tasks.len() >= self.options.max_connections {
+                        self.metrics.http_rejected.inc();
+                        drop(stream);
+
+                        continue;
+                    }
+
+                    let source = Arc::clone(&self.source);
+                    let timeout = self.options.request_timeout;
+
+                    self.tasks.spawn(async move {
+                        serve_connection(stream, source, timeout).await
+                    });
+                }
+
+                Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                    match result {
+                        Err(error) => {
+                            return Err(error).context("metrics connection task failed");
+                        }
+                        Ok(Err(error)) => tracing::debug!(%error, "metrics connection failed"),
+                        Ok(Ok(())) => {}
+                    }
+                }
+            }
+        }
     }
 }
 
-pub async fn serve_connection(
+async fn serve_connection(
     stream: TcpStream,
-    registry: Arc<MetricsRegistry>,
+    source: Arc<ApplicationMetrics>,
     request_timeout: Duration,
 ) -> anyhow::Result<()> {
     let io = TokioIo::new(stream);
-    let service = service_fn(move |request| respond(request, Arc::clone(&registry)));
+    let service = service_fn(move |request| respond(request, Arc::clone(&source)));
 
     tokio::time::timeout(
         request_timeout,
@@ -113,19 +123,21 @@ pub async fn serve_connection(
     .await
     .context("metrics connection timed out")?
     .context("serve metrics connection")?;
+
     Ok(())
 }
 
 async fn respond(
     request: Request<Incoming>,
-    registry: Arc<MetricsRegistry>,
+    source: Arc<ApplicationMetrics>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if request.method() == Method::GET && request.uri().path() == "/metrics" {
         let response = Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, CONTENT_TYPE_VALUE)
-            .body(Full::new(Bytes::from(registry.render())))
+            .body(Full::new(Bytes::from(source.render())))
             .expect("constant response is valid");
+
         return Ok(response);
     }
 
@@ -139,36 +151,44 @@ async fn respond(
 mod tests {
     use std::net::SocketAddr;
 
+    use rusty_mcrouter_backend::destination::DestinationMetricsRegistry;
+    use rusty_mcrouter_backend::tko::TkoTrackerMap;
+    use rusty_mcrouter_config::ConfigMetrics;
+    use rusty_mcrouter_observability_primitives::test_support::noop_sink;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::metrics::{MetricsSource, MetricsText};
+    use crate::{ApplicationMetricsSetup, ProcessMetadata};
 
-    struct Static;
-
-    impl MetricsSource for Static {
-        fn encode(&self, out: &mut MetricsText) {
-            out.counter("test_total", &[], 7);
-        }
-    }
-
-    async fn start() -> SocketAddr {
+    async fn start() -> (SocketAddr, oneshot::Sender<()>) {
         start_with_options(MetricsHttpOptions::default()).await
     }
 
-    async fn start_with_options(options: MetricsHttpOptions) -> SocketAddr {
-        let mut registry = MetricsRegistry::new();
-        registry.register(Box::new(Static));
+    async fn start_with_options(options: MetricsHttpOptions) -> (SocketAddr, oneshot::Sender<()>) {
+        let metrics = Arc::new(ObservabilityMetrics::default());
+        let source = ApplicationMetrics::new(ApplicationMetricsSetup {
+            metadata: ProcessMetadata {
+                start_unix_secs: 1_700_000_000,
+                num_proxies: 0,
+            },
+            workers: Vec::new(),
+            tko_map: TkoTrackerMap::new(noop_sink()),
+            destinations: DestinationMetricsRegistry::new(),
+            observability: Arc::clone(&metrics),
+            config: ConfigMetrics::started(1_700_000_000),
+        });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (shutdown, shutdown_rx) = oneshot::channel();
         let server = MetricsHttp::new(MetricsHttpSetup {
             listener,
-            registry: Arc::new(registry),
-            metrics: Arc::default(),
+            source: Arc::new(source),
+            metrics,
             options,
+            shutdown: shutdown_rx,
         });
         tokio::spawn(async move { server.run().await.unwrap() });
-        addr
+        (addr, shutdown)
     }
 
     async fn request(addr: SocketAddr, request: &str) -> String {
@@ -181,19 +201,31 @@ mod tests {
 
     #[tokio::test]
     async fn get_metrics_renders_a_scrape() {
-        let response = request(
-            start().await,
-            "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        )
-        .await;
+        let (addr, _shutdown) = start().await;
+        let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
         assert!(response.contains("content-type: text/plain; version=0.0.4\r\n"));
-        assert!(response.ends_with("\r\n\r\ntest_total 7\n"), "{response}");
+        assert!(
+            response.contains("\r\n\r\nrusty_mcrouter_backend_latency_us_sum_total 0\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains("rusty_mcrouter_proxies 0\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains("rusty_mcrouter_config_generation 1\n"),
+            "{response}"
+        );
+        assert!(
+            response.ends_with("rusty_mcrouter_config_last_success_timestamp_seconds 1700000000\n"),
+            "{response}"
+        );
     }
 
     #[tokio::test]
     async fn other_routes_and_methods_are_not_found() {
-        let addr = start().await;
+        let (addr, _shutdown) = start().await;
         for request_head in [
             "GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n",
             "POST /metrics HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
@@ -208,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_http_does_not_stop_the_server() {
-        let addr = start().await;
+        let (addr, _shutdown) = start().await;
         let _ = request(addr, "garbage\r\n\r\n").await;
         let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
@@ -216,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn configured_request_timeout_closes_an_idle_connection() {
-        let addr = start_with_options(MetricsHttpOptions {
+        let (addr, _shutdown) = start_with_options(MetricsHttpOptions {
             request_timeout: Duration::from_millis(10),
             ..MetricsHttpOptions::default()
         })

@@ -20,4 +20,5 @@ tokio = { workspace = true, features = ["net", "sync", "macros", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
+rusty-mcrouter-observability-primitives = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["full", "test-util"] }

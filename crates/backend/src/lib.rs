@@ -15,3 +15,4 @@ pub use crate::backend::{
     Backend, BackendFactory, DestinationFactory, PoolFailOpen, PoolHealth, PreparedSend,
     TkoRejection,
 };
+pub use crate::metrics::BackendMetrics;

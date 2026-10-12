@@ -200,29 +200,37 @@ the integration crate, `rusty-mcrouter-observability`:
 flowchart TB
     P[rusty-mcrouter-protocol]
     K[rusty-mcrouter-config]
-    Q["rusty-mcrouter-observability-primitives<br/>Counter, Gauge, EventSink"]
+    Q["rusty-mcrouter-observability-primitives<br/>Counter, Gauge, EventSink,<br/>MetricsSource, MetricsText, render"]
     N["rusty-mcrouter-backend<br/>TkoEventRecord, BackendMetricsShard,<br/>DestinationMetrics + sinks"]
     C["rusty-mcrouter-core<br/>RoutingEventRecord + counters/sink"]
     X["rusty-mcrouter-proxy<br/>WorkerEventRecord, FrontendMetricsShard,<br/>frontend server + orchestration"]
-    O["rusty-mcrouter-observability<br/>event envelope + bus,<br/>log formatting, aggregation, /metrics"]
+    O["rusty-mcrouter-observability<br/>event envelope + bus,<br/>concrete scrape assembly, /metrics"]
+    T["rusty-mcrouter-control<br/>reload coordination,<br/>service lifecycle"]
     B["rusty-mcrouter (bin)<br/>constructs and wires everything"]
-    P --> N --> C --> X --> O --> B
+    P --> N --> C --> X --> O --> T --> B
     K --> C
     K --> X
+    K --> O
     N --> O
     Q --> N
+    Q --> K
     Q --> C
     Q --> X
     Q --> O
     C --> O
+    N --> T
+    C --> T
+    X --> T
+    Q --> T
 ```
 
 **the dependency rule: leaf crates never import observability.**
 observability imports and composes leaf types:
 
 ```text
-leaf crates define facts.
-observability composes and presents facts.
+leaf crates define facts and their Prometheus projections.
+observability assembles the required metric projections and serves scrapes.
+control coordinates reloads and runs the services.
 the binary wires the system together.
 ```
 
@@ -592,7 +600,6 @@ rate(rusty_mcrouter_pool_completed_requests_total[5m])
 
 | metric | type | labels |
 |--------|------|--------|
-| `rusty_mcrouter_build_info` | info gauge | `version` |
 | `rusty_mcrouter_start_time_seconds` | gauge | — |
 | `rusty_mcrouter_proxies` | gauge | — |
 | `rusty_mcrouter_events_dropped_total` | counter | — the bus watching itself |
@@ -641,28 +648,49 @@ catalog: `0001-observability-catalog.md`.
 ## public api and wiring
 
 ```rust
-impl Observability {
-    pub fn new(bus_capacity: usize) -> Self;
-    pub fn events(&self) -> &EventSender;
-    pub fn register(&mut self, source: Box<dyn MetricsSource>);
-    pub fn into_parts(self, metrics_addr: Option<SocketAddr>)
-        -> io::Result<(Option<SocketAddr>, ObservabilityParts)>;
+pub trait MetricsSource: Send + Sync {
+    fn encode(&self, out: &mut MetricsText);
+
+    fn render(&self) -> String {
+        let mut out = MetricsText::new();
+        self.encode(&mut out);
+        out.buf
+    }
 }
 ```
+
+the shared trait and text encoder live in
+`observability-primitives::prometheus`. each owner imports that module directly
+and implements `encode()` on its existing metric state or on a collection of
+worker shards. the default `MetricsSource::render()` method returns the encoded
+text. `observability::ApplicationMetricsSetup` requires the complete
+concrete metric set, including config's `Arc<ConfigMetrics>`.
+`ApplicationMetrics::new(setup)` prepares an aggregate that reads the shared objects'
+current values and encodes them in a fixed order on each scrape. the
+HTTP server holds `Arc<ApplicationMetrics>` directly.
 
 binary wiring:
 
 ```rust
-let mut obs = Observability::new(event_bus_capacity);
-let tko_map = TkoTrackerMap::with_sink(obs.events().sink());
-let layout = RoutingMetricsLayout::new(config.pools.keys().cloned());
-let metrics = RoutingMetricsShard::new(Arc::clone(&layout));
-let state = RoutingState::with_event_sink(metrics, obs.events().sink());
-let route = build_route(&config, &factory, &defaults, state.layout())?;
-obs.register(Box::new(RoutingSource { shards }));
-let (metrics_addr, parts) = obs.into_parts(metrics_addr)?;
-let control = ControlThread::spawn(parts, process_events)?;
+use rusty_mcrouter_config::ConfigMetrics;
+use rusty_mcrouter_observability::{ApplicationMetrics, ApplicationMetricsSetup};
+
+let observability = Arc::new(ObservabilityMetrics::default());
+let (events, event_consumer) = channel(event_bus_capacity, Arc::clone(&observability));
+let config_metrics = Arc::new(ConfigMetrics::default());
+let application_metrics = ApplicationMetrics::new(ApplicationMetricsSetup {
+    metadata,
+    workers: worker_shards,
+    tko_map: Arc::clone(&shared.tko_map),
+    destinations: Arc::clone(&shared.destinations),
+    observability,
+    config: Arc::clone(&config_metrics),
+});
 ```
+
+the app supplies `Arc::new(application_metrics)` as `ControlSetup.source`, alongside
+the event consumer. configuration metric data lives in config; the reloader
+remains in control.
 
 the control thread owns event consumption and a Hyper HTTP/1 metrics service.
 the service disables keep-alive, applies a five-second connection timeout and
@@ -675,10 +703,9 @@ the shipped slices are: owned TKO, routing, and worker event records;
 the bounded shedding bus; per-proxy frontend/backend/routing shards;
 shared per-destination blocks; live TKO/fail-open sources; the Hyper
 HTTP endpoint; and supervised binary construction/wiring. route instrumentation is
-guarded by `bin/rusty-mcrouter/tests/route_graph_observability.rs`, which
-parses real config, builds a graph with mock backends, executes through
-the proxy boundary, renders the real `RoutingSource`, and asserts
-healthy and failover metrics.
+guarded by owner-local aggregation tests in `crates/core/src/metrics.rs` and
+process-level scrape tests in `bin/rusty-mcrouter/tests/system_e2e.rs`, which
+exercise healthy and failover metrics through the full stack.
 
 ## test matrix
 

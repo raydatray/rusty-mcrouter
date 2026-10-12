@@ -2,13 +2,11 @@
 
 mod handle;
 mod message;
-mod metrics;
 mod reload;
 mod runtime;
 mod setup;
 
-pub use handle::{ControlHandle, ControlInbox};
-pub use metrics::{ConfigMetrics, ConfigSource, ReloadStage};
-pub use reload::{ConfigReloader, ReloaderSetup, RunningConfig};
-pub use runtime::ControlRuntime;
-pub use setup::ControlSetup;
+pub use crate::handle::{ControlHandle, ControlInbox};
+pub use crate::reload::{ConfigReloader, ReloaderSetup, RunningConfig};
+pub use crate::runtime::ControlRuntime;
+pub use crate::setup::ControlSetup;

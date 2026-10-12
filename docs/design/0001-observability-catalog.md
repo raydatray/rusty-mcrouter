@@ -45,7 +45,8 @@ blanket rules applied throughout:
 
 | upstream | decision | notes |
 |----------|----------|-------|
-| version, time, uptime | port | `rusty_mcrouter_build_info` + `rusty_mcrouter_start_time_seconds`; uptime is promql |
+| version | n/a | deliberately not exported as a metric |
+| time, uptime | port | `rusty_mcrouter_start_time_seconds`; uptime is promql |
 | commandargs, pid, parent_pid | defer | no matching exported family yet |
 | ps_rss, ps_vsize, ps_num_{minor,major}_faults, ps_{user,system}_time_sec, rusage_system, rusage_user | defer | use a stock `process_*` collector when process metrics are added |
 | fibers_allocated, fibers_pool_size, fibers_stack_high_watermark | n/a | no fibers; tokio task metrics are a different question (tokio-metrics, someday) |

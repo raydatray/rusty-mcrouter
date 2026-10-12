@@ -3,12 +3,13 @@ use rusty_mcrouter_backend::{
     destination::DestinationMetricsRegistry,
     tko::{DestTokenAllocator, TkoTrackerMap},
 };
+use rusty_mcrouter_config::ConfigMetrics;
 use rusty_mcrouter_control::{
-    ConfigMetrics, ConfigReloader, ConfigSource, ControlHandle, ControlSetup, ReloaderSetup,
-    RunningConfig,
+    ConfigReloader, ControlHandle, ControlSetup, ReloaderSetup, RunningConfig,
 };
 use rusty_mcrouter_observability::{
-    channel, logging, ControlMetrics, ProcessMetadata, ScrapeInputs,
+    channel, logging, ApplicationMetrics, ApplicationMetricsSetup, ObservabilityMetrics,
+    ProcessMetadata,
 };
 use rusty_mcrouter_worker::{ThreadMode, WorkerHandle, WorkerShards, WorkerShared};
 
@@ -39,9 +40,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let listen_addr = args.listen_addr()?;
     let metrics_addr = args.metrics_addr()?;
 
-    let control_metrics = Arc::new(ControlMetrics::default());
+    let observability_metrics = Arc::new(ObservabilityMetrics::default());
     let config_metrics = Arc::new(ConfigMetrics::default());
-    let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&control_metrics));
+    let (events, event_consumer) = channel(EVENT_BUS_CAPACITY, Arc::clone(&observability_metrics));
     let tko_map = TkoTrackerMap::new(events.sink());
     let tokens = Arc::new(DestTokenAllocator::new());
     let destinations = DestinationMetricsRegistry::new();
@@ -83,17 +84,14 @@ pub(crate) fn run() -> anyhow::Result<()> {
     };
     let supervisor = Supervisor::new();
 
-    let registry = ScrapeInputs {
+    let application_metrics = ApplicationMetrics::new(ApplicationMetricsSetup {
         metadata,
         workers: worker_shards,
         tko_map: Arc::clone(&shared.tko_map),
         destinations: Arc::clone(&shared.destinations),
-        control: Arc::clone(&control_metrics),
-        additional_sources: vec![Box::new(ConfigSource {
-            metrics: Arc::clone(&config_metrics),
-        })],
-    }
-    .into_registry();
+        observability: Arc::clone(&observability_metrics),
+        config: Arc::clone(&config_metrics),
+    });
 
     let reloader = (!args.disable_reload_configs).then(|| {
         ConfigReloader::new(ReloaderSetup {
@@ -116,9 +114,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
         ControlSetup {
             inbox: control_inbox,
             events: event_consumer,
-            registry: Arc::new(registry),
+            source: Arc::new(application_metrics),
             metrics_addr,
-            metrics: control_metrics,
+            metrics: observability_metrics,
             reloader,
             http_options: Default::default(),
         },
