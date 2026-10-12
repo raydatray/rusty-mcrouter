@@ -6,9 +6,7 @@ mod reload;
 mod runtime;
 mod setup;
 
-pub use rusty_mcrouter_config::{ConfigMetrics, ReloadStage};
-
-pub use handle::{ControlHandle, ControlInbox};
-pub use reload::{ConfigReloader, ReloaderSetup, RunningConfig};
-pub use runtime::ControlRuntime;
-pub use setup::ControlSetup;
+pub use crate::handle::{ControlHandle, ControlInbox};
+pub use crate::reload::{ConfigReloader, ReloaderSetup, RunningConfig};
+pub use crate::runtime::ControlRuntime;
+pub use crate::setup::ControlSetup;

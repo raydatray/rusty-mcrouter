@@ -1,10 +1,10 @@
 use std::{rc::Rc, sync::Arc};
 
-use rusty_mcrouter_frontend::{FrontendConnectionOptions, FrontendMetricsShard};
+use rusty_mcrouter_frontend::{FrontendConnectionOptions, FrontendMetricsShard, RoutedRequest};
 use tokio::sync::mpsc::Sender;
 
 use crate::generation::RouteGeneration;
-use crate::{RoutedRequest, ThreadMode, WorkerSet};
+use crate::{ThreadMode, WorkerSet};
 
 /// Worker-local routing state and inputs for constructing frontend connections.
 pub(crate) struct WorkerContext {
