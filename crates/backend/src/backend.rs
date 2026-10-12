@@ -131,7 +131,7 @@ impl BackendFactory for DestinationFactory<'_> {
             reply_timeout: cfg.reply_timeout,
         };
         self.destinations
-            .destination(key, cfg, self.pool_gate(pool))
+            .get_or_create_destination(key, cfg, self.pool_gate(pool))
     }
 }
 

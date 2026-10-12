@@ -6,7 +6,10 @@ use std::{
     time::Duration,
 };
 
-use tokio::time::Instant;
+use tokio::{
+    task::{spawn_local, JoinHandle},
+    time::{sleep, Instant},
+};
 
 use crate::{
     connection::{
@@ -47,7 +50,7 @@ impl DestinationRegistry {
         })
     }
 
-    pub fn destination(
+    pub fn get_or_create_destination(
         &self,
         key: DestinationKey,
         cfg: &DestinationConfig,
@@ -57,6 +60,7 @@ impl DestinationRegistry {
             if let Some(gate) = pool_tracker {
                 existing.tracker().set_pool_tracker(gate);
             }
+
             return existing;
         }
 
@@ -75,20 +79,19 @@ impl DestinationRegistry {
         dest
     }
 
-    pub fn spawn_idle_sweep(
-        self: &Rc<Self>,
-        interval: Duration,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn spawn_idle_sweep(self: &Rc<Self>, interval: Duration) -> Option<JoinHandle<()>> {
         if interval.is_zero() {
             return None;
         }
 
         let weak = Rc::downgrade(self);
 
-        Some(tokio::task::spawn_local(async move {
+        Some(spawn_local(async move {
             loop {
-                tokio::time::sleep(interval).await;
+                sleep(interval).await;
+
                 let Some(map) = weak.upgrade() else { return };
+
                 map.sweep_idle(interval);
             }
         }))
@@ -118,13 +121,16 @@ impl DestinationRegistry {
     ) -> Rc<Destination> {
         let metrics = self.metrics.metrics_for(&tracker);
         let token = self.tokens.allocate();
+
         Rc::new_cyclic(|weak: &Weak<Destination>| {
             let weak = weak.clone();
+
             let events = Box::new(move |event| {
                 if let Some(destination) = weak.upgrade() {
                     destination.on_conn_event(event);
                 }
             });
+
             let connection_options = BackendConnectionConfig {
                 connect_timeout: Some(options.connect_timeout),
                 connect_timeout_retries: options.connect_timeout_retries,
@@ -132,7 +138,9 @@ impl DestinationRegistry {
                 reply_timeout: Some(options.reply_timeout),
                 ..BackendConnectionConfig::default()
             };
+
             let (handle, inbox) = ConnectionHandle::allocate(&connection_options);
+
             let connection = Connection::new(ConnectionSetup {
                 addr: Arc::clone(&key.addr),
                 options: connection_options,
@@ -140,6 +148,7 @@ impl DestinationRegistry {
                 events,
                 metrics: Arc::clone(&self.shard_metrics),
             });
+
             Destination::new(DestinationSetup {
                 key,
                 options,
@@ -148,7 +157,7 @@ impl DestinationRegistry {
                 tracker,
                 connection: ConnectionResources {
                     handle,
-                    task: tokio::task::spawn_local(connection.run()),
+                    task: spawn_local(connection.run()),
                 },
                 metrics,
                 shard_metrics: Arc::clone(&self.shard_metrics),
@@ -218,8 +227,8 @@ mod tests {
     async fn destination_dedups_to_same_rc_without_gate() {
         run_local(async {
             let map = test_registry();
-            let a = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
-            let b = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
+            let a = map.get_or_create_destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
+            let b = map.get_or_create_destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             assert!(Rc::ptr_eq(&a, &b), "same key must share one destination");
         })
         .await;
@@ -229,8 +238,8 @@ mod tests {
     async fn different_reply_timeout_gets_distinct_destination() {
         run_local(async {
             let map = test_registry();
-            let a = map.destination(key_for("127.0.0.1:9", 100), &test_cfg(), None);
-            let b = map.destination(key_for("127.0.0.1:9", 200), &test_cfg(), None);
+            let a = map.get_or_create_destination(key_for("127.0.0.1:9", 100), &test_cfg(), None);
+            let b = map.get_or_create_destination(key_for("127.0.0.1:9", 200), &test_cfg(), None);
             assert!(
                 !Rc::ptr_eq(&a, &b),
                 "different latency contracts must not share a FIFO"
@@ -246,8 +255,8 @@ mod tests {
     async fn timeout_variants_share_one_metric_block() {
         run_local(async {
             let map = test_registry();
-            let a = map.destination(key_for("127.0.0.1:9", 100), &test_cfg(), None);
-            let b = map.destination(key_for("127.0.0.1:9", 200), &test_cfg(), None);
+            let a = map.get_or_create_destination(key_for("127.0.0.1:9", 100), &test_cfg(), None);
+            let b = map.get_or_create_destination(key_for("127.0.0.1:9", 200), &test_cfg(), None);
             assert!(!Rc::ptr_eq(&a, &b));
             assert!(
                 Arc::ptr_eq(a.metrics(), b.metrics()),
@@ -274,15 +283,15 @@ mod tests {
             });
             let gate = tko.pool_tracker_for("pool", FailOpenThresholds { enter: 1, exit: 1 });
 
-            let a1 = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
-            let a2 = map.destination(
+            let a1 = map.get_or_create_destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
+            let a2 = map.get_or_create_destination(
                 key_for("127.0.0.1:9", 1000),
                 &test_cfg(),
                 Some(Arc::clone(&gate)),
             );
             assert!(Rc::ptr_eq(&a1, &a2));
 
-            let b = map.destination(
+            let b = map.get_or_create_destination(
                 key_for("127.0.0.1:10", 1000),
                 &test_cfg(),
                 Some(Arc::clone(&gate)),
@@ -314,7 +323,11 @@ mod tests {
             ])
             .await;
             let map = test_registry();
-            let dest = map.destination(key_for(&server.addr.to_string(), 1000), &test_cfg(), None);
+            let dest = map.get_or_create_destination(
+                key_for(&server.addr.to_string(), 1000),
+                &test_cfg(),
+                None,
+            );
 
             send(&dest, get(b"a")).await.unwrap();
             tokio::time::sleep(Duration::from_millis(60)).await;
@@ -351,7 +364,8 @@ mod tests {
             cfg.probe_delay_max = Duration::from_millis(100);
 
             let map = test_registry();
-            let dest = map.destination(key_for(&server.addr.to_string(), 20), &cfg, None);
+            let dest =
+                map.get_or_create_destination(key_for(&server.addr.to_string(), 20), &cfg, None);
             let tracker = Arc::clone(dest.tracker());
 
             let result = send(&dest, get(b"a")).await;
@@ -398,7 +412,11 @@ mod tests {
             ]])
             .await;
             let map = test_registry();
-            let dest = map.destination(key_for(&server.addr.to_string(), 1000), &test_cfg(), None);
+            let dest = map.get_or_create_destination(
+                key_for(&server.addr.to_string(), 1000),
+                &test_cfg(),
+                None,
+            );
 
             send(&dest, get(b"a")).await.unwrap(); // last_active = now
             map.sweep_idle(Duration::from_millis(50)); // idle ~0ms < 50ms
@@ -414,7 +432,8 @@ mod tests {
     async fn sweep_prunes_dead_entries() {
         run_local(async {
             let map = test_registry();
-            let dest = map.destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
+            let dest =
+                map.get_or_create_destination(key_for("127.0.0.1:9", 1000), &test_cfg(), None);
             assert_eq!(map.destinations.borrow().len(), 1);
 
             drop(dest);
