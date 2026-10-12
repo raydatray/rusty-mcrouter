@@ -12,6 +12,4 @@ pub use config::DestinationConfig;
 pub use destination::{Destination, DestinationSetup};
 pub use key::DestinationKey;
 pub use metrics::{DestinationMetrics, DestinationMetricsRegistry};
-pub use registry::{
-    DestinationAssembler, DestinationAssemblerSetup, DestinationRegistry, DestinationRegistrySetup,
-};
+pub use registry::{DestinationRegistry, DestinationRegistrySetup};
