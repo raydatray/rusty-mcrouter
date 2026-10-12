@@ -2,7 +2,7 @@ use std::future::{pending, Future};
 
 use rusty_mcrouter_backend::destination::DestinationConfig;
 use rusty_mcrouter_backend::error::SendError;
-use rusty_mcrouter_backend::{Backend, BackendFactory, PoolHealth, PreparedSend, TkoRejection};
+use rusty_mcrouter_backend::{Backend, BackendFactory, PoolHealth, TkoRejection};
 use rusty_mcrouter_config::{ConfigDocument, ServerConfig};
 use rusty_mcrouter_protocol::{Reply, Request};
 
@@ -34,9 +34,8 @@ impl Backend for InertBackend {
     fn prepare_send(
         &self,
         _request: Request,
-    ) -> Result<PreparedSend<impl Future<Output = Result<Reply, SendError>> + '_>, TkoRejection>
-    {
-        Ok(PreparedSend::new(pending::<Result<Reply, SendError>>()))
+    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, TkoRejection> {
+        Ok(pending::<Result<Reply, SendError>>())
     }
 }
 

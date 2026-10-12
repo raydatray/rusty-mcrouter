@@ -46,7 +46,7 @@ where
                     context.select_pool(pool);
                 }
 
-                let result = prepared.send().await;
+                let result = prepared.await;
 
                 if let Some(pool) = self.pool {
                     context
@@ -76,7 +76,7 @@ mod tests {
     use super::*;
     use rusty_mcrouter_backend::error::{ProtocolError, RequestError, SendError};
     use rusty_mcrouter_backend::test_support::MockBackend;
-    use rusty_mcrouter_backend::{PreparedSend, TkoRejection};
+    use rusty_mcrouter_backend::TkoRejection;
     use rusty_mcrouter_protocol::test_support::{
         bare_server_error, expect_get_value, get, get_hit, get_miss, server_error, store,
         store_success,
@@ -92,13 +92,13 @@ mod tests {
             &self,
             _request: Request,
         ) -> std::result::Result<
-            PreparedSend<impl Future<Output = std::result::Result<Reply, SendError>> + '_>,
+            impl Future<Output = std::result::Result<Reply, SendError>> + '_,
             TkoRejection,
         > {
-            Ok(PreparedSend::new(async {
+            Ok(async {
                 tokio::time::sleep(Duration::from_millis(2)).await;
                 Ok(get_miss())
-            }))
+            })
         }
     }
 

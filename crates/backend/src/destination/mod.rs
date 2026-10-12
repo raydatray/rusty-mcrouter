@@ -14,7 +14,7 @@ use crate::{
     error::{ConnectError, LocalError, SendError},
     metrics::BackendMetricsShard,
     tko::{DestToken, TkoEvent, TkoTracker},
-    Backend, PreparedSend, TkoRejection,
+    Backend, TkoRejection,
 };
 
 mod config;
@@ -197,8 +197,7 @@ impl Backend for Rc<Destination> {
     fn prepare_send(
         &self,
         request: Request,
-    ) -> Result<PreparedSend<impl Future<Output = Result<Reply, SendError>> + '_>, TkoRejection>
-    {
+    ) -> Result<impl Future<Output = Result<Reply, SendError>> + '_, TkoRejection> {
         self.last_active.set(Instant::now());
         let kind = request.kind();
 
@@ -214,9 +213,7 @@ impl Backend for Rc<Destination> {
             });
         }
 
-        Ok(PreparedSend::new(async move {
-            self.send_prepared(request, kind).await
-        }))
+        Ok(self.send_prepared(request, kind))
     }
 }
 
@@ -252,7 +249,7 @@ mod tests {
 
     async fn send(dest: &Rc<Destination>, request: Request) -> Result<Reply, SendError> {
         match dest.prepare_send(request) {
-            Ok(prepared) => prepared.send().await,
+            Ok(prepared) => prepared.await,
             Err(rejection) => Err(rejection.into()),
         }
     }
