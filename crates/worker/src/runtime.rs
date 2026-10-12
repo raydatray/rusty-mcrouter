@@ -1,6 +1,7 @@
 use std::{net::TcpStream, rc::Rc, sync::Arc};
 
 use anyhow::Context;
+use rusty_mcrouter_backend::destination::DestinationRegistry;
 use rusty_mcrouter_config::ConfigDocument;
 use rusty_mcrouter_core::BuildError;
 use rusty_mcrouter_frontend::{Connection, FrontendConnectionSetup, RoutedRequest};
@@ -31,6 +32,7 @@ impl Drop for BackgroundTasks {
 pub(crate) struct WorkerRuntime {
     context: WorkerContext,
     builder: GenerationBuilder,
+    destinations: Rc<DestinationRegistry>,
     inbox: WorkerInbox,
     tasks: BackgroundTasks,
     route_tasks: JoinSet<()>,
@@ -41,12 +43,14 @@ impl WorkerRuntime {
     pub(crate) fn new(
         context: WorkerContext,
         builder: GenerationBuilder,
+        destinations: Rc<DestinationRegistry>,
         inbox: WorkerInbox,
         tasks: BackgroundTasks,
     ) -> Self {
         Self {
             context,
             builder,
+            destinations,
             inbox,
             tasks,
             route_tasks: JoinSet::new(),
@@ -107,7 +111,7 @@ impl WorkerRuntime {
             generation > self.context.routes.generation,
             "generations only move forward"
         );
-        let next = self.builder.build(generation, config)?;
+        let next = self.builder.build(generation, config, &self.destinations)?;
         self.context.routes = next;
         Ok(())
     }
@@ -207,20 +211,19 @@ mod tests {
             ..DestinationConfig::default()
         };
         let builder = GenerationBuilder::new(GenerationSetup {
-            destinations: map,
             tko_map,
             defaults,
             root_options: RootRouteOptions::default(),
             metrics: RoutingMetricsShard::new(),
             events: noop_sink(),
         });
-        let initial = builder.build(1, &parse(config).unwrap()).unwrap();
+        let initial = builder.build(1, &parse(config).unwrap(), &map).unwrap();
         let context = WorkerContext::solo(handle.clone(), initial, FrontendMetricsShard::new());
         let tasks = BackgroundTasks {
             listener: None,
             sweep: None,
         };
-        let runtime = WorkerRuntime::new(context, builder, inbox, tasks);
+        let runtime = WorkerRuntime::new(context, builder, map, inbox, tasks);
         (runtime, handle)
     }
 
