@@ -99,6 +99,7 @@ impl Destination {
         let inflight = InflightGuard::new(&self.metrics);
         let result = self.conn.send(request).await;
         drop(inflight);
+
         let code = code_of(&result);
         let latency_us = start.elapsed().as_micros() as u64;
 
@@ -120,6 +121,7 @@ impl Destination {
         let inflight = InflightGuard::new(&self.metrics);
         let result = self.conn.send_probe().await;
         drop(inflight);
+
         let code = code_of(&result);
 
         self.handle_tko(code, true);
@@ -167,7 +169,7 @@ impl Destination {
                     _ => ResultCode::ConnectError,
                 };
 
-                self.handle_tko(code, /* is_probe */ false);
+                self.handle_tko(code, false);
             }
         }
     }
