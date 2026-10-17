@@ -5,14 +5,11 @@ use std::{
 
 use rusty_mcrouter_observability_primitives::{Counter, Gauge};
 
-use crate::{
-    classify::{ResultCode, RESULT_CODE_COUNT},
-    tko::TkoTracker,
-};
+use crate::{classify::ResultCode, tko::TkoTracker};
 
 pub struct DestinationMetrics {
     pub tracker: Arc<TkoTracker>,
-    pub requests: [Counter; RESULT_CODE_COUNT],
+    pub requests: [Counter; ResultCode::COUNT],
     pub probes_sent: Gauge,
     pub connects: Counter,
     pub idle_closes: Counter,

@@ -5,28 +5,19 @@ use std::sync::{
 
 use rusty_mcrouter_observability_primitives::Counter;
 
-/// Fail-open hysteresis thresholds: the gate opens when `enter` destinations
-/// are TKO'd (refusing further marks) and closes again once recoveries drain
-/// the count to `exit`. Named fields because two bare u64s in a tuple invite
-/// a silent swap — and a swapped enter/exit inverts the hysteresis.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FailOpenThresholds {
-    /// "upper": TKO'd-destination count at which the pool fails open.
+    /// enter fail-open when another TKO mark would exceed this count
     pub enter: u64,
-    /// "lower": count at which recoveries close the gate again.
+    /// exit fail-open on a recovery at this TKO count
     pub exit: u64,
 }
 
-/// Outcome of asking the gate for a TKO slot. An enum rather than the old
-/// (bool, bool): `Admitted` with `just_entered` was representable nonsense,
-/// and two adjacent bools at a call site say nothing about which is which.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GateDecision {
-    /// Slot reserved: the counter was incremented, the caller may mark.
+    /// TKO count incremented
     Admitted,
-    /// Fail-open refused the mark; nothing was counted. `just_entered` is
-    /// true only for the call that crossed `enter`, so EnterFailOpen can be
-    /// emitted exactly once.
+    /// no increment; `just_entered` means this call enabled fail-open
     Refused { just_entered: bool },
 }
 

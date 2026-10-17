@@ -444,7 +444,7 @@ binary:          creates shards, hands them to both sides
 // the measured leg and the storage shape; this is not per-destination.
 pub struct BackendMetricsShard {
     // monotonic counters
-    pub requests: [[Counter; RESULT_CODE_COUNT]; RequestKind::COUNT],
+    pub requests: [[Counter; ResultCode::COUNT]; RequestKind::COUNT],
     pub latency_us_sum: Counter,
     pub connections_opened: Counter,
     pub connections_closed: Counter,   // incl. idle closes
@@ -498,7 +498,7 @@ struct BackendSource { shards: Vec<Arc<BackendMetricsShard>> }
 
 impl BackendSource {
     fn encode(&self, out: &mut String) {
-        let mut requests = [0u64; RESULT_CODE_COUNT];
+        let mut requests = [0u64; ResultCode::COUNT];
         for shard in &self.shards {
             for (acc, c) in requests.iter_mut().zip(&shard.requests) {
                 *acc += c.load();
@@ -542,7 +542,6 @@ implemented metric inventory (names and labels are API):
 | metric | type | labels |
 |--------|------|--------|
 | `rusty_mcrouter_tko` | gauge | `kind` (soft/hard) — GlobalTkoMetrics |
-| `rusty_mcrouter_suspect_servers` | gauge | — sus_servers scan |
 | `rusty_mcrouter_pool_fail_open` | gauge | `pool` |
 | `rusty_mcrouter_pool_destinations_tko` | gauge | `pool` |
 | `rusty_mcrouter_fail_open_entered_total` / `_exited_total` | counter | `pool` |
