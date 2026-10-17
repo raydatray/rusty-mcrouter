@@ -350,29 +350,21 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_failure_stops_control() {
-        let tko_map = TkoTrackerMap::new(noop_sink());
-        // Invalid tracker construction panics while holding the map lock.
-        // Rendering this real metric state then exercises the supervised panic path.
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tko_map.tracker_for("invalid:1", 0);
-        }))
-        .is_err());
-        let (handle, runtime, _events) = build_runtime(tko_map).await;
+        let (handle, mut runtime, _events) = build_runtime(TkoTrackerMap::new(noop_sink())).await;
         let bound = runtime.bound_addr();
-        let task = tokio::spawn(runtime.run());
         let idle = TcpStream::connect(bound).await.unwrap();
-        let mut stream = TcpStream::connect(bound).await.unwrap();
-        stream
-            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
+        let response = scrape(bound).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+
+        runtime.metrics_task.abort_all();
+        let task = tokio::spawn(runtime.run());
 
         let error = tokio::time::timeout(Duration::from_secs(5), task)
             .await
             .expect("control did not stop after metrics failed")
             .unwrap()
             .unwrap_err();
-        assert!(format!("{error:#}").contains("metrics connection task failed"));
+        assert!(format!("{error:#}").contains("metrics task failed"));
         assert!(handle.workers_ready().await.is_err());
         assert_metrics_stopped(bound, idle).await;
     }

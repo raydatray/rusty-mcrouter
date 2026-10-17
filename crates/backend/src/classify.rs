@@ -12,12 +12,7 @@ pub enum ResultCode {
     BadRequest,
     /// SERVER_ERROR - box answered that its broken
     RemoteError,
-    /// mid-stream connection drop with this request in-flight - the request
-    /// was sent but MAY OR MAY NOT have executed (contrast RemoteError, where
-    /// the server definitively answered). mcrouter folds this into
-    /// REMOTE_ERROR (a carbon-vocabulary limitation); we keep it distinct so
-    /// failover config and stats can tell "server rejected" from "maybe
-    /// executed" - the policy predicates below still treat both like mcrouter
+    /// connection dropped with the request in flight - it may have executed
     ConnectionDropped,
     /// never reached the server or the reply stream is busted
     LocalError,
@@ -30,8 +25,6 @@ pub enum ResultCode {
     /// synthetic fail-fast, the destination was already marked TKO
     Tko,
 }
-
-pub const RESULT_CODE_COUNT: usize = 9;
 
 pub fn code_of(result: &Result<Reply, SendError>) -> ResultCode {
     match result {
@@ -64,17 +57,19 @@ impl SendError {
 }
 
 impl ResultCode {
-    pub const ALL: [ResultCode; RESULT_CODE_COUNT] = [
-        ResultCode::Success,
-        ResultCode::BadRequest,
-        ResultCode::RemoteError,
-        ResultCode::ConnectionDropped,
-        ResultCode::LocalError,
-        ResultCode::ConnectError,
-        ResultCode::ConnectTimeout,
-        ResultCode::Timeout,
-        ResultCode::Tko,
+    pub const ALL: [Self; 9] = [
+        Self::Success,
+        Self::BadRequest,
+        Self::RemoteError,
+        Self::ConnectionDropped,
+        Self::LocalError,
+        Self::ConnectError,
+        Self::ConnectTimeout,
+        Self::Timeout,
+        Self::Tko,
     ];
+
+    pub const COUNT: usize = Self::ALL.len();
 
     pub fn prometheus_label(self) -> &'static str {
         match self {
@@ -161,12 +156,6 @@ mod tests {
     use super::*;
     use crate::error::{LocalError, ProtocolError};
 
-    const ALL: [ResultCode; RESULT_CODE_COUNT] = ResultCode::ALL;
-
-    /// The full SendError -> ResultCode classification table. Every
-    /// constructible error shape appears exactly once; if a variant is added
-    /// this test won't cover it, but the exhaustive match in `code()` will
-    /// refuse to compile until it is classified.
     #[test]
     fn send_error_classification_table() {
         let table: &[(SendError, ResultCode)] = &[
@@ -264,25 +253,24 @@ mod tests {
     /// reason slot round-trips through an AtomicU8).
     #[test]
     fn from_u8_round_trips() {
-        for code in ALL {
+        for code in ResultCode::ALL {
             assert_eq!(ResultCode::from_u8(code as u8), code);
         }
         // out-of-range collapses to Success (never a stale TKO reason)
         assert_eq!(ResultCode::from_u8(200), ResultCode::Success);
     }
 
-    /// RESULT_CODE_COUNT indexes a stats array; every discriminant must fit.
     #[test]
     fn result_code_count_covers_all_discriminants() {
-        for code in ALL {
-            assert!((code as usize) < RESULT_CODE_COUNT, "for {code:?}");
+        for code in ResultCode::ALL {
+            assert!((code as usize) < ResultCode::COUNT, "for {code:?}");
         }
     }
 
     /// The mcrouter McResUtil.h policy sets, as tables.
     #[test]
     fn tko_and_failover_predicate_sets() {
-        for code in ALL {
+        for code in ResultCode::ALL {
             // soft == { Timeout } (McResUtil.h:96)
             assert_eq!(
                 code.is_soft_tko_error(),

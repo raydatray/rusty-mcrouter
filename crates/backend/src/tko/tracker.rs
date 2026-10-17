@@ -86,11 +86,8 @@ impl TkoTracker {
         }
     }
 
-    /// Known limitation, shared with mcrouter (TkoTracker.cpp:69-70, :88-89):
-    /// marks and unmarks go through whichever gate is attached at that moment,
-    /// so a server that is TKO'd while a reload moves it to another gated pool
-    /// is unmarked against the new gate, and the old gate keeps the mark.
-    /// See docs/design/0002-config-reload.md §known limitations.
+    /// TODO: replacing the pool while TKO'd leaves the mark in the old pool,
+    /// but recovery decrements the new pool
     pub(crate) fn set_pool_tracker(&self, pool: Arc<PoolTkoTracker>) {
         *self.pool.lock().unwrap() = Some(pool)
     }

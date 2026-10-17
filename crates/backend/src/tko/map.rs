@@ -8,8 +8,9 @@ use crate::tko::{
 };
 
 pub struct TkoTrackerMap {
+    // server address (host:port) to tracker
     trackers: Mutex<HashMap<Arc<str>, Weak<TkoTracker>>>,
-    // by name, like mcrouter (TkoTracker.cpp:281-298): PoolIds renumber on reload
+    // pool name to tracker
     pool_trackers: Mutex<HashMap<Arc<str>, Weak<PoolTkoTracker>>>,
     metrics: Arc<GlobalTkoMetrics>,
     sink: TkoEventSink,
@@ -48,8 +49,8 @@ impl TkoTrackerMap {
         tracker
     }
 
-    /// A live gate is returned as-is, keeping its state and its original
-    /// thresholds (mcrouter semantics).
+    /// reuse a live tracker for this pool_name, thresholds are only applied
+    /// when creating a new tracker
     pub fn pool_tracker_for(
         self: &Arc<Self>,
         pool_name: &str,
@@ -66,24 +67,6 @@ impl TkoTrackerMap {
         pools.insert(name, Arc::downgrade(&tracker));
 
         tracker
-    }
-
-    pub fn sus_servers(&self) -> Vec<(Arc<str>, bool, u64)> {
-        let trackers: Vec<_> = self
-            .trackers
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|(key, weak)| weak.upgrade().map(|t| (Arc::clone(key), t)))
-            .collect();
-
-        trackers
-            .into_iter()
-            .filter_map(|(key, t)| {
-                let failures = t.consecutive_failures();
-                (failures > 0).then(|| (key, t.is_tko(), failures))
-            })
-            .collect()
     }
 
     pub fn pool_snapshot(&self) -> Vec<Arc<PoolTkoTracker>> {
@@ -202,29 +185,10 @@ mod tests {
         assert_eq!(map.pool_trackers.lock().unwrap().len(), 1);
     }
 
-    #[test]
-    fn sus_servers_reports_only_failing_trackers() {
-        let allocator = DestTokenAllocator::new();
-        let map = TkoTrackerMap::new(noop_sink());
-        let bad = map.tracker_for("bad:1", 3);
-        let _good = map.tracker_for("good:1", 3);
-        assert!(!bad.record_soft_failure(allocator.allocate(), ResultCode::Timeout));
-
-        let sus = map.sus_servers();
-        assert_eq!(sus.len(), 1);
-        assert_eq!(&*sus[0].0, "bad:1");
-        assert!(!sus[0].1, "one failure of three is suspect, not TKO");
-        assert_eq!(sus[0].2, 1);
-    }
-
     // ── contention suite: std::thread, no tokio ─────────────────────────
 
     use crate::tko::TkoEvent;
-    use std::sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        mpsc, Barrier,
-    };
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     /// THE invariant the whole encoding exists for: across N threads
     /// hammering soft failures with distinct tokens, every TKO episode has
@@ -402,60 +366,5 @@ mod tests {
         assert!(tracker.is_hard_tko());
         assert!(tracker.record_success(tokens[winner_idx.load(Ordering::SeqCst)]));
         assert_eq!(map.global_metrics().total(), 0);
-    }
-
-    #[test]
-    fn sus_servers_does_not_deadlock_with_final_owner_drops() {
-        let allocator = Arc::new(DestTokenAllocator::new());
-        const WORKERS: usize = 4;
-        const ROUNDS: usize = 5_000;
-
-        let map = TkoTrackerMap::new(noop_sink());
-        let active = Arc::new(AtomicUsize::new(WORKERS));
-        let start = Arc::new(Barrier::new(WORKERS + 1));
-        let (done_tx, done_rx) = mpsc::channel();
-        let mut threads = Vec::with_capacity(WORKERS + 1);
-
-        for worker in 0..WORKERS {
-            let allocator = Arc::clone(&allocator);
-            let map = Arc::clone(&map);
-            let active = Arc::clone(&active);
-            let start = Arc::clone(&start);
-            let done_tx = done_tx.clone();
-            threads.push(std::thread::spawn(move || {
-                start.wait();
-                for round in 0..ROUNDS {
-                    let tracker = map.tracker_for(&format!("churn:{worker}:{round}"), 3);
-                    tracker.record_soft_failure(allocator.allocate(), ResultCode::Timeout);
-                    std::thread::yield_now();
-                    drop(tracker);
-                }
-                active.fetch_sub(1, Ordering::SeqCst);
-                done_tx.send(()).unwrap();
-            }));
-        }
-
-        let scan_map = Arc::clone(&map);
-        let scan_active = Arc::clone(&active);
-        let scan_start = Arc::clone(&start);
-        let scan_done = done_tx.clone();
-        threads.push(std::thread::spawn(move || {
-            scan_start.wait();
-            while scan_active.load(Ordering::SeqCst) != 0 {
-                let _ = scan_map.sus_servers();
-                std::thread::yield_now();
-            }
-            scan_done.send(()).unwrap();
-        }));
-        drop(done_tx);
-
-        for _ in 0..WORKERS + 1 {
-            done_rx
-                .recv_timeout(Duration::from_secs(10))
-                .expect("tracker churn and suspect scans must not deadlock");
-        }
-        for thread in threads {
-            thread.join().unwrap();
-        }
     }
 }

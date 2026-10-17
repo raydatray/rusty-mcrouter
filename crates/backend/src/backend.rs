@@ -38,12 +38,7 @@ pub struct PoolFailOpen<'a> {
     pub thresholds: FailOpenThresholds,
 }
 
-/// Constructs a [`Backend`] for a server address — the seam that lets the
-/// route builder run over mock backends without opening sockets.
-///
-/// SYNC and I/O-free: connections are lazy, so building a route graph over a
-/// dead server succeeds — the server just starts life failing (and TKOs).
-/// Address shape is validated by `rusty-mcrouter-config`.
+/// constructs a backend without opening a connection
 pub trait BackendFactory {
     type Backend: Backend;
 
@@ -55,8 +50,8 @@ pub trait BackendFactory {
     ) -> Self::Backend;
 }
 
-/// Production route-generation factory, deduplicating destinations through
-/// the worker's registry and sharing TKO trackers across workers.
+/// production route-generation factory, deduplicating destinations through
+/// the worker's registry and sharing TKO trackers across workers
 pub struct DestinationFactory<'a> {
     destinations: &'a DestinationRegistry,
     tko_map: Arc<TkoTrackerMap>,
@@ -74,6 +69,7 @@ impl<'a> DestinationFactory<'a> {
 
     fn pool_gate(&self, fail_open: Option<PoolFailOpen<'_>>) -> Option<Arc<PoolTkoTracker>> {
         let config = fail_open?;
+
         if let Some(gate) = self.pool_gates.borrow().get(config.name) {
             return Some(Arc::clone(gate));
         }
@@ -81,9 +77,11 @@ impl<'a> DestinationFactory<'a> {
         let gate = self
             .tko_map
             .pool_tracker_for(config.name, config.thresholds);
+
         self.pool_gates
             .borrow_mut()
             .insert(Arc::clone(gate.name()), Arc::clone(&gate));
+
         Some(gate)
     }
 }
@@ -101,6 +99,7 @@ impl BackendFactory for DestinationFactory<'_> {
             addr: Arc::from(server.access_point()),
             reply_timeout: cfg.reply_timeout,
         };
+
         self.destinations
             .get_or_create_destination(key, cfg, self.pool_gate(fail_open))
     }

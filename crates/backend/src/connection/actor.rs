@@ -202,10 +202,8 @@ impl Connection {
                     Ok(n) => {
                         self.shard_metrics.bytes_read.add(n as u64);
 
-
                         if let Err(e) = self.with_depth_gauges(Self::deliver_replies) {
-                            self.with_depth_gauges(|c| {c.fail_inflight(SendError::Protocol(e));
-                            });
+                            self.with_depth_gauges(|c| c.fail_inflight(SendError::Protocol(e)));
 
                             return PipelineExit::Down(DownReason::Protocol);
                         }
