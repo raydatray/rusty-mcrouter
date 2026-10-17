@@ -89,6 +89,7 @@ impl Connection {
 
                     self.events
                         .handle(ConnectionEvent::Down(DownReason::ConnectFailed(err)));
+
                     continue 'lifecycle;
                 }
             };
@@ -121,12 +122,14 @@ impl Connection {
 
         loop {
             let attempt = TcpStream::connect(&*self.addr);
+
             let result = match self.cfg.connect_timeout {
                 Some(dur) => match tokio::time::timeout(dur, attempt).await {
                     Ok(res) => res,
                     Err(_elapsed) if retries_left > 0 => {
                         retries_left -= 1;
                         self.shard_metrics.connect_retries.inc();
+
                         continue;
                     }
                     Err(_elapsed) => return Err(ConnectError::Timeout),
@@ -139,6 +142,7 @@ impl Connection {
                     if retries_left < self.cfg.connect_timeout_retries {
                         self.shard_metrics.connect_success_after_retry.inc();
                     }
+
                     return Ok(stream);
                 }
                 // refused/retry/unreachable/resolution failure - immediately
@@ -161,6 +165,7 @@ impl Connection {
 
         loop {
             let deadline = self.next_deadline();
+
             tokio::select! {
                 maybe_cmd = self.rx.recv() => match maybe_cmd {
                     Some(ConnectionCommand::Command(cmd)) => {
@@ -181,6 +186,7 @@ impl Connection {
                             // Their replies belong to the old stream and must not
                             // become expectations on the replacement connection.
                             self.with_depth_gauges(|c| c.inflight.clear());
+
                             return PipelineExit::Closed;
                         }
                     }
@@ -196,10 +202,9 @@ impl Connection {
                     Ok(n) => {
                         self.shard_metrics.bytes_read.add(n as u64);
 
-
                         if let Err(e) = self.with_depth_gauges(Self::deliver_replies) {
-                            self.with_depth_gauges(|c| {c.fail_inflight(SendError::Protocol(e));
-                            });
+                            self.with_depth_gauges(|c| c.fail_inflight(SendError::Protocol(e)));
+
                             return PipelineExit::Down(DownReason::Protocol);
                         }
                     }
@@ -209,7 +214,8 @@ impl Connection {
                     Err(e) => return PipelineExit::Down(DownReason::Stream(e.kind())),
                 },
                 _ = sleep_until(deadline.unwrap_or_else(far_future)), if deadline.is_some() => {
-                    self.with_depth_gauges(Self::expire_deadlines);                }
+                    self.with_depth_gauges(Self::expire_deadlines);
+                }
             }
         }
     }
@@ -242,6 +248,7 @@ impl Connection {
                                 let _ = command
                                     .reply_tx
                                     .send(Err(SendError::Local(LocalError::Encode(err))));
+
                                 continue;
                             }
                         }
@@ -253,6 +260,7 @@ impl Connection {
                     reply_tx: Some(command.reply_tx),
                     deadline: command.deadline,
                 });
+
                 encoded += 1;
             }
             encoded

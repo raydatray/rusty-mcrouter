@@ -4,7 +4,7 @@ use rusty_mcrouter_observability_primitives::prometheus::{MetricsSource, Metrics
 use rusty_mcrouter_observability_primitives::{Counter, Gauge};
 use rusty_mcrouter_protocol::RequestKind;
 
-use crate::classify::{ResultCode, RESULT_CODE_COUNT};
+use crate::classify::ResultCode;
 use crate::destination::DestinationMetricsRegistry;
 use crate::tko::TkoTrackerMap;
 
@@ -14,7 +14,7 @@ use crate::tko::TkoTrackerMap;
 // thread's shards share one cache line
 pub struct BackendMetricsShard {
     // monotonic counters
-    pub requests: [[Counter; RESULT_CODE_COUNT]; RequestKind::COUNT],
+    pub requests: [[Counter; ResultCode::COUNT]; RequestKind::COUNT],
     pub latency_us_sum: Counter,
     pub connections_opened: Counter,
     pub connections_closed: Counter,
@@ -150,11 +150,6 @@ impl MetricsSource for TkoTrackerMap {
             "rusty_mcrouter_tko",
             &[("kind", "hard")],
             global.hard_tkos.load(),
-        );
-        out.gauge(
-            "rusty_mcrouter_suspect_servers",
-            &[],
-            self.sus_servers().len() as i64,
         );
 
         for gate in self.pool_snapshot() {
@@ -320,8 +315,6 @@ mod tests {
         );
     }
 
-    /// RequestKind::COUNT indexes the counter array; every discriminant must
-    /// fit. (same pattern as classify.rs's RESULT_CODE_COUNT test)
     #[test]
     fn request_kind_discriminants_fit_the_array() {
         for kind in RequestKind::ALL {
@@ -335,14 +328,14 @@ mod tests {
     fn every_command_result_cell_is_distinct() {
         let metrics = BackendMetricsShard::new();
         for kind in 0..RequestKind::COUNT {
-            for code in 0..RESULT_CODE_COUNT {
+            for code in 0..ResultCode::COUNT {
                 let cell = &metrics.requests[kind][code];
                 assert_eq!(cell.load(), 0);
                 cell.inc();
             }
         }
         let total: u64 = metrics.requests.iter().flatten().map(Counter::load).sum();
-        assert_eq!(total, (RequestKind::COUNT * RESULT_CODE_COUNT) as u64);
+        assert_eq!(total, (RequestKind::COUNT * ResultCode::COUNT) as u64);
     }
 
     #[test]

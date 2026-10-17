@@ -12,9 +12,7 @@ pub struct DestinationConfig {
 }
 
 impl Default for DestinationConfig {
-    /// mcrouter's defaults (mcrouter_options_list.h): server_timeout 1000ms
-    /// (connect_timeout defaults to it), 0 connect retries, 3 failures to
-    /// TKO, probes from 10s backing off to 60s, tracking enabled.
+    /// mcrouter's defaults (mcrouter_options_list.h)
     fn default() -> Self {
         Self {
             connect_timeout: Duration::from_millis(1000),

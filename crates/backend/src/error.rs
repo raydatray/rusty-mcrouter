@@ -20,13 +20,6 @@ pub enum SendError {
     Request(#[from] RequestError),
 
     /// the reply stream is not trustworthy - kill it
-    ///
-    /// NOTE: classifies as ResultCode::LocalError, NOT RemoteError, even
-    /// though the server sent the garbage. The request surface says "no
-    /// trustworthy verdict on YOUR request" (still failover-eligible); the
-    /// server-is-broken verdict travels separately via the connection
-    /// teardown -> ConnEvent::Down -> hard TKO. Reclassifying to RemoteError
-    /// would double-count the failure. Do not "fix" this.
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
 
@@ -43,11 +36,7 @@ pub enum LocalError {
     #[error("encode: {0}")]
     Encode(#[from] MetaRequestEncodeError),
 
-    /// bounded pending queue is full - fail fast and direct request to another
-    /// backend if eligible. DELIBERATE: classifies as LocalError, which is in
-    /// the default failover set - a saturated-but-healthy primary sheds
-    /// overflow to failover children (faithful to mcrouter). If this fires in
-    /// production, look at capacity, not this enum.
+    /// bounded pending queue is full; fail fast and allow failover
     #[error("pending queue full")]
     QueueFull,
 

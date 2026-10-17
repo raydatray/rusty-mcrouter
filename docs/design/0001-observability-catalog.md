@@ -57,7 +57,7 @@ blanket rules applied throughout:
 |----------|----------|-------|
 | num_client_connections | port | gauge `rusty_mcrouter_client_connections` |
 | num_servers{,_new,_up,_down,_closed} | defer | destination-up and TKO metrics ship; aggregate server-state families do not |
-| num_suspect_servers | port | gauge, straight from `sus_servers` scan |
+| num_suspect_servers | n/a | omit the consecutive-failure snapshot count; use per-destination error rates for early warning and destination-up / TKO gauges for current TKO state |
 | num_connections_opened / _closed | port | counters; we already count connects + idle_closes per destination |
 | num_connect_retries, num_connect_success_after_retrying | port | counters; connect-retry path exists |
 | num_ssl_* (10), num_tls_to_plain_* (5), num_ktls_* (5) | n/a | no TLS. revisit wholesale if TLS ships |

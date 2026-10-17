@@ -59,15 +59,14 @@ impl ConnectionHandle {
                 TrySendError::Full(_) => SendError::Local(crate::error::LocalError::QueueFull),
                 TrySendError::Closed(_) => SendError::Local(crate::error::LocalError::Shutdown),
             })?;
+
         reply_rx
             .await
             .unwrap_or(Err(SendError::Local(crate::error::LocalError::Shutdown)))
     }
 
-    /// Fire-and-forget from the idle sweep. try_send, not send: the async
-    /// send would need an await (the previous version dropped its future
-    /// unawaited, sending nothing), and a full queue is proof we're not
-    /// idle anyway.
+    /// best effort idle-close request, don't wait for channel capacity, a
+    /// later sweep can retry if the queue is full
     pub(crate) fn close_idle(&self) {
         let _ = self.tx.try_send(ConnectionCommand::CloseIdle);
     }
